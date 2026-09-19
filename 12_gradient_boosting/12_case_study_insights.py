@@ -313,9 +313,9 @@ show_with_alt(
 # Aggregate: which loss achieves the highest of the three on each CS?
 loss_top_per_cs = (
     loss_best.sort("ic_mean_daily", descending=True, nulls_last=True)
-    .group_by("short_name")
+    .group_by("short_name", maintain_order=True)
     .first()
-    .group_by("loss")
+    .group_by("loss", maintain_order=True)
     .len()
     .rename({"len": "n_cs_with_highest_ic"})
     .sort("n_cs_with_highest_ic", descending=True)
@@ -349,7 +349,7 @@ display(
 # %%
 depth_pivot = (
     grid_regression.filter(pl.col("leaves").is_not_null())
-    .group_by(["short_name", "leaves"])
+    .group_by(["short_name", "leaves"], maintain_order=True)
     .agg(pl.col("ic_mean_daily").max().alias("ic"))
     .sort(["short_name", "leaves"])
 )
@@ -392,7 +392,7 @@ show_with_alt(
 
 # %%
 depth_spread = (
-    depth_pivot.group_by("short_name")
+    depth_pivot.group_by("short_name", maintain_order=True)
     .agg(
         min_ic=pl.col("ic").min(),
         max_ic=pl.col("ic").max(),
@@ -438,7 +438,7 @@ print(
 # %%
 # Ordered by the iteration of each case study's peak IC, ties by peak magnitude.
 peak_table = (
-    ckpt_df.group_by("short_name")
+    ckpt_df.group_by("short_name", maintain_order=True)
     .agg(
         pl.col("iteration")
         .filter(pl.col("ic_mean") == pl.col("ic_mean").max())
@@ -512,7 +512,7 @@ display(
 # %%
 gbm_fold = collect_fold_ic_per_cs(gbm_rank1)
 gbm_fold_summary = (
-    gbm_fold.group_by(["case_study", "short_name"])
+    gbm_fold.group_by(["case_study", "short_name"], maintain_order=True)
     .agg(
         n_folds=pl.col("ic").count(),
         median=pl.col("ic").median(),
@@ -1051,7 +1051,10 @@ plot_horizon = gbm_horizon.with_columns(
     horizon_days=pl.col("label").replace_strict(HORIZON_DAYS, default=None).cast(pl.Float64),
 ).filter(pl.col("horizon_days").is_not_null())
 multi_cs = (
-    plot_horizon.group_by("short_name").len().filter(pl.col("len") >= 2)["short_name"].to_list()
+    plot_horizon.group_by("short_name", maintain_order=True)
+    .len()
+    .filter(pl.col("len") >= 2)["short_name"]
+    .to_list()
 )
 plot_horizon = plot_horizon.filter(pl.col("short_name").is_in(multi_cs))
 
@@ -1103,7 +1106,7 @@ if plot_horizon.height > 0:
 
 # %%
 horizon_ranges = (
-    plot_horizon.group_by("short_name")
+    plot_horizon.group_by("short_name", maintain_order=True)
     .agg(
         n_horizons=pl.len(),
         min_ic=pl.col("ic_mean_daily").min(),
@@ -1437,7 +1440,7 @@ def _load_linear_importance(cs: str, training_hash: str) -> dict[str, float]:
         return {}
     return dict(
         pl.DataFrame(rows)
-        .group_by("feature")
+        .group_by("feature", maintain_order=True)
         .agg(pl.col("abs_coef").mean())
         .filter(pl.col("abs_coef") > ZERO_TOL)
         .sort("abs_coef", descending=True)
@@ -1455,7 +1458,9 @@ def _feature_ranks(
     linear_imp: dict[str, float],
 ) -> tuple[dict[str, int], dict[str, int]]:
     gbm_imp = dict(
-        gbm_imp_df.group_by("feature").agg(pl.col("importance").mean().alias("imp")).iter_rows()
+        gbm_imp_df.group_by("feature", maintain_order=True)
+        .agg(pl.col("importance").mean().alias("imp"))
+        .iter_rows()
     )
     # Ties break by feature name rather than by set iteration order: gain importances tie
     # readily, and with per-process string hashing the same registries produced different
@@ -1642,7 +1647,7 @@ def feature_rank_stability(cs: str) -> dict | None:
     if gbm_imp_df.is_empty():
         return None
     top_features = (
-        gbm_imp_df.group_by("feature")
+        gbm_imp_df.group_by("feature", maintain_order=True)
         .agg(pl.col("importance").mean().alias("mean_imp"))
         .sort(["mean_imp", "feature"], descending=[True, False])
         .head(10)["feature"]
@@ -1650,7 +1655,7 @@ def feature_rank_stability(cs: str) -> dict | None:
     )
     sub = (
         gbm_imp_df.filter(pl.col("feature").is_in(top_features))
-        .group_by(["feature", "fold_id"])
+        .group_by(["feature", "fold_id"], maintain_order=True)
         .agg(pl.col("importance").mean())
     )
     pivot = sub.pivot(index="feature", on="fold_id", values="importance").drop_nulls()
