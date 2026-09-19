@@ -89,6 +89,10 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 POPULATION_SUFFIX = "v1"
+# None means the width `setup.yaml` declares; an int overrides it. Declared here because
+# papermill only binds a name the parameters cell already holds - a run that passes
+# TOP_N_PREDICTIONS to a notebook without it sweeps the declared width and exits 0.
+TOP_N_PREDICTIONS: int | None = None
 # Left empty, and it stays empty. The registry was reset for the stage-04 holdout rebuild, so
 # every name below is published at generation one and there is nothing to supersede. A
 # declaration is only needed when a re-run changes an existing name's membership: the refusal
@@ -194,7 +198,9 @@ else:
         for label in labels
     }
 
-top_n = get_top_n_predictions("crypto_perps_funding", "allocation")
+if TOP_N_PREDICTIONS is None:
+    TOP_N_PREDICTIONS = get_top_n_predictions("crypto_perps_funding", "allocation")
+top_n = TOP_N_PREDICTIONS
 # `vertical_relaxed`, because `checkpoint_value` is Null-typed for a label whose survivors
 # are all final-checkpoint models and Int64 for one that advanced a boosted model on a
 # numbered checkpoint. Both are the same column meaning the same thing; a strict concat

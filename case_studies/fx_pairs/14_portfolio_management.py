@@ -353,7 +353,20 @@ if any(result.registry_record()["stage"] != "signal" for result in baseline_resu
 # the selection was made from, not the set that exists now.
 
 # %% tags=["results"]
-top_n = TOP_N_CONFIGS or get_top_n_predictions(CASE_STUDY_ID, "allocation")
+# Two names reach this width. `TOP_N_CONFIGS` is this notebook's own and predates the
+# override every other allocation notebook takes; `TOP_N_PREDICTIONS` is that shared one, and
+# before this it was read only by the narrowing guard above - so a launcher passing it got a
+# run that published under its own population name and still swept the declared width, with no
+# `Passed unknown parameter` line to show for it. Either name sets the width now, and giving
+# both different values raises rather than picking one.
+if TOP_N_CONFIGS and TOP_N_PREDICTIONS is not None and TOP_N_CONFIGS != TOP_N_PREDICTIONS:
+    raise ValueError(
+        f"TOP_N_CONFIGS={TOP_N_CONFIGS} and TOP_N_PREDICTIONS={TOP_N_PREDICTIONS} both set the "
+        "allocation width and disagree; pass one"
+    )
+if TOP_N_PREDICTIONS is None:
+    TOP_N_PREDICTIONS = TOP_N_CONFIGS or get_top_n_predictions(CASE_STUDY_ID, "allocation")
+top_n = TOP_N_PREDICTIONS
 selected_baselines: dict[str, list[BacktestResult]] = {}
 candidate_sets: dict[str, CandidateSet] = {}
 

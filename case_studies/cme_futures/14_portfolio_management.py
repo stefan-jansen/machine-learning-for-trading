@@ -108,6 +108,10 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
 PREVIEW_LABELS: list[str] = []
 PREVIEW_MAX_BASELINE_ROWS = 0
+# None means the width `setup.yaml` declares; an int overrides it. Declared here because
+# papermill only binds a name the parameters cell already holds - a run that passes
+# TOP_N_PREDICTIONS to a notebook without it sweeps the declared width and exits 0.
+TOP_N_PREDICTIONS: int | None = None
 
 # The allocation population is immutable under its name, so a run whose members have moved has
 # to say which generation it retires. Anything upstream that changes a backtest identity moves
@@ -181,13 +185,19 @@ universe
 # `shortlist_signal_configurations` refuses - correctly, since silently returning fewer is the
 # quiet shrinking that strictness exists to prevent. The preview therefore declares its own
 # width, and is held to it just as strictly.
+#
+# `TOP_N_PREDICTIONS` overrides both, which is how a sweep runs wider than the shipped
+# declaration. It is held to its width the same way: a number the pool cannot fill raises here
+# rather than quietly shrinking.
 
 # %%
-shortlist_size = (
-    get_top_n_predictions("cme_futures", "allocation")
-    if EXECUTION_TIER == "canonical"
-    else PREVIEW_MAX_BASELINE_ROWS
-)
+if TOP_N_PREDICTIONS is None:
+    TOP_N_PREDICTIONS = (
+        get_top_n_predictions("cme_futures", "allocation")
+        if EXECUTION_TIER == "canonical"
+        else PREVIEW_MAX_BASELINE_ROWS
+    )
+shortlist_size = TOP_N_PREDICTIONS
 allocators = get_allocators("cme_futures")
 if not allocators:
     raise ValueError("the configured allocator population is empty")
