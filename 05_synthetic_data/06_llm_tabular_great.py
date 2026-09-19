@@ -751,22 +751,32 @@ else:
 # %% [markdown]
 # ### The single AUC above is a draw, not a measurement
 #
-# `great.sample()` draws with temperature, so each execution trains the downstream
-# classifier on a different 500 rows and earns a different AUC on the same held-out real
-# rows. Earlier executions of this notebook at this seed returned TSTR AUCs of 0.70, 0.30
-# and 0.78 - a spread wide enough to contain "synthetic training data preserves
-# downstream utility" and its negation. Those three also differed in the real sample they
-# were built on, because the loader iterated `Series.unique` and sorted on a tied
-# timestamp, so they confound three sources of movement and are quoted here only to say
-# that the quantity moves.
+# `great.sample()` draws with temperature, so one 500-row sample is not the generator and
+# an AUC earned on it is not the method's. Earlier executions of this notebook at this
+# seed returned TSTR AUCs of 0.70, 0.30 and 0.78 - a spread wide enough to contain
+# "synthetic training data preserves downstream utility" and its negation.
+#
+# Those three executions were not reproducible, and the reason was not the temperature.
+# The loader iterated `Series.unique`, which defines no order, and sorted on a timestamp
+# a hundred ETFs share, so each execution was built on a different real sample. With the
+# sample determined, `set_global_seeds(SEED)` is enough: two consecutive executions of
+# this notebook on one machine now return the same five draws to the digit, and differ
+# only in the wall-clock strings the progress bars print. The variability below is a
+# property of the generator that a reader can reproduce, not an accident of the run.
 #
 # The cell below separates them. It holds the real sample fixed, holds the fine-tune
 # fixed, and repeats only the generator's draw `TSTR_DRAWS` times, so the spread it
-# reports is the sampling variance alone. The fine-tune is done once and is the expensive
-# part; each further draw is one sampling pass plus one classifier fit. `be_great`
-# exposes no seed or generator on `sample()`, so the draw cannot be pinned through the
-# public API - and pinning it would publish a stable number while hiding the variance
-# that is the thing worth teaching here.
+# reports is the sampling variance alone. Sampling is what it costs, not the fit: measured
+# 2026-09-19, one 500-row pass takes around 330 s, so `TSTR_DRAWS` passes are most of the
+# notebook's runtime whenever `RETRAIN` is False and a checkpoint is already on disk - that
+# cell then takes under two seconds. On a cold checkpoint the fit dominates instead and the
+# draws are the cheap part. Cost the run by which of the two it is.
+#
+# `be_great` exposes no seed or generator argument on `sample()`, so the draws cannot be
+# pinned one by one; what pins them is the global torch seed set above, and only once
+# everything upstream of it is determined too. Five draws are reported rather than one
+# because a single number, reproducible or not, says nothing about how much of it is the
+# method and how much is one sample from it.
 
 
 # %%
@@ -782,7 +792,14 @@ def tstr_auc_for_draw(frame):
         return None
     model = GradientBoostingClassifier(n_estimators=50, max_depth=3, random_state=42)
     model.fit(X_draw, y_draw)
-    return float(roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]))
+    try:
+        return float(roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]))
+    except ValueError:
+        # The single-draw cell above guards the identical call on the same `y_test`, so a
+        # one-class test split prints "AUC calculation error" there and must not abort the
+        # notebook here. Reachable by shrinking N_SAMPLES while N_GENERATE still clears the
+        # gate above.
+        return None
 
 
 # The first draw is the sample already generated above, so only the rest are new.
@@ -833,7 +850,9 @@ else:
 # of the TSTR result belongs to the method and how much to one sample from it. A range
 # that straddles one-half means the notebook cannot claim the synthetic data preserves
 # downstream utility on this task, however favourable the draw printed above happened to
-# be; a range that sits clear of one-half means it can. Two things would narrow it: a
+# be; a range that sits clear of one-half means it can. The range here does straddle it,
+# and the draws are reproducible, so that is a finding about the generator rather than
+# about this execution. Two things would narrow it: a
 # longer fine-tune, and generating more than 500 rows per draw so each downstream
 # classifier sees a larger training set.
 
