@@ -117,21 +117,25 @@ pipelines uses Qwen2.5-7B via a vLLM-compatible endpoint.
 ## References
 
 - **Abhinav Arun et al.** (2025). [FinReflectKG -- MultiHop: Financial QA Benchmark for Reasoning with Knowledge Graph Evidence](https://doi.org/10.48550/arXiv.2510.02906).
-- **Chanyeol Choi et al.** (2025). [FinDER: Financial Dataset for Question Answering and Evaluating Retrieval-Augmented Generation](https://doi.org/10.48550/arXiv.2504.15800).
-- **Darren Edge et al.** (2025). [From Local to Global: A Graph RAG Approach to Query-Focused Summarization](https://doi.org/10.48550/arXiv.2404.16130).
-- **Sarah Elhammadi et al.** (2020). [A High Precision Pipeline for Financial Knowledge Graph Construction](https://doi.org/10.18653/v1/2020.coling-main.84). *International Committee on Computational Linguistics*.
-- **Robin Greenwood and David Thesmar** (2011). [Stock price fragility](https://doi.org/10.1016/j.jfineco.2011.06.003). *Journal of Financial Economics*.
+- **Abhinav Arun et al.** (2025). [FinReflectKG: Agentic Construction and Evaluation of Financial Knowledge Graphs](https://doi.org/10.1145/3768292.3770363). *Association for Computing Machinery*.
 - **Andrew G. Haldane and Robert M. May** (2011). [Systemic risk in banking ecosystems](https://doi.org/10.1038/nature09659). *Nature*.
-- **William L. Hamilton et al.** (2018). [Inductive Representation Learning on Large Graphs](https://doi.org/10.48550/arXiv.1706.02216).
-- **Natthawut Kertkeidkachorn et al.** (2023). [FinKG: A Core Financial Knowledge Graph for Financial Analysis](https://doi.org/10.1109/ICSC56153.2023.00020).
-- **Thomas N. Kipf and Max Welling** (2017). [Semi-Supervised Classification with Graph Convolutional Networks](https://doi.org/10.48550/arXiv.1609.02907).
-- **Gueorgui S. Konstantinov et al.** (2023). [Financial Networks and Portfolio Management](https://doi.org/10.3905/jpm.2023.1.525). *The Journal of Portfolio Management*.
-- **Gueorgui S. Konstantinov and Frank J. Fabozzi** (2025). [When Factors Collide: Mapping Causal Spillovers across Global Asset Networks](https://doi.org/10.3905/jpm.2025.1.795). *The Journal of Portfolio Management*.
-- **Patrick Lewis et al.** (2021). [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://doi.org/10.48550/arXiv.2005.11401).
-- **R. N. Mantegna** (1999). [Information and hierarchical structure in financial markets](https://doi.org/10.1016/S0010-4655(99)00302-1). *Computer Physics Communications*.
-- **Gautier Marti et al.** (2021). [A Review of Two Decades of Correlations, Hierarchies, Networks and Clustering in Financial Markets](https://doi.org/10.1007/978-3-030-65459-7_10). *Springer International Publishing*.
-- **Rui Miao et al.** (2019). [A Dynamic Financial Knowledge Graph Based on Reinforcement Learning and Transfer Learning](https://doi.org/10.1109/BigData47090.2019.9005691).
 - **Boci Peng et al.** (2024). [Graph Retrieval-Augmented Generation: A Survey](https://doi.org/10.48550/arXiv.2408.08921).
-- **Petar Veličković et al.** (2018). [Graph Attention Networks](https://doi.org/10.48550/arXiv.1710.10903).
+- **Chanyeol Choi et al.** (2025). [FinDER: Financial Dataset for Question Answering and Evaluating Retrieval-Augmented Generation](https://doi.org/10.48550/arXiv.2504.15800).
+- [Connected Stocks - ANTÓN - 2014 - The Journal of Finance - Wiley Online Library](https://onlinelibrary.wiley.com/doi/10.1111/jofi.12149?saml_referrer).
+- **Darren Edge et al.** (2025). [From Local to Global: A Graph RAG Approach to Query-Focused Summarization](https://doi.org/10.48550/arXiv.2404.16130).
+- **Dawei Cheng et al.** (2020). [Knowledge Graph-based Event Embedding Framework for Financial Quantitative Investments](https://doi.org/10.1145/3397271.3401427). *Association for Computing Machinery*.
+- **Gautier Marti et al.** (2021). [A Review of Two Decades of Correlations, Hierarchies, Networks and Clustering in Financial Markets](https://doi.org/10.1007/978-3-030-65459-7_10). *Springer International Publishing*.
+- **Gueorgui S. Konstantinov and Frank J. Fabozzi** (2025). [When Factors Collide: Mapping Causal Spillovers across Global Asset Networks](https://doi.org/10.3905/jpm.2025.1.795). *The Journal of Portfolio Management*.
+- **Gueorgui S. Konstantinov et al.** (2023). [Financial Networks and Portfolio Management](https://doi.org/10.3905/jpm.2023.1.525). *The Journal of Portfolio Management*.
 - **Mark Weber et al.** (2019). [Anti-Money Laundering in Bitcoin: Experimenting with Graph Convolutional Networks for Financial Forensics](https://doi.org/10.48550/arXiv.1908.02591).
+- **Natthawut Kertkeidkachorn et al.** (2023). [FinKG: A Core Financial Knowledge Graph for Financial Analysis](https://doi.org/10.1109/ICSC56153.2023.00020).
+- **Patrick Lewis et al.** (2021). [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://doi.org/10.48550/arXiv.2005.11401).
+- **Petar Veličković et al.** (2018). [Graph Attention Networks](https://doi.org/10.48550/arXiv.1710.10903).
+- **R. N. Mantegna** (1999). [Information and hierarchical structure in financial markets](https://doi.org/10.1016/S0010-4655(99)00302-1). *Computer Physics Communications*.
+- **Robin Greenwood and David Thesmar** (2011). [Stock price fragility](https://doi.org/10.1016/j.jfineco.2011.06.003). *Journal of Financial Economics*.
+- **Rui Miao et al.** (2019). [A Dynamic Financial Knowledge Graph Based on Reinforcement Learning and Transfer Learning](https://doi.org/10.1109/BigData47090.2019.9005691).
 - **Samreen Zehra et al.** (2021). [Financial Knowledge Graph Based Financial Report Query System](https://doi.org/10.1109/ACCESS.2021.3077916). *IEEE Access*.
+- **Sarah Elhammadi et al.** (2020). [A High Precision Pipeline for Financial Knowledge Graph Construction](https://doi.org/10.18653/v1/2020.coling-main.84). *International Committee on Computational Linguistics*.
+- **Thomas N. Kipf and Max Welling** (2017). [Semi-Supervised Classification with Graph Convolutional Networks](https://doi.org/10.48550/arXiv.1609.02907).
+- **William L. Hamilton et al.** (2018). [Inductive Representation Learning on Large Graphs](https://doi.org/10.48550/arXiv.1706.02216).
+- **Xiaohui Victor Li and Francesco Sanna Passino** (2024). [FinDKG: Dynamic Knowledge Graphs with Large Language Models for Detecting Global Trends in Financial Markets](https://doi.org/10.1145/3677052.3698603). *Association for Computing Machinery*.

@@ -47,25 +47,30 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "01_process_is_edge"
 
 ## References
 
+- **Alex Botte and Doris Bao** (2021). [A Machine Learning Approach to Regime Modeling](https://www.twosigma.com/articles/a-machine-learning-approach-to-regime-modeling/).
 - **Andrew Ang and Geert Bekaert** (2002). [International Asset Allocation With Regime Shifts](https://doi.org/10.1093/rfs/15.4.1137). *Review of Financial Studies*.
-- **Robert D. Arnott et al.** (2018). [A Backtesting Protocol in the Era of Machine Learning](https://doi.org/10.2139/ssrn.3275654).
+- **Andrew W. Lo** (2004). [The Adaptive Markets Hypothesis: Market Efficiency from an Evolutionary Perspective](https://papers.ssrn.com/abstract=602222).
+- **Antti Ilmanen et al.** (2021). [How Do Factor Premia Vary Over Time? A Century of Evidence](https://doi.org/10.2139/ssrn.3400998).
+- **A. Sinem Uysal and John M. Mulvey** (2021). [A Machine Learning Approach in Regime-Switching Risk Parity Portfolios](https://doi.org/10.3905/jfds.2021.1.057). *The Journal of Financial Data Science*.
+- **Bernhard Schölkopf et al.** (2021). [Towards Causal Representation Learning](https://doi.org/10.48550/arXiv.2102.11107).
+- **Blanka Horvath et al.** (2021). [Clustering Market Regimes Using the Wasserstein Distance](https://doi.org/10.2139/ssrn.3947905).
+- **Campbell R. Harvey et al.** (2016). [...and the Cross-Section of Expected Returns](https://doi.org/10.1093/rfs/hhv059). *Review of Financial Studies*.
 - **Darrell Duffie** (2020). [Still the World's Safe Haven? Redesigning the U.S. Treasury Market After the COVID-19 Crisis](https://www.brookings.edu/wp-content/uploads/2020/05/WP62_Duffie_v2.pdf).
 - **David Easley et al.** (2012). [The Volume Clock: Insights into the High Frequency Paradigm](https://doi.org/10.2139/ssrn.2034858).
-- **Frank J. Fabozzi et al.** (2024). [Paradigm Shift: Embracing Holism in Causal Modeling for Investment Applications](https://doi.org/10.3905/jpm.2024.51.1.159). *The Journal of Portfolio Management*.
 - **Frank J. Fabozzi and Caleb C. Stenholm** (2025). [Strategic Discipline: How Asset Management Mirrors Military Operations](https://doi.org/10.3905/jpm.2025.1.769). *The Journal of Portfolio Management*.
-- **Ziang Fang and Jason Moore** (2025). What AI Can (and Can't Yet) Do for Alpha.
-- **Stefano Giglio et al.** (2022). [Factor Models, Machine Learning, and Asset Pricing](https://doi.org/10.1146/annurev-financial-101521-104735). *Annual Review of Financial Economics*.
-- **Campbell R. Harvey et al.** (2016). [...and the Cross-Section of Expected Returns](https://doi.org/10.1093/rfs/hhv059). *Review of Financial Studies*.
-- **Blanka Horvath et al.** (2021). [Clustering Market Regimes Using the Wasserstein Distance](https://doi.org/10.2139/ssrn.3947905).
-- **Antti Ilmanen et al.** (2021). [How Do Factor Premia Vary Over Time? A Century of Evidence](https://doi.org/10.2139/ssrn.3400998).
-- **Justina Lee** (2025). [Man Group Says Agentic AI Is Now Devising Quant Trading Signals](https://www.bloomberg.com/news/articles/2025-07-10/man-group-says-agentic-ai-is-now-devising-quant-trading-signals). *Bloomberg.com*.
-- **Andrew W. Lo** (2004). [The Adaptive Markets Hypothesis: Market Efficiency from an Evolutionary Perspective](https://papers.ssrn.com/abstract=602222).
-- **Martin Luk** (2023). [Generative AI: Overview, Economic Impact, and Applications in Asset Management](https://doi.org/10.2139/ssrn.4574814).
-- **Judea Pearl** (2019). [The seven tools of causal inference, with reflections on machine learning](https://doi.org/10.1145/3241036). *Communications of the ACM*.
-- **Marcos López de Prado** (2018). The 10 Reasons Most Machine Learning Funds Fail. *The Journal of Portfolio Management*.
-- **Marcos Lopez de Prado et al.** (2024). [The Case for Causal Factor Investing](https://doi.org/10.2139/ssrn.4774522).
-- **Marcos López de Prado and Vincent Zoonekynd** (2025). [Correcting the Factor Mirage: A Research Protocol for Causal Factor Investing](https://doi.org/10.3905/jpm.2025.1.794). *The Journal of Portfolio Management*.
+- **Frank J. Fabozzi et al.** (2024). [Paradigm Shift: Embracing Holism in Causal Modeling for Investment Applications](https://doi.org/10.3905/jpm.2024.51.1.159). *The Journal of Portfolio Management*.
+- [Gartner Says Nearly Half of CIOs Are Planning to Deploy Artificial Intelligence](https://www.gartner.com/en/newsroom/press-releases/2018-02-13-gartner-says-nearly-half-of-cios-are-planning-to-deploy-artificial-intelligence).
 - **James Ryseff et al.** (2024). [The Root Causes of Failure for Artificial Intelligence Projects and How They Can Succeed: Avoiding the Anti-Patterns of AI](https://www.rand.org/pubs/research_reports/RRA2680-1.html).
-- **Bernhard Schölkopf et al.** (2021). [Towards Causal Representation Learning](https://doi.org/10.48550/arXiv.2102.11107).
+- **Judea Pearl** (2019). [The seven tools of causal inference, with reflections on machine learning](https://doi.org/10.1145/3241036). *Communications of the ACM*.
+- **Justina Lee** (2025). [Man Group Says Agentic AI Is Now Devising Quant Trading Signals](https://www.bloomberg.com/news/articles/2025-07-10/man-group-says-agentic-ai-is-now-devising-quant-trading-signals). *Bloomberg.com*.
+- **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.
+- **Marcos Lopez de Prado et al.** (2024). [The Case for Causal Factor Investing](https://doi.org/10.2139/ssrn.4774522).
+- **Marcos López de Prado** (2018). The 10 Reasons Most Machine Learning Funds Fail. *The Journal of Portfolio Management*.
+- **Marcos López de Prado and Vincent Zoonekynd** (2025). [Correcting the Factor Mirage: A Research Protocol for Causal Factor Investing](https://doi.org/10.3905/jpm.2025.1.794). *The Journal of Portfolio Management*.
+- **Martin Luk** (2023). [Generative AI: Overview, Economic Impact, and Applications in Asset Management](https://doi.org/10.2139/ssrn.4574814).
+- **Robert D. Arnott et al.** (2018). [A Backtesting Protocol in the Era of Machine Learning](https://doi.org/10.2139/ssrn.3275654).
+- **Robin Marshall** (2023). [The remarkable harmony between stocks and bonds](https://www.lseg.com/en/insights/ftse-russell/marriage-inconvenience-remarkable-harmony-between-stocks-and-bonds).
+- **Shihao Gu et al.** (2020). [Empirical Asset Pricing via Machine Learning](https://doi.org/10.1093/rfs/hhaa009). *The Review of Financial Studies*.
+- **Stefano Giglio et al.** (2022). [Factor Models, Machine Learning, and Asset Pricing](https://doi.org/10.1146/annurev-financial-101521-104735). *Annual Review of Financial Economics*.
 - **Stefan Studer et al.** (2021). [Towards CRISP-ML(Q): A Machine Learning Process Model with Quality Assurance Methodology](https://doi.org/10.3390/make3020020). *Machine Learning and Knowledge Extraction*.
-- **A. Sinem Uysal and John M. Mulvey** (2021). [A Machine Learning Approach in Regime-Switching Risk Parity Portfolios](https://doi.org/10.3905/jfds.2021.1.057). *The Journal of Financial Data Science*.
+- **Ziang Fang and Jason Moore** (2025). What AI Can (and Can't Yet) Do for Alpha.

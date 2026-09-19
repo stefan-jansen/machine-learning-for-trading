@@ -61,13 +61,16 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "06_strategy_definition"
 
 ## References
 
+- **Brian Hurst et al.** A Century of Evidence on Trend-Following Investing.
+- **Christoph Bergmeir et al.** (2018). [A note on the validity of cross-validation for evaluating autoregressive time series prediction](https://doi.org/10.1016/j.csda.2017.11.003). *Computational Statistics & Data Analysis*.
 - **Clifford S. Asness et al.** (2013). [Value and Momentum Everywhere](https://www.jstor.org/stable/42002613). *The Journal of Finance*.
 - **David H. Bailey and Marcos Lopez de Prado** (2014). [The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality](https://doi.org/10.2139/ssrn.2460551).
 - **David H. Bailey et al.** (2015). [The Probability of Backtest Overfitting](https://doi.org/10.2139/ssrn.2326253).
-- **Stephen Bates et al.** (2021). [Cross-validation: what does it estimate and how well does it do it?](https://doi.org/10.1080/01621459.2023.2197686).
-- **Christoph Bergmeir et al.** (2018). [A note on the validity of cross-validation for evaluating autoregressive time series prediction](https://doi.org/10.1016/j.csda.2017.11.003). *Computational Statistics & Data Analysis*.
-- **Kent Daniel and Tobias J. Moskowitz** (2016). [Momentum crashes](https://doi.org/10.1016/j.jfineco.2015.12.002). *Journal of Financial Economics*.
-- **R. David McLean and Jeffrey Pontiff** (2016). [Does Academic Research Destroy Stock Return Predictability?](https://doi.org/10.1111/jofi.12365). *Journal of Finance*.
-- **Tobias J. Moskowitz et al.** (2011). [Time Series Momentum](https://doi.org/10.2139/ssrn.2089463).
 - **Giuseppe A. Paleologo** (2025). The Elements of Quantitative Investing. *John Wiley & Sons*.
+- **Kent Daniel and Tobias J. Moskowitz** (2016). [Momentum crashes](https://doi.org/10.1016/j.jfineco.2015.12.002). *Journal of Financial Economics*.
 - **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.
+- **Narasimhan Jegadeesh and Sheridan Titman** (1993). [Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency](https://doi.org/10.1111/j.1540-6261.1993.tb04702.x). *The Journal of Finance*.
+- **R. David McLean and Jeffrey Pontiff** (2016). [Does Academic Research Destroy Stock Return Predictability?](https://doi.org/10.1111/jofi.12365). *Journal of Finance*.
+- **Ron Kohavi** (1995). A study of cross-validation and bootstrap for accuracy estimation and model selection. *Morgan Kaufmann Publishers Inc.*.
+- **Stephen Bates et al.** (2021). [Cross-validation: what does it estimate and how well does it do it?](https://doi.org/10.1080/01621459.2023.2197686).
+- **Tobias J. Moskowitz et al.** (2011). [Time Series Momentum](https://doi.org/10.2139/ssrn.2089463).

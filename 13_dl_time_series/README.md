@@ -121,24 +121,34 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "13_dl_time_series"
 
 ## References
 
-- **Taha Aksu and et al.** (2025). GIFT-Eval: Benchmarking Zero-Shot Time Series Forecasting.
-- **Abdul Fatir Ansari and et al.** (2025). Chronos-2: Multivariate Probabilistic Time Series Foundation Models.
-- **Si-An Chen et al.** (2023). [TSMixer: An All-MLP Architecture for Time Series Forecasting](https://arxiv.org/abs/2303.06053).
-- **Yarin Gal and Zoubin Ghahramani** (2016). [Dropout as a Bayesian Approximation: Representing Model Uncertainty in Deep Learning](https://proceedings.mlr.press/v48/gal16.html). *PMLR*.
-- **Albert Gu and Tri Dao** (2024). [Mamba: Linear-Time Sequence Modeling with Selective State Spaces](https://doi.org/10.48550/arXiv.2312.00752).
-- **Sepp Hochreiter et al.** (2001). Gradient flow in recurrent nets: the difficulty of learning long-term dependencies.
-- **Yuan Hu and et al.** (2025). FinMamba: Market-Aware Mamba for Stock Movement Prediction.
-- **Jingwen Jiang et al.** (2020). [(Re-)Imag(in)ing Price Trends](https://doi.org/10.2139/ssrn.3756587).
-- **Balaji Lakshminarayanan et al.** (2017). [Simple and Scalable Predictive Uncertainty Estimation using Deep Ensembles](https://proceedings.neurips.cc/paper_files/paper/2017/hash/9ef2ed4b7fd2c810847ffa5fa85bce38-Abstract.html). *Curran Associates, Inc.*.
-- **Bryan Lim and Stefan Zohren** (2021). [Time-series forecasting with deep learning: a survey](https://doi.org/10.1098/rsta.2020.0209). *Philosophical Transactions of the Royal Society A: Mathematical, Physical and Engineering Sciences*.
-- **Xu Liu et al.** (2024). [Moirai-MoE: Empowering Time Series Foundation Models with Sparse Mixture of Experts](https://doi.org/10.48550/arXiv.2410.10469).
-- **Zhiyuan Luo and et al.** (2025). Multi-Scale Mamba for Financial Time Series.
-- **Yuqi Nie et al.** (2023). [A Time Series is Worth 64 Words: Long-term Forecasting with Transformers](https://doi.org/10.48550/arXiv.2211.14730).
-- **Boris N. Oreshkin et al.** (2019). [N-BEATS: Neural basis expansion analysis for interpretable time series forecasting](https://openreview.net/forum?id=r1ecqn4YwB).
-- **Eghbal Rahimikia et al.** (2025). [Re(Visiting) Time Series Foundation Models in Finance](https://doi.org/10.2139/ssrn.5770562).
-- **Syama Sundar Rangapuram et al.** (2018). Deep State Space Models for Time Series Forecasting.
-- **Slawek Smyl** (2020). A Hybrid Method of Exponential Smoothing and Recurrent Neural Networks for Time Series Forecasting. *International Journal of Forecasting*.
-- **Ashish Vaswani et al.** (2017). [Attention Is All You Need](http://arxiv.org/abs/1706.03762). *arXiv:1706.03762 [cs]*.
+- **Abdul Fatir Ansari et al.** (2025). [Chronos-2: From Univariate to Universal Forecasting](https://arxiv.org/abs/2510.15821).
+- **Abdul Fatir Ansari et al.** (2024). [Chronos: Learning the Language of Time Series](https://doi.org/10.48550/arXiv.2403.07815).
+- **Adir Saly-Kaufmann et al.** (2026). [Deep Learning for Financial Time Series: A Large-Scale Benchmark of Risk-Adjusted Performance](https://doi.org/10.48550/arXiv.2603.01820).
+- **Agostino Capponi et al.** (2025). [The Nonstationarity-Complexity Tradeoff in Return Prediction](https://doi.org/10.2139/ssrn.5980654).
 - **Ailing Zeng et al.** (2022). [Are Transformers Effective for Time Series Forecasting?](https://doi.org/10.48550/arXiv.2205.13504).
+- **Albert Gu and Tri Dao** (2024). [Mamba: Linear-Time Sequence Modeling with Selective State Spaces](https://doi.org/10.48550/arXiv.2312.00752).
+- **Ashish Vaswani et al.** (2017). [Attention Is All You Need](http://arxiv.org/abs/1706.03762). *arXiv:1706.03762 [cs]*.
+- **Balaji Lakshminarayanan et al.** (2017). [Simple and Scalable Predictive Uncertainty Estimation using Deep Ensembles](https://proceedings.neurips.cc/paper_files/paper/2017/hash/9ef2ed4b7fd2c810847ffa5fa85bce38-Abstract.html). *Curran Associates, Inc.*.
+- **Boris N. Oreshkin et al.** (2019). [N-BEATS: Neural basis expansion analysis for interpretable time series forecasting](https://openreview.net/forum?id=r1ecqn4YwB).
+- **Bryan Lim and Stefan Zohren** (2021). [Time-series forecasting with deep learning: a survey](https://doi.org/10.1098/rsta.2020.0209). *Philosophical Transactions of the Royal Society A: Mathematical, Physical and Engineering Sciences*.
+- **Bryan Lim et al.** (2021). [Temporal Fusion Transformers for interpretable multi-horizon time series forecasting](https://doi.org/10.1016/j.ijforecast.2021.03.012). *International Journal of Forecasting*.
+- **Cristian Challu et al.** (2022). [N-HiTS: Neural Hierarchical Interpolation for Time Series Forecasting](https://arxiv.org/abs/2201.12886v6).
+- **Eghbal Rahimikia et al.** (2025). [Re(Visiting) Time Series Foundation Models in Finance](https://doi.org/10.2139/ssrn.5770562).
+- **Jingwen Jiang et al.** (2020). [(Re-)Imag(in)ing Price Trends](https://doi.org/10.2139/ssrn.3756587).
+- **P.J. Werbos** (1990). [Backpropagation through time: what it does and how to do it](https://doi.org/10.1109/5.58337). *Proceedings of the IEEE*.
+- **Sepp Hochreiter and Jürgen Schmidhuber** (1996). LSTM can solve hard long time lag problems. *MIT Press*.
+- **Sepp Hochreiter et al.** (2001). Gradient flow in recurrent nets: the difficulty of learning long-term dependencies.
+- **Shaojie Bai et al.** (2018). [An Empirical Evaluation of Generic Convolutional and Recurrent Networks for Sequence Modeling](https://arxiv.org/abs/1803.01271v2).
+- **Si-An Chen et al.** (2023). [TSMixer: An All-MLP Architecture for Time Series Forecasting](https://arxiv.org/abs/2303.06053).
+- **Slawek Smyl** (2020). [A hybrid method of exponential smoothing and recurrent neural networks for time series forecasting](https://doi.org/10.1016/j.ijforecast.2019.03.017). *International Journal of Forecasting*.
+- **Syama Sundar Rangapuram et al.** (2018). Deep State Space Models for Time Series Forecasting.
+- **Taha Aksu et al.** (2024). [GIFT-Eval: A Benchmark For General Time Series Forecasting Model Evaluation](https://arxiv.org/abs/2410.10393v2).
+- **Xu Liu et al.** (2024). [Moirai-MoE: Empowering Time Series Foundation Models with Sparse Mixture of Experts](https://doi.org/10.48550/arXiv.2410.10469).
+- **Yarin Gal and Zoubin Ghahramani** (2016). [Dropout as a Bayesian Approximation: Representing Model Uncertainty in Deep Learning](https://proceedings.mlr.press/v48/gal16.html). *PMLR*.
+- **Yifan Hu et al.** (2025). [FinMamba: Market-Aware Graph Enhanced Multi-Level Mamba for Stock Movement Prediction](https://arxiv.org/abs/2502.06707v1).
+- **Yijia Xiao et al.** (2025). [TradingAgents: Multi-Agents LLM Financial Trading Framework](https://doi.org/10.48550/arXiv.2412.20138).
+- **Yong Liu et al.** (2023). [iTransformer: Inverted Transformers Are Effective for Time Series Forecasting](https://arxiv.org/abs/2310.06625v4).
+- **Yuqi Nie et al.** (2023). [A Time Series is Worth 64 Words: Long-term Forecasting with Transformers](https://doi.org/10.48550/arXiv.2211.14730).
+- **Yusuf Meric Karadag et al.** (2025). [ms-Mamba: Multi-scale Mamba for Time-Series Forecasting](https://arxiv.org/abs/2504.07654v2).
+- **Zhongzheng Qiao et al.** (2026). [It's TIME: Towards the Next Generation of Time Series Forecasting Benchmarks](https://arxiv.org/abs/2602.12147). *ICML*.
 - **Zihao Zhang et al.** (2019). [DeepLOB: Deep Convolutional Neural Networks for Limit Order Books](https://doi.org/10.1109/TSP.2019.2907260). *IEEE Transactions on Signal Processing*.
-- **Han Zou and et al.** (2025). TIME Benchmark: Fresh Datasets for Zero-Shot Forecasting Integrity.

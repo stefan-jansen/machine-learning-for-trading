@@ -33,3 +33,14 @@ uv run python 27_systematic_edge/<notebook>.py
 # Test mode (reduced data via Papermill)
 uv run pytest tests/test_chapter_notebooks.py -v -k "27_systematic_edge"
 ```
+
+## References
+
+- **Andrew Ang** (2014). Asset Management: A Systematic Approach to Factor Investing. *Oxford University Press*.
+- **Joseph A. Cerniglia and Frank J. Fabozzi** (2022). [A Practitioner Perspective on Trading and the Implementation of Investment Strategies](https://doi.org/10.3905/jpm.2022.1.371). *The Journal of Portfolio Management*.
+- **Andrew Chin** (2025). [Leveling the Divide Between Discretionary and Systematic Investing: How AI Enables Breadth and Depth](https://doi.org/10.3905/jpm.2025.1.730). *The Journal of Portfolio Management*.
+- **Francesco A. Fabozzi and Marcos López de Prado** (2025). [Implementing AI Foundation Models in Asset Management: A Practical Guide](https://doi.org/10.3905/jpm.2025.1.778). *The Journal of Portfolio Management*.
+- **Larry Harris** (2003). Trading and Exchanges: Market Microstructure for Practitioners. *Oxford University Press*.
+- **Campbell R. Harvey** (2021). [Why Is Systematic Investing Important?](https://doi.org/10.2139/ssrn.3785370). *SSRN Electronic Journal*.
+- **Anton Korinek** (2025). [AI Agents for Economic Research](https://doi.org/10.3386/w34202).
+- **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.
