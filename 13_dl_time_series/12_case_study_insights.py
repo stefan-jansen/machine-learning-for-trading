@@ -1138,9 +1138,12 @@ else:
 # %%
 display(
     Markdown(
-        f"**Computed horizon coverage.** {len(multi_horizon_cs)} case studies have at least "
-        f"two complete DL horizons ({', '.join(multi_horizon_cs) or 'none'}). Cross-panel horizon "
-        "claims remain out of scope when the remaining panels have only one trained label."
+        f"**Computed horizon coverage.** {len(multi_horizon_cs)} case studies carry at least "
+        f"two DL horizons the census retained ({', '.join(multi_horizon_cs) or 'none'}). "
+        "Retained means the label covered the case study's modelling fold grid, or the grid "
+        "could not be derived for it - not that every one was checked and found complete, "
+        "which the count printed above says it was not. Cross-panel horizon claims remain out "
+        "of scope when the remaining panels have only one trained label."
     )
 )
 
