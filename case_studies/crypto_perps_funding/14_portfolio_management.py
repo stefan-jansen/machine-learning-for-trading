@@ -148,7 +148,16 @@ CANONICAL_RUN = EXECUTION_TIER == "canonical"
 # baseline, since the checkpoint is part of the configuration rather than a knob to be re-tuned
 # here.
 #
-# `resolve_best_predictions` is the one implementation of that rule, shared by every case study.
+# `resolve_best_predictions` is the implementation this case study uses, and it is not the only
+# one: five of the nine case studies call it, and the other four restate the same rule
+# separately - `cme_futures` in `research_workflow.shortlist_signal_configurations`, `fx_pairs`
+# in a function defined inside its own allocation notebook, `sp500_options` and
+# `us_equities_panel` inline over a ranked frame. They agree on what the rule is - rank on
+# validation Sharpe, keep the best row per `(family, config_name)`, take the declared width -
+# and differ in the pool they rank and in what they do when the pool is short of that width.
+# Nothing compares the four, so anything reasoning about which configurations advance without
+# running the notebook has to pick one and is wrong about the others
+# (ml4t/agent-workspace#1204).
 #
 # **It is asked about one population, not about the registry.** `13_backtest` froze the baselines
 # each label hands on as `crypto-signal-{label}`, and that set is the whole of what may advance.
