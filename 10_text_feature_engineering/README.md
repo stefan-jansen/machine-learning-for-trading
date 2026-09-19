@@ -72,13 +72,24 @@ docker compose --profile py312 run --rm py312 \
 
 ## References
 
-- **Rajeev Bhargava et al.** (2023). [Quantifying Narratives and Their Impact on Financial Markets](https://doi.org/10.3905/jpm.2023.1.472). *The Journal of Portfolio Management*.
-- **Jacob Devlin et al.** (2019). [BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding](https://doi.org/10.18653/v1/N19-1423). *Association for Computational Linguistics*.
 - **Allen Huang et al.** (2020). [FinBERT—A Deep Learning Approach to Extracting Textual Information](https://doi.org/10.2139/ssrn.3910214). *SSRN Electronic Journal*.
+- **Ashish Vaswani et al.** (2017). [Attention Is All You Need](http://arxiv.org/abs/1706.03762). *arXiv:1706.03762 [cs]*.
+- **Benjamin Warner et al.** (2024). [Smarter, Better, Faster, Longer: A Modern Bidirectional Encoder for Fast, Memory Efficient, and Long Context Finetuning and Inference](https://arxiv.org/abs/2412.13663v2).
+- **Dogu Araci** (2019). [FinBERT: Financial Sentiment Analysis with Pre-trained Language Models](https://doi.org/10.48550/arXiv.1908.10063).
+- **Edward J. Hu et al.** (2021). [LoRA: Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685v2).
+- **Jacob Devlin et al.** (2019). [BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding](https://doi.org/10.18653/v1/N19-1423). *Association for Computational Linguistics*.
+- **Jeffrey Pennington et al.** (2014). [GloVe: Global Vectors for Word Representation](https://doi.org/10.3115/v1/D14-1162). *Association for Computational Linguistics*.
+- **Leland Bybee et al.** (2023). [Narrative Asset Pricing: Interpretable Systematic Risk Factors from News Text](https://doi.org/10.1093/rfs/hhad042). *The Review of Financial Studies*.
+- **Leland Bybee et al.** (2024). [Business News and Business Cycles](https://doi.org/10.1111/jofi.13377). *The Journal of Finance*.
+- **Nils Reimers and Iryna Gurevych** (2019). [Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks](http://arxiv.org/abs/1908.10084). *arXiv:1908.10084 [cs]*.
+- **Paul C. Tetlock** (2005). [Giving Content to Investor Sentiment: The Role of Media in the Stock Market](https://doi.org/10.2139/ssrn.685145).
+- **Qianqian Xie et al.** (2024). [Finben: A holistic financial benchmark for large language models](https://proceedings.neurips.cc/paper_files/paper/2024/hash/adb1d9fa8be4576d28703b396b82ba1b-Abstract-Datasets_and_Benchmarks_Track.html). *Advances in Neural Information Processing Systems*.
+- **Rajeev Bhargava et al.** (2023). [Quantifying Narratives and Their Impact on Financial Markets](https://doi.org/10.3905/jpm.2023.1.472). *The Journal of Portfolio Management*.
+- **Scott M Lundberg et al.** (2017). [A Unified Approach to Interpreting Model Predictions](http://papers.nips.cc/paper/7062-a-unified-approach-to-interpreting-model-predictions.pdf). *Curran Associates, Inc.*.
+- **Sepp Hochreiter and Jürgen Schmidhuber** (1996). LSTM can solve hard long time lag problems. *MIT Press*.
+- **Shijie Wu et al.** (2023). [BloombergGPT: A Large Language Model for Finance](https://arxiv.org/abs/2303.17564v3).
+- **Stephen Robertson and Hugo Zaragoza** (2009). [The Probabilistic Relevance Framework: BM25 and Beyond](https://doi.org/10.1561/1500000019). *Found. Trends Inf. Retr.*.
 - **Tim Loughran and Bill Mcdonald** (2011). [When Is a Liability Not a Liability? Textual Analysis, Dictionaries, and 10-Ks](https://doi.org/10.1111/j.1540-6261.2010.01625.x). *The Journal of Finance*.
 - **Tim Loughran and Bill McDonald** (2020). [Textual Analysis in Finance](https://doi.org/10.1146/annurev-financial-012820-032249). *Annual Review of Financial Economics*.
-- **Scott M Lundberg et al.** (2017). [A Unified Approach to Interpreting Model Predictions](http://papers.nips.cc/paper/7062-a-unified-approach-to-interpreting-model-predictions.pdf). *Curran Associates, Inc.*.
 - **Tomas Mikolov et al.** (2013). [Efficient estimation of word representations in vector space](http://arxiv.org/abs/1301.3781). *arXiv preprint arXiv:1301.3781*.
-- **Nils Reimers and Iryna Gurevych** (2019). [Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks](http://arxiv.org/abs/1908.10084). *arXiv:1908.10084 [cs]*.
-- **Ashish Vaswani et al.** (2017). [Attention Is All You Need](http://arxiv.org/abs/1706.03762). *arXiv:1706.03762 [cs]*.
-- **Qianqian Xie et al.** (2024). [Finben: A holistic financial benchmark for large language models](https://proceedings.neurips.cc/paper_files/paper/2024/hash/adb1d9fa8be4576d28703b396b82ba1b-Abstract-Datasets_and_Benchmarks_Track.html). *Advances in Neural Information Processing Systems*.
+- **Xavier Gabaix et al.** (2025). [Asset Embeddings](https://doi.org/10.3386/w33651).

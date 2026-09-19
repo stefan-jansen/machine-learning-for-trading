@@ -71,3 +71,24 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "07_defining_the_learning_ta
 > Memory: `01_data_quality_diagnostics` peaks at ~9 GB RSS; recommend ≥16 GB system RAM.
 > Memory: `02_preprocessing_pipeline` peaks at ~12 GB RSS; recommend ≥24 GB system RAM.
 > Runtime: `08_causal_sanity_checks` takes ~6 minutes (200-permutation null across multiple features and horizons).
+
+## References
+
+- [A Simple Sequentially Rejective Multiple Test Procedure on JSTOR](https://www.jstor.org/stable/4615733?seq=1).
+- **Clifford S. Asness et al.** (2013). [Value and Momentum Everywhere](https://www.jstor.org/stable/42002613). *The Journal of Finance*.
+- **David H. Bailey and Marcos Lopez de Prado** (2014). [The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality](https://doi.org/10.2139/ssrn.2460551).
+- **David H. Bailey et al.** (2015). [The Probability of Backtest Overfitting](https://doi.org/10.2139/ssrn.2326253).
+- **Yoav Benjamini and Yosef Hochberg** (1995). [Controlling the False Discovery Rate: A Practical and Powerful Approach to Multiple Testing](https://www.jstor.org/stable/2346101). *Journal of the Royal Statistical Society. Series B (Methodological)*.
+- **Andrew Y. Chen and Tom Zimmermann** (2021). [Open Source Cross-Sectional Asset Pricing](https://doi.org/10.2139/ssrn.3604626).
+- **Carlos Cinelli and Chad Hazlett** (2020). [Making sense of sensitivity: extending omitted variable bias](https://www.jstor.org/stable/26895067). *Journal of the Royal Statistical Society. Series B (Statistical Methodology)*.
+- **Kent Daniel and Tobias J. Moskowitz** (2016). [Momentum crashes](https://doi.org/10.1016/j.jfineco.2015.12.002). *Journal of Financial Economics*.
+- **Paul Glasserman et al.** (2025). [Does Overnight News Explain Overnight Returns?](https://doi.org/10.48550/arXiv.2507.04481).
+- **Richard C.. Grinold and Ronald N.. Kahn** (2000). Active portfolio management: A quantitative approach for providing superior returns and controlling risk. *McGraw-Hill*.
+- **Campbell R. Harvey et al.** (2016). [...and the Cross-Section of Expected Returns](https://doi.org/10.1093/rfs/hhv059). *Review of Financial Studies*.
+- **Kewei Hou et al.** (2020). [Replicating Anomalies](https://doi.org/10.1093/rfs/hhy131). *The Review of Financial Studies*.
+- **Narasimhan Jegadeesh and Sheridan Titman** (1993). [Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency](https://doi.org/10.1111/j.1540-6261.1993.tb04702.x). *The Journal of Finance*.
+- **Theis Ingerslev Jensen et al.** (2022). Is There a Replication Crisis in Finance?.
+- **R. David McLean and Jeffrey Pontiff** (2016). [Does Academic Research Destroy Stock Return Predictability?](https://doi.org/10.1111/jofi.12365). *Journal of Finance*.
+- **Whitney K. Newey and Kenneth D. West** (1986). [A Simple, Positive Semi-Definite, Heteroskedasticity and AutocorrelationConsistent Covariance Matrix](https://papers.ssrn.com/abstract=225071).
+- **Judea Pearl** (2019). [The seven tools of causal inference, with reflections on machine learning](https://doi.org/10.1145/3241036). *Communications of the ACM*.
+- **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.

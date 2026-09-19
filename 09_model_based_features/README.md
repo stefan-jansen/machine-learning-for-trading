@@ -92,25 +92,34 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "09_model_based_features"
 
 ## References
 
-- **Andrew Ang and Geert Bekaert** (2002). [International Asset Allocation With Regime Shifts](https://doi.org/10.1093/rfs/15.4.1137). *Review of Financial Studies*.
+- (2025). [rlabbe/Kalman-and-Bayesian-Filters-in-Python](https://github.com/rlabbe/Kalman-and-Bayesian-Filters-in-Python).
+- **Alan Moreira and Tyler Muir** (2017). [Volatility-Managed Portfolios](https://doi.org/10.1111/jofi.12513). *The Journal of Finance*.
 - **Andrew Ang and Allan Timmermann** (2011). [Regime Changes and Financial Markets](https://doi.org/10.2139/ssrn.1919497).
-- **Michael Betancourt** (2018). [A Conceptual Introduction to Hamiltonian Monte Carlo](http://arxiv.org/abs/1701.02434). *arXiv:1701.02434 [stat]*.
-- **Tim Bollerslev** (1986). [Generalized autoregressive conditional heteroskedasticity](https://doi.org/10.1016/0304-4076(86)90063-1). *Journal of Econometrics*.
-- **Ilya Chevyrev et al.** (2026). [A Primer on the Signature Method in Machine Learning](https://doi.org/10.1007/978-3-031-97239-3_1). *Springer Nature Switzerland*.
+- **Andrew Ang and Geert Bekaert** (2002). [International Asset Allocation With Regime Shifts](https://doi.org/10.1093/rfs/15.4.1137). *Review of Financial Studies*.
+- **A. Sinem Uysal and John M. Mulvey** (2021). [A Machine Learning Approach in Regime-Switching Risk Parity Portfolios](https://doi.org/10.3905/jfds.2021.1.057). *The Journal of Financial Data Science*.
+- **Blanka Horvath et al.** (2021). [Clustering Market Regimes Using the Wasserstein Distance](https://doi.org/10.2139/ssrn.3947905).
+- **Daniel B. Nelson** (1991). [Conditional Heteroskedasticity in Asset Returns: A New Approach](https://doi.org/10.2307/2938260). *Econometrica*.
+- **David A. Dickey and Wayne A. Fuller** (1979). [Distribution of the Estimators for Autoregressive Time Series with a Unit Root](https://doi.org/10.1080/01621459.1979.10482531). *Journal of the American Statistical Association*.
+- **Dennis Yang and Qiang Zhang** (2000). [Drift‐Independent Volatility Estimation Based on High, Low, Open, and Close Prices](https://doi.org/10.1086/209650). *The Journal of Business*.
+- **Eric Zivot and Donald W. K. Andrews** (1992). [Further Evidence on the Great Crash, the Oil-Price Shock, and the Unit-Root Hypothesis](https://doi.org/10.2307/1391541). *Journal of Business & Economic Statistics*.
 - **Fulvio Corsi** (2009). [A Simple Approximate Long-Memory Model of Realized Volatility](https://doi.org/10.1093/jjfinec/nbp001). *Journal of Financial Econometrics*.
+- **Ilya Chevyrev et al.** (2026). [A Primer on the Signature Method in Machine Learning](https://doi.org/10.1007/978-3-031-97239-3_1). *Springer Nature Switzerland*.
+- **James D. Hamilton** (1989). [A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle](https://doi.org/10.2307/1912559). *Econometrica*.
+- **Jim Gatheral et al.** (2014). [Volatility is rough](https://doi.org/10.48550/arXiv.1410.3394).
+- **Jushan Bai and Pierre Perron** (1998). [Estimating and Testing Linear Models with Multiple Structural Changes](https://doi.org/10.2307/2998540). *Econometrica*.
+- **Lawrence R. Glosten et al.** (1993). [On the Relation between the Expected Value and the Volatility of the Nominal Excess Return on Stocks](https://EconPapers.repec.org/RePEc:bla:jfinan:v:48:y:1993:i:5:p:1779-1801). *Journal of Finance*.
+- **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.
+- **Mark B. Garman and Michael J. Klass** (1980). [On the Estimation of Security Price Volatilities from Historical Data](https://www.jstor.org/stable/2352358). *The Journal of Business*.
+- **Matthew D. Hoffman and Andrew Gelman** (2011). [The No-U-Turn Sampler: Adaptively Setting Path Lengths in Hamiltonian Monte Carlo](http://arxiv.org/abs/1111.4246). *arXiv:1111.4246 [cs, stat]*.
+- **Michael Betancourt** (2018). [A Conceptual Introduction to Hamiltonian Monte Carlo](http://arxiv.org/abs/1701.02434). *arXiv:1701.02434 [stat]*.
+- **Michael Parkinson** (1980). [The Extreme Value Method for Estimating the Variance of the Rate of Return](https://doi.org/10.1086/296071). *The Journal of Business*.
+- **R. E. Kalman** (1960). [A New Approach to Linear Filtering and Prediction Problems](https://doi.org/10.1115/1.3662552). *Journal of Basic Engineering*.
 - **Robert F. Engle** (1983). [Estimates of the Variance of U. S. Inflation Based upon the ARCH Model](https://doi.org/10.2307/1992480). *Journal of Money, Credit and Banking*.
 - **Robert F. Engle and C. W. J. Granger** (1987). [Co-Integration and Error Correction: Representation, Estimation, and Testing](https://doi.org/10.2307/1913236). *Econometrica*.
-- **Mark B. Garman and Michael J. Klass** (1980). [On the Estimation of Security Price Volatilities from Historical Data](https://www.jstor.org/stable/2352358). *The Journal of Business*.
-- **Jim Gatheral et al.** (2014). [Volatility is rough](https://doi.org/10.48550/arXiv.1410.3394).
-- **James D. Hamilton** (1989). [A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle](https://doi.org/10.2307/1912559). *Econometrica*.
-- **Matthew D. Hoffman and Andrew Gelman** (2011). [The No-U-Turn Sampler: Adaptively Setting Path Lengths in Hamiltonian Monte Carlo](http://arxiv.org/abs/1111.4246). *arXiv:1111.4246 [cs, stat]*.
-- **Blanka Horvath et al.** (2021). [Clustering Market Regimes Using the Wasserstein Distance](https://doi.org/10.2139/ssrn.3947905).
-- **Søren Johansen and Katarina Juselius** (1990). [Maximum Likelihood Estimation and Inference on Cointegration — with Applications to the Demand for Money](https://doi.org/10.1111/j.1468-0084.1990.mp52002003.x). *Oxford Bulletin of Economics and Statistics*.
-- **Stephen Marra** (2023). [Time-Series Techniques: Estimating Volatility](https://doi.org/10.3905/jpm.2023.1.475). *The Journal of Portfolio Management*.
-- **Alan Moreira and Tyler Muir** (2017). [Volatility-Managed Portfolios](https://doi.org/10.1111/jofi.12513). *The Journal of Finance*.
-- **Daniel B. Nelson** (1991). [Conditional Heteroskedasticity in Asset Returns: A New Approach](https://doi.org/10.2307/2938260). *Econometrica*.
-- **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.
-- **Yizhan Shu and John M. Mulvey** (2025). [Dynamic Factor Allocation Leveraging Regime-Switching Signals](https://doi.org/10.3905/jpm.2024.1.649). *The Journal of Portfolio Management*.
+- **Rob Hyndman** [Forecasting: Principles and Practice](https://Otexts.com/fpp2/).
 - **Sophia Sun and Rose Yu** (2025). [Conformal Prediction for Time-series Forecasting with Change Points](https://doi.org/10.48550/arXiv.2509.02844).
-- **A. Sinem Uysal and John M. Mulvey** (2021). [A Machine Learning Approach in Regime-Switching Risk Parity Portfolios](https://doi.org/10.3905/jfds.2021.1.057). *The Journal of Financial Data Science*.
-- **Dennis Yang and Qiang Zhang** (2000). [Drift‐Independent Volatility Estimation Based on High, Low, Open, and Close Prices](https://doi.org/10.1086/209650). *The Journal of Business*.
+- **Søren Johansen and Katarina Juselius** (1990). [Maximum Likelihood Estimation and Inference on Cointegration — with Applications to the Demand for Money](https://doi.org/10.1111/j.1468-0084.1990.mp52002003.x). *Oxford Bulletin of Economics and Statistics*.
+- **Stephen J Taylor and Neil Shephard** (2005). [Financial Returns Modelled by the Product of Two Stochastic Processes—A Study of Daily Sugar Prices, 1961–79](https://doi.org/10.1093/oso/9780199257195.003.0003). *Oxford University Press*.
+- **Stephen Marra** (2023). [Time-Series Techniques: Estimating Volatility](https://doi.org/10.3905/jpm.2023.1.475). *The Journal of Portfolio Management*.
+- **Tim Bollerslev** (1986). [Generalized autoregressive conditional heteroskedasticity](https://doi.org/10.1016/0304-4076(86)90063-1). *Journal of Econometrics*.
+- **Yizhan Shu and John M. Mulvey** (2025). [Dynamic Factor Allocation Leveraging Regime-Switching Signals](https://doi.org/10.3905/jpm.2024.1.649). *The Journal of Portfolio Management*.

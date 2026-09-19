@@ -78,27 +78,29 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "17_portfolio_construction"
 
 ## References
 
-- **Ashwin Alankar et al.** (2023). [Fairy Tails: Lessons from 150 Years of Drawdowns](https://doi.org/10.3905/jpm.2023.1.503). *The Journal of Portfolio Management*.
-- **Andrew Ang and Geert Bekaert** (2002). [International Asset Allocation With Regime Shifts](https://doi.org/10.1093/rfs/15.4.1137). *Review of Financial Studies*.
+- **Adir Saly-Kaufmann et al.** (2026). [Deep Learning for Financial Time Series: A Large-Scale Benchmark of Risk-Adjusted Performance](https://doi.org/10.48550/arXiv.2603.01820).
 - **Alexandre Antonov et al.** (2024). [Overcoming Markowitz's Instability with the Help of the Hierarchical Risk Parity (HRP): Theoretical Evidence](https://doi.org/10.2139/ssrn.4748151).
-- **Clifford Asness et al.** (2017). [Contrarian Factor Timing Is Deceptively Difficult](https://doi.org/10.3905/jpm.2017.43.5.072). *Journal of Portfolio Management*.
-- **Victor DeMiguel et al.** (2009). [Optimal Versus Naive Diversification: How Inefficient is the 1/N Portfolio Strategy?](https://doi.org/10.1093/rfs/hhm075). *The Review of Financial Studies*.
-- **Ross French** (2024). [Sizing Matters: Optimal Scaling of Long and Short Exposures in Equity Portfolios](https://doi.org/10.3905/jpm.2024.1.596). *The Journal of Portfolio Management*.
-- **Richard C.. Grinold and Ronald N.. Kahn** (2000). Active portfolio management: A quantitative approach for providing superior returns and controlling risk. *McGraw-Hill*.
+- **Andrew Ang and Geert Bekaert** (2002). [International Asset Allocation With Regime Shifts](https://doi.org/10.1093/rfs/15.4.1137). *Review of Financial Studies*.
+- **Ashwin Alankar et al.** (2023). [Fairy Tails: Lessons from 150 Years of Drawdowns](https://doi.org/10.3905/jpm.2023.1.503). *The Journal of Portfolio Management*.
 - **Brian Hurst** (2010). Understanding Risk Parity.
-- **Theis Ingerslev Jensen et al.** (2024). [Machine Learning and the Implementable Efficient Frontier](https://doi.org/10.2139/ssrn.4187217).
-- **Jacques Joubert et al.** (2024). [Enhanced Backtesting for Practitioners](https://doi.org/10.3905/jpm.2024.1.637). *The Journal of Portfolio Management*.
-- **Olaf Korn et al.** (2022). [Drawdown Measures: Are They All the Same?](https://doi.org/10.3905/jpm.2022.1.346). *The Journal of Portfolio Management*.
-- **Tom Liu and Stefan Zohren** (2023). [Multi-Factor Inception: What to Do with All of These Features?](https://doi.org/10.48550/arXiv.2307.13832).
-- **Sébastien Maillard et al.** (2008). [On the Properties of Equally-Weighted Risk Contributions Portfolios](https://doi.org/10.2139/ssrn.1271972). *SSRN Electronic Journal*.
-- **Harry Markowitz** (1952). Portfolio selection. *The journal of finance*.
+- **Clifford Asness et al.** (2017). [Contrarian Factor Timing Is Deceptively Difficult](https://doi.org/10.3905/jpm.2017.43.5.072). *Journal of Portfolio Management*.
 - **Gautier Marti et al.** (2021). [A Review of Two Decades of Correlations, Hierarchies, Networks and Clustering in Financial Markets](https://doi.org/10.1007/978-3-030-65459-7_10). *Springer International Publishing*.
 - **Giuseppe A. Paleologo** (2025). The Elements of Quantitative Investing. *John Wiley & Sons*.
+- **Harry Markowitz** (1952). Portfolio selection. *The journal of finance*.
+- **Jacques Joubert et al.** (2024). [Enhanced Backtesting for Practitioners](https://doi.org/10.3905/jpm.2024.1.637). *The Journal of Portfolio Management*.
+- **Kieran Wood et al.** (2026). [DeePM: Regime-Robust Deep Learning for Systematic Macro Portfolio Management](https://doi.org/10.48550/arXiv.2601.05975).
 - **Marcos Lopez de Prado** (2016). [A Robust Estimator of the Efficient Frontier](https://doi.org/10.2139/ssrn.3469961).
 - **Marcos Lopez de Prado** (2016). [Building Diversified Portfolios that Outperform Out-of-Sample](https://doi.org/10.2139/ssrn.2708678).
+- **Olaf Korn et al.** (2022). [Drawdown Measures: Are They All the Same?](https://doi.org/10.3905/jpm.2022.1.346). *The Journal of Portfolio Management*.
+- **Olivier Ledoit and Michael Wolf** (2003). [Improved estimation of the covariance matrix of stock returns with an application to portfolio selection](https://doi.org/10.1016/S0927-5398(03)00007-0). *Journal of Empirical Finance*.
+- **Richard C.. Grinold and Ronald N.. Kahn** (2000). Active portfolio management: A quantitative approach for providing superior returns and controlling risk. *McGraw-Hill*.
+- **Ross French** (2024). [Sizing Matters: Optimal Scaling of Long and Short Exposures in Equity Portfolios](https://doi.org/10.3905/jpm.2024.1.596). *The Journal of Portfolio Management*.
+- **Sébastien Maillard et al.** (2008). [On the Properties of Equally-Weighted Risk Contributions Portfolios](https://doi.org/10.2139/ssrn.1271972). *SSRN Electronic Journal*.
+- **Theis Ingerslev Jensen et al.** (2024). [Machine Learning and the Implementable Efficient Frontier](https://doi.org/10.2139/ssrn.4187217).
 - **Thomas Raffinot** (2016). [Hierarchical Clustering Based Asset Allocation](https://papers.ssrn.com/abstract=2840729).
-- **Yizhan Shu and John M. Mulvey** (2025). [Dynamic Factor Allocation Leveraging Regime-Switching Signals](https://doi.org/10.3905/jpm.2024.1.649). *The Journal of Portfolio Management*.
+- **Tom Liu and Stefan Zohren** (2023). [Multi-Factor Inception: What to Do with All of These Features?](https://doi.org/10.48550/arXiv.2307.13832).
+- **Victor DeMiguel et al.** (2009). [Optimal Versus Naive Diversification: How Inefficient is the 1/N Portfolio Strategy?](https://doi.org/10.1093/rfs/hhm075). *The Review of Financial Studies*.
 - **Vincent Tan and Stefan Zohren** (2025). [Estimation of Large Financial Covariances: A Cross-Validation Approach](https://doi.org/10.3905/jpm.2024.1.669). *The Journal of Portfolio Management*.
 - **Yijie Wang et al.** (2025). [Machine Learning Meets Markowitz](https://doi.org/10.2139/ssrn.5947774).
-- **Kieran Wood et al.** (2026). [DeePM: Regime-Robust Deep Learning for Systematic Macro Portfolio Management](https://doi.org/10.48550/arXiv.2601.05975).
+- **Yizhan Shu and John M. Mulvey** (2025). [Dynamic Factor Allocation Leveraging Regime-Switching Signals](https://doi.org/10.3905/jpm.2024.1.649). *The Journal of Portfolio Management*.
 - **Zihao Zhang et al.** (2020). [Deep Learning for Portfolio Optimization](https://doi.org/10.3905/jfds.2020.1.042). *The Journal of Financial Data Science*.

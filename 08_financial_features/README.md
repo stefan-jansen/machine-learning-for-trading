@@ -64,19 +64,23 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "08_financial_features"
 
 ## References
 
-- **Yakov Amihud** (2002). [Illiquidity and stock returns: cross-section and time-series effects](https://doi.org/10.1016/S1386-4181(01)00024-6). *Journal of Financial Markets*.
-- **Andrew Ang and Allan Timmermann** (2011). [Regime Changes and Financial Markets](https://doi.org/10.2139/ssrn.1919497).
-- **Clifford S. Asness et al.** (2013). [Value and Momentum Everywhere](https://www.jstor.org/stable/42002613). *The Journal of Finance*.
-- **Peter Carr and Liuren Wu** (2009). [Variance Risk Premiums](https://doi.org/10.1093/rfs/hhn038). *The Review of Financial Studies*.
-- **Rama Cont et al.** (2014). [The Price Impact of Order Book Events](https://doi.org/10.1093/jjfinec/nbt003). *Journal of Financial Econometrics*.
-- **David Easley et al.** (2021). [Microstructure in the Machine Age](https://doi.org/10.1093/rfs/hhaa078). *The Review of Financial Studies*.
-- **Eugene F. Fama and Kenneth R. French** (1992). [The Cross-Section of Expected Stock Returns](https://doi.org/10.1111/j.1540-6261.1992.tb04398.x). *The Journal of Finance*.
-- **Mark B. Garman and Michael J. Klass** (1980). [On the Estimation of Security Price Volatilities from Historical Data](https://www.jstor.org/stable/2352358). *The Journal of Business*.
-- **Campbell R. Harvey et al.** (2016). [...and the Cross-Section of Expected Returns](https://doi.org/10.1093/rfs/hhv059). *Review of Financial Studies*.
-- **Zura Kakushadze et al.** (2015). [101 Formulaic Alphas](https://doi.org/10.2139/ssrn.2701346).
 - **Albert S. Kyle** (1985). [Continuous Auctions and Insider Trading](https://doi.org/10.2307/1913210). *Econometrica*.
+- **Andrew Ang and Allan Timmermann** (2011). [Regime Changes and Financial Markets](https://doi.org/10.2139/ssrn.1919497).
 - **Ari Levine and Lasse Heje Pedersen** (2016). [Which Trend Is Your Friend?](https://doi.org/10.2469/faj.v72.n3.3). *Financial Analysts Journal*.
+- **Brian Hurst et al.** A Century of Evidence on Trend-Following Investing.
+- **Campbell R. Harvey et al.** (2016). [...and the Cross-Section of Expected Returns](https://doi.org/10.1093/rfs/hhv059). *Review of Financial Studies*.
+- **Clifford S. Asness et al.** (2013). [Value and Momentum Everywhere](https://www.jstor.org/stable/42002613). *The Journal of Finance*.
+- **David Easley et al.** (2021). [Microstructure in the Machine Age](https://doi.org/10.1093/rfs/hhaa078). *The Review of Financial Studies*.
+- **Dennis Yang and Qiang Zhang** (2000). [Drift‐Independent Volatility Estimation Based on High, Low, Open, and Close Prices](https://doi.org/10.1086/209650). *The Journal of Business*.
+- **Eugene F. Fama and Kenneth R. French** (1992). [The Cross-Section of Expected Stock Returns](https://doi.org/10.1111/j.1540-6261.1992.tb04398.x). *The Journal of Finance*.
 - **Giuseppe A. Paleologo** (2025). The Elements of Quantitative Investing. *John Wiley & Sons*.
 - **Joseph D. Piotroski** (2000). [Value Investing: The Use of Historical Financial Statement Information to Separate Winners from Losers](https://doi.org/10.2307/2672906). *Journal of Accounting Research*.
 - **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.
-- **Dennis Yang and Qiang Zhang** (2000). [Drift‐Independent Volatility Estimation Based on High, Low, Open, and Close Prices](https://doi.org/10.1086/209650). *The Journal of Business*.
+- **Mark B. Garman and Michael J. Klass** (1980). [On the Estimation of Security Price Volatilities from Historical Data](https://www.jstor.org/stable/2352358). *The Journal of Business*.
+- **Michael Parkinson** (1980). [The Extreme Value Method for Estimating the Variance of the Rate of Return](https://doi.org/10.1086/296071). *The Journal of Business*.
+- **Narasimhan Jegadeesh and Sheridan Titman** (1993). [Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency](https://doi.org/10.1111/j.1540-6261.1993.tb04702.x). *The Journal of Finance*.
+- **Peter Carr and Liuren Wu** (2009). [Variance Risk Premiums](https://doi.org/10.1093/rfs/hhn038). *The Review of Financial Studies*.
+- **Rama Cont et al.** (2014). [The Price Impact of Order Book Events](https://doi.org/10.1093/jjfinec/nbt003). *Journal of Financial Econometrics*.
+- **Robert Novy-Marx** (2015). [Fundamentally, Momentum is Fundamental Momentum](https://doi.org/10.3386/w20984).
+- **Yakov Amihud** (2002). [Illiquidity and stock returns: cross-section and time-series effects](https://doi.org/10.1016/S1386-4181(01)00024-6). *Journal of Financial Markets*.
+- **Zura Kakushadze et al.** (2015). [101 Formulaic Alphas](https://doi.org/10.2139/ssrn.2701346).

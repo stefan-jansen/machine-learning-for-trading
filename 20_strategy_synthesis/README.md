@@ -64,12 +64,18 @@ Downstream: none. Ch20 is the synthesis end of the pipeline.
 
 - **Avramov, Cheng, and Metzker** (2020). [Machine Learning vs. Economic Restrictions](https://doi.org/10.2139/ssrn.3450322).
 - **Bailey and López de Prado** (2014). [The Deflated Sharpe Ratio](https://doi.org/10.2139/ssrn.2460551).
+- **Bryan T. Kelly and Dacheng Xiu** (2023). [Financial Machine Learning](https://doi.org/10.2139/ssrn.4501707).
+- **Campbell R. Harvey and Yan Liu** (2019). [A Census of the Factor Zoo](https://doi.org/10.2139/ssrn.3341728).
 - **Chernozhukov et al.** (2018). [Double/Debiased Machine Learning for Treatment and Structural Parameters](https://doi.org/10.1111/ectj.12097).
+- **David H. Bailey and Marcos Lopez de Prado** (2014). [The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality](https://doi.org/10.2139/ssrn.2460551).
+- **Doron Avramov et al.** (2021). [Machine Learning vs. Economic Restrictions: Evidence from Stock Return Predictability](https://doi.org/10.2139/ssrn.3450322).
 - **Frazzini, Israel, and Moskowitz** (2018). [Trading Costs](https://doi.org/10.2139/ssrn.3229719).
 - **Grinold and Kahn** (2000). *Active Portfolio Management*. Second edition.
 - **Gu, Kelly, and Xiu** (2020). [Empirical Asset Pricing via Machine Learning](https://doi.org/10.1093/rfs/hhaa009).
 - **Harvey, Liu, and Zhu** (2016). [...and the Cross-Section of Expected Returns](https://doi.org/10.1093/rfs/hhv059).
+- **Joachim Freyberger et al.** (2020). [Dissecting Characteristics Nonparametrically](https://doi.org/10.1093/rfs/hhz123). *The Review of Financial Studies*.
 - **López de Prado** (2016). [Building Diversified Portfolios that Outperform Out-of-Sample](https://doi.org/10.3905/jpm.2016.42.4.059).
 - **McLean and Pontiff** (2016). [Does Academic Research Destroy Stock Return Predictability?](https://doi.org/10.1111/jofi.12365).
 - **Novy-Marx and Velikov** (2016). [A Taxonomy of Anomalies and Their Trading Costs](https://doi.org/10.1093/rfs/hhv063).
 - **O'Donovan and Yu** (2025). *Transaction Costs and Cost Mitigation in Option Investment Strategies*.
+- **Richard C.. Grinold and Ronald N.. Kahn** (2000). Active portfolio management: A quantitative approach for providing superior returns and controlling risk. *McGraw-Hill*.

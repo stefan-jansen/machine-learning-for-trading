@@ -77,33 +77,36 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "22_rag_financial_research"
 
 ## References
 
-- **Guido Baltussen et al.** (2025). [Natural Language Processing for Asset Managers: Turning Text into Alpha](https://doi.org/10.3905/jpm.2025.1.784). *The Journal of Portfolio Management*.
-- **Hugo Bowne-Anderson** (2025). [Stop Building AI Agents: Use Smarter LLM Workflows](https://decodingml.substack.com/p/stop-building-ai-agents).
-- **Chanyeol Choi et al.** (2025). [FinDER: Financial Dataset for Question Answering and Evaluating Retrieval-Augmented Generation](https://doi.org/10.48550/arXiv.2504.15800).
-- **Shahul Es et al.** (2025). [Ragas: Automated Evaluation of Retrieval Augmented Generation](https://doi.org/10.48550/arXiv.2309.15217).
-- **Ziang Fang and Jason Moore** (2025). What AI Can (and Can't Yet) Do for Alpha.
-- **Manuel Faysse et al.** (2025). [ColPali: Efficient Document Retrieval with Vision Language Models](https://doi.org/10.48550/arXiv.2407.01449).
-- **Luyu Gao et al.** (2022). [Precise Zero-Shot Dense Retrieval without Relevance Labels](https://doi.org/10.48550/arXiv.2212.10496).
-- **Allen Huang et al.** (2020). [FinBERT—A Deep Learning Approach to Extracting Textual Information](https://doi.org/10.2139/ssrn.3910214). *SSRN Electronic Journal*.
-- **Yaxuan Kong et al.** (2024). [Large Language Models for Financial and Investment Management: Models, Opportunities, and Challenges](https://doi.org/10.3905/jpm.2024.1.646). *The Journal of Portfolio Management*.
 - **Aditya Kusupati et al.** (2024). [Matryoshka Representation Learning](https://doi.org/10.48550/arXiv.2205.13147).
-- **Hoyoung Lee et al.** (2025). [Your AI, Not Your View: The Bias of LLMs in Investment Analysis](https://doi.org/10.48550/arXiv.2507.20957).
-- **Patrick Lewis et al.** (2021). [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://doi.org/10.48550/arXiv.2005.11401).
-- **Nelson F. Liu et al.** (2023). [Lost in the Middle: How Language Models Use Long Contexts](https://doi.org/10.48550/arXiv.2307.03172).
 - **Alejandro Lopez-Lira** (2023). [Risk Factors That Matter: Textual Analysis of Risk Disclosures for the Cross-Section of Returns](https://doi.org/10.2139/ssrn.3313663).
 - **Alejandro Lopez-Lira and Yuehua Tang** (2025). [Can ChatGPT Forecast Stock Price Movements? Return Predictability and Large Language Models](https://doi.org/10.48550/arXiv.2304.07619).
 - **Alejandro Lopez-Lira et al.** (2025). [The Memorization Problem: Can We Trust LLMs' Economic Forecasts?](https://doi.org/10.2139/ssrn.5217505).
-- **Tim Loughran and Bill Mcdonald** (2011). [When Is a Liability Not a Liability? Textual Analysis, Dictionaries, and 10-Ks](https://doi.org/10.1111/j.1540-6261.2010.01625.x). *The Journal of Finance*.
-- **Rodrigo Nogueira and Kyunghyun Cho** (2020). [Passage Re-ranking with BERT](https://doi.org/10.48550/arXiv.1901.04085).
-- **Nils Reimers and Iryna Gurevych** (2019). [Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks](http://arxiv.org/abs/1908.10084). *arXiv:1908.10084 [cs]*.
-- **Dongyu Ru et al.** (2024). [RAGChecker: A Fine-grained Framework for Diagnosing Retrieval-Augmented Generation](https://doi.org/10.48550/arXiv.2408.08067).
-- **Preetha Saha et al.** (2025). [Large Language Model Agents for Investment Management: Foundations, Benchmarks, and Research Frontiers](https://doi.org/10.2139/ssrn.5447274).
-- **Yixuan Tang and Yi Yang** (2025). [FinMTEB: Finance Massive Text Embedding Benchmark](https://doi.org/10.48550/arXiv.2502.10990).
+- **Allen Huang et al.** (2020). [FinBERT—A Deep Learning Approach to Extracting Textual Information](https://doi.org/10.2139/ssrn.3910214). *SSRN Electronic Journal*.
 - **Ashish Vaswani et al.** (2017). [Attention Is All You Need](http://arxiv.org/abs/1706.03762). *arXiv:1706.03762 [cs]*.
+- **Chanyeol Choi et al.** (2025). [FinDER: Financial Dataset for Question Answering and Evaluating Retrieval-Augmented Generation](https://doi.org/10.48550/arXiv.2504.15800).
+- **Dongyu Ru et al.** (2024). [RAGChecker: A Fine-grained Framework for Diagnosing Retrieval-Augmented Generation](https://doi.org/10.48550/arXiv.2408.08067).
+- **Gordon V. Cormack et al.** (2009). [Reciprocal rank fusion outperforms condorcet and individual rank learning methods](https://doi.org/10.1145/1571941.1572114). *Association for Computing Machinery*.
+- **Guido Baltussen et al.** (2025). [Natural Language Processing for Asset Managers: Turning Text into Alpha](https://doi.org/10.3905/jpm.2025.1.784). *The Journal of Portfolio Management*.
+- **Hoyoung Lee et al.** (2025). [Your AI, Not Your View: The Bias of LLMs in Investment Analysis](https://doi.org/10.48550/arXiv.2507.20957).
+- **Hugo Bowne-Anderson** (2025). [Stop Building AI Agents: Use Smarter LLM Workflows](https://decodingml.substack.com/p/stop-building-ai-agents).
 - **Jason Wei et al.** (2023). [Chain-of-Thought Prompting Elicits Reasoning in Large Language Models](https://doi.org/10.48550/arXiv.2201.11903).
+- **Lingyun Zhao et al.** (2020). [A BERT based Sentiment Analysis and Key Entity Detection Approach for Online Financial Texts](http://arxiv.org/abs/2001.05326). *arXiv:2001.05326 [cs]*.
+- **Luyu Gao et al.** (2022). [Precise Zero-Shot Dense Retrieval without Relevance Labels](https://doi.org/10.48550/arXiv.2212.10496).
+- **Manuel Faysse et al.** (2025). [ColPali: Efficient Document Retrieval with Vision Language Models](https://doi.org/10.48550/arXiv.2407.01449).
+- **Nelson F. Liu et al.** (2023). [Lost in the Middle: How Language Models Use Long Contexts](https://doi.org/10.48550/arXiv.2307.03172).
+- **Nils Reimers and Iryna Gurevych** (2019). [Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks](http://arxiv.org/abs/1908.10084). *arXiv:1908.10084 [cs]*.
 - **Orion Weller et al.** (2025). [On the Theoretical Limitations of Embedding-Based Retrieval](https://doi.org/10.48550/arXiv.2508.21038).
+- **Patrick Lewis et al.** (2021). [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://doi.org/10.48550/arXiv.2005.11401).
+- **Preetha Saha et al.** (2025). [Large Language Model Agents for Investment Management: Foundations, Benchmarks, and Research Frontiers](https://doi.org/10.2139/ssrn.5447274).
 - **Qianqian Xie et al.** (2023). [Pixiu: A large language model, instruction data and evaluation benchmark for finance](https://proceedings.neurips.cc/paper_files/paper/2023/hash/6a386d703b50f1cf1f61ab02a15967bb-Abstract-Datasets_and_Benchmarks.html). *arXiv preprint arXiv:2306.05443*.
 - **Qianqian Xie et al.** (2024). [Finben: A holistic financial benchmark for large language models](https://proceedings.neurips.cc/paper_files/paper/2024/hash/adb1d9fa8be4576d28703b396b82ba1b-Abstract-Datasets_and_Benchmarks_Track.html). *Advances in Neural Information Processing Systems*.
+- **Rodrigo Nogueira and Kyunghyun Cho** (2020). [Passage Re-ranking with BERT](https://doi.org/10.48550/arXiv.1901.04085).
+- **Shahul Es et al.** (2025). [Ragas: Automated Evaluation of Retrieval Augmented Generation](https://doi.org/10.48550/arXiv.2309.15217).
 - **Shunyu Yao et al.** (2023). [ReAct: Synergizing Reasoning and Acting in Language Models](https://doi.org/10.48550/arXiv.2210.03629).
+- **Stephen Robertson and Hugo Zaragoza** (2009). [The Probabilistic Relevance Framework: BM25 and Beyond](https://doi.org/10.1561/1500000019). *Found. Trends Inf. Retr.*.
+- **Tim Loughran and Bill Mcdonald** (2011). [When Is a Liability Not a Liability? Textual Analysis, Dictionaries, and 10-Ks](https://doi.org/10.1111/j.1540-6261.2010.01625.x). *The Journal of Finance*.
+- **Xu Liu et al.** (2024). [Moirai-MoE: Empowering Time Series Foundation Models with Sparse Mixture of Experts](https://doi.org/10.48550/arXiv.2410.10469).
 - **Yangyang Yu et al.** (2024). [FinCon: A Synthesized LLM Multi-Agent System with Conceptual Verbal Reinforcement for Enhanced Financial Decision Making](https://doi.org/10.48550/arXiv.2407.06567).
-- **Lingyun Zhao et al.** (2020). [A BERT based Sentiment Analysis and Key Entity Detection Approach for Online Financial Texts](http://arxiv.org/abs/2001.05326). *arXiv:2001.05326 [cs]*.
+- **Yaxuan Kong et al.** (2024). [Large Language Models for Financial and Investment Management: Models, Opportunities, and Challenges](https://doi.org/10.3905/jpm.2024.1.646). *The Journal of Portfolio Management*.
+- **Yixuan Tang and Yi Yang** (2025). [FinMTEB: Finance Massive Text Embedding Benchmark](https://doi.org/10.48550/arXiv.2502.10990).
+- **Ziang Fang and Jason Moore** (2025). What AI Can (and Can't Yet) Do for Alpha.

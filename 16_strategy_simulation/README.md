@@ -172,18 +172,23 @@ Ratio, the Rademacher bound and the reporting figures; `vectorbt` for the vector
 `polars`, `numpy` and `plotly` throughout.
 
 ## References
-- **Ashwin Alankar et al.** (2023). [Fairy Tails: Lessons from 150 Years of Drawdowns](https://doi.org/10.3905/jpm.2023.1.503). *The Journal of Portfolio Management*.
+
 - **Andrew Ang and Geert Bekaert** (2002). [International Asset Allocation With Regime Shifts](https://doi.org/10.1093/rfs/15.4.1137). *Review of Financial Studies*.
-- **David H. Bailey and Marcos Lopez de Prado** (2012). [The Sharpe Ratio Efficient Frontier](https://doi.org/10.2139/ssrn.1821643).
-- **David H. Bailey et al.** (2014). [Pseudo-Mathematics and Financial Charlatanism: The Effects of Backtest Overfitting on Out-of-Sample Performance](https://doi.org/10.1090/noti1105). *Notices of the American Mathematical Society*.
-- **David H. Bailey and Marcos Lopez de Prado** (2014). [The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality](https://doi.org/10.2139/ssrn.2460551).
-- **David H. Bailey et al.** (2015). [The Probability of Backtest Overfitting](https://doi.org/10.2139/ssrn.2326253).
+- **Andrew W. Lo** (2002). [The Statistics of Sharpe Ratios](https://doi.org/10.2469/faj.v58.n4.2453).
+- **Ashwin Alankar et al.** (2023). [Fairy Tails: Lessons from 150 Years of Drawdowns](https://doi.org/10.3905/jpm.2023.1.503). *The Journal of Portfolio Management*.
 - **Campbell R. Harvey et al.** (2016). [...and the Cross-Section of Expected Returns](https://doi.org/10.1093/rfs/hhv059). *Review of Financial Studies*.
+- **David H. Bailey and Marcos Lopez de Prado** (2012). [The Sharpe Ratio Efficient Frontier](https://doi.org/10.2139/ssrn.1821643).
+- **David H. Bailey and Marcos Lopez de Prado** (2014). [The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality](https://doi.org/10.2139/ssrn.2460551).
+- **David H. Bailey et al.** (2014). [Pseudo-Mathematics and Financial Charlatanism: The Effects of Backtest Overfitting on Out-of-Sample Performance](https://doi.org/10.1090/noti1105). *Notices of the American Mathematical Society*.
+- **David H. Bailey et al.** (2015). [The Probability of Backtest Overfitting](https://doi.org/10.2139/ssrn.2326253).
+- **Giuseppe A. Paleologo** (2025). The Elements of Quantitative Investing. *John Wiley & Sons*.
+- **Halbert White** (2000). [A Reality Check for Data Snooping](https://www.jstor.org/stable/2999444). *Econometrica*.
 - **Jacques Joubert et al.** (2024). [Enhanced Backtesting for Practitioners](https://doi.org/10.3905/jpm.2024.1.637). *The Journal of Portfolio Management*.
 - **Jacques Joubert et al.** (2024). [The Three Types of Backtests](https://doi.org/10.2139/ssrn.4897573).
-- **Andrew W. Lo** (2002). [The Statistics of Sharpe Ratios](https://doi.org/10.2469/faj.v58.n4.2453).
-- **R. David McLean and Jeffrey Pontiff** (2016). [Does Academic Research Destroy Stock Return Predictability?](https://doi.org/10.1111/jofi.12365). *Journal of Finance*.
-- **Giuseppe A. Paleologo** (2025). The Elements of Quantitative Investing. *John Wiley & Sons*.
 - **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.
 - **Marcos Lopez de Prado et al.** (2025). [How to Use the Sharpe Ratio](https://doi.org/10.2139/ssrn.5520741).
-- **Halbert White** (2000). [A Reality Check for Data Snooping](https://www.jstor.org/stable/2999444). *Econometrica*.
+- **Narasimhan Jegadeesh and Sheridan Titman** (1993). [Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency](https://doi.org/10.1111/j.1540-6261.1993.tb04702.x). *The Journal of Finance*.
+- **Peter Reinhard Hansen** (2005). [A Test for Superior Predictive Ability](https://doi.org/10.1198/073500105000000063). *Journal of Business & Economic Statistics*.
+- **R. David McLean and Jeffrey Pontiff** (2016). [Does Academic Research Destroy Stock Return Predictability?](https://doi.org/10.1111/jofi.12365). *Journal of Finance*.
+- **Sture Holm** (1979). [A Simple Sequentially Rejective Multiple Test Procedure](https://www.jstor.org/stable/4615733). *Scandinavian Journal of Statistics*.
+- **Yoav Benjamini and Yosef Hochberg** (1995). [Controlling the False Discovery Rate: A Practical and Powerful Approach to Multiple Testing](https://www.jstor.org/stable/2346101). *Journal of the Royal Statistical Society. Series B (Methodological)*.

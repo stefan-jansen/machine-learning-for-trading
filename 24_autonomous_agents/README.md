@@ -117,22 +117,26 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "24_autonomous_agents"
 
 ## References
 
-- **Irene Aldridge et al.** (2025). [Agentic Artificial Intelligence in Finance: A Comprehensive Survey](https://doi.org/10.2139/ssrn.5803628).
-- **Rohan Alur et al.** (2025). [AIA Forecaster: Technical Report](https://doi.org/10.48550/arXiv.2511.07678).
-- **Chanyeol Choi et al.** (2025). [FinDER: Financial Dataset for Question Answering and Evaluating Retrieval-Augmented Generation](https://doi.org/10.48550/arXiv.2504.15800).
-- **Francesco A. Fabozzi and Marcos López de Prado** (2025). [Implementing AI Foundation Models in Asset Management: A Practical Guide](https://doi.org/10.3905/jpm.2025.1.778). *The Journal of Portfolio Management*.
-- **Ziang Fang and Jason Moore** (2025). What AI Can (and Can't Yet) Do for Alpha.
-- **Yaxuan Kong et al.** (2024). [Large Language Models for Financial and Investment Management: Models, Opportunities, and Challenges](https://doi.org/10.3905/jpm.2024.1.646). *The Journal of Portfolio Management*.
-- **Anton Korinek** (2025). [AI Agents for Economic Research](https://doi.org/10.3386/w34202).
-- **Hoyoung Lee et al.** (2025). [Your AI, Not Your View: The Bias of LLMs in Investment Analysis](https://doi.org/10.48550/arXiv.2507.20957).
-- **Zhong-Zhi Li et al.** (2025). [From System 1 to System 2: A Survey of Reasoning Large Language Models](https://doi.org/10.48550/arXiv.2502.17419).
 - **Alejandro Lopez-Lira** (2025). [Can Large Language Models Trade? Testing Financial Theories with LLM Agents in Market Simulations](https://doi.org/10.48550/arXiv.2504.10789).
 - **Alejandro Lopez-Lira et al.** (2025). [The Memorization Problem: Can We Trust LLMs' Economic Forecasts?](https://doi.org/10.2139/ssrn.5217505).
-- **Noah Shinn et al.** (2023). [Reflexion: Language Agents with Verbal Reinforcement Learning](https://doi.org/10.48550/arXiv.2303.11366).
+- **Andrew Ang et al.** (2026). [The Self Driving Portfolio: Agentic Architecture for Institutional Asset Management](https://doi.org/10.48550/arXiv.2604.02279).
+- **Anton Korinek** (2025). [AI Agents for Economic Research](https://doi.org/10.3386/w34202).
+- **Chanyeol Choi et al.** (2025). [FinDER: Financial Dataset for Question Answering and Evaluating Retrieval-Augmented Generation](https://doi.org/10.48550/arXiv.2504.15800).
+- **Francesco A. Fabozzi and Marcos López de Prado** (2025). [Implementing AI Foundation Models in Asset Management: A Practical Guide](https://doi.org/10.3905/jpm.2025.1.778). *The Journal of Portfolio Management*.
+- **Hoyoung Lee et al.** (2025). [Your AI, Not Your View: The Bias of LLMs in Investment Analysis](https://doi.org/10.48550/arXiv.2507.20957).
+- **Irene Aldridge et al.** (2025). [Agentic Artificial Intelligence in Finance: A Comprehensive Survey](https://doi.org/10.2139/ssrn.5803628).
 - **Jason Wei et al.** (2023). [Chain-of-Thought Prompting Elicits Reasoning in Large Language Models](https://doi.org/10.48550/arXiv.2201.11903).
+- **Man Group** [A Trend Following Deep Dive AI, Agents and Trend | Man Group](https://www.man.com/insights/ai-agents-trend).
+- **Noah Shinn et al.** (2023). [Reflexion: Language Agents with Verbal Reinforcement Learning](https://doi.org/10.48550/arXiv.2303.11366).
+- **OWASP** (2025). [OWASP Top 10 for LLM Applications 2025](https://genai.owasp.org/resource/owasp-top-10-for-llm-applications-2025/).
+- [OWASP Top 10 for Large Language Model Applications | OWASP Foundation](https://owasp.org/www-project-top-10-for-large-language-model-applications/).
 - **Qianqian Xie et al.** (2024). [Finben: A holistic financial benchmark for large language models](https://proceedings.neurips.cc/paper_files/paper/2024/hash/adb1d9fa8be4576d28703b396b82ba1b-Abstract-Datasets_and_Benchmarks_Track.html). *Advances in Neural Information Processing Systems*.
+- **Rohan Alur et al.** (2025). [AIA Forecaster: Technical Report](https://doi.org/10.48550/arXiv.2511.07678).
 - **Shunyu Yao et al.** (2023). [Tree of Thoughts: Deliberate Problem Solving with Large Language Models](https://doi.org/10.48550/arXiv.2305.10601).
 - **Shunyu Yao et al.** (2023). [ReAct: Synergizing Reasoning and Acting in Language Models](https://doi.org/10.48550/arXiv.2210.03629).
+- **Tianjiao Zhao et al.** (2025). [AlphaAgents: Large Language Model based Multi-Agents for Equity Portfolio Constructions](https://doi.org/10.48550/arXiv.2508.11152).
 - **Yangyang Yu et al.** (2024). [FinCon: A Synthesized LLM Multi-Agent System with Conceptual Verbal Reinforcement for Enhanced Financial Decision Making](https://doi.org/10.48550/arXiv.2407.06567).
 - **Yangyang Yu et al.** (2025). [Finmem: A performance-enhanced llm trading agent with layered memory and character design](https://ieeexplore.ieee.org/abstract/document/11112648/). *IEEE Transactions on Big Data*.
-- **Tianjiao Zhao et al.** (2025). [AlphaAgents: Large Language Model based Multi-Agents for Equity Portfolio Constructions](https://doi.org/10.48550/arXiv.2508.11152).
+- **Yaxuan Kong et al.** (2024). [Large Language Models for Financial and Investment Management: Models, Opportunities, and Challenges](https://doi.org/10.3905/jpm.2024.1.646). *The Journal of Portfolio Management*.
+- **Zhong-Zhi Li et al.** (2025). [From System 1 to System 2: A Survey of Reasoning Large Language Models](https://doi.org/10.48550/arXiv.2502.17419).
+- **Ziang Fang and Jason Moore** (2025). What AI Can (and Can't Yet) Do for Alpha.

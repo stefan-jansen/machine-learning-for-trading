@@ -87,24 +87,31 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "18_transaction_costs"
 
 ## References
 
-- **Yakov Amihud** (2002). [Illiquidity and stock returns: cross-section and time-series effects](https://doi.org/10.1016/S1386-4181(01)00024-6). *Journal of Financial Markets*.
-- **Jean-Philippe Bouchaud** (2022). [The inelastic market hypothesis: a microstructural interpretation](https://doi.org/10.1080/14697688.2022.2068052). *Quantitative Finance*.
-- **Hector Chan** (2022). [Market Impact Decay and Capacity](https://doi.org/10.3905/jpm.2022.1.382). *The Journal of Portfolio Management*.
-- **Tarun Chordia et al.** (2000). [Commonality in liquidity](https://doi.org/10.1016/S0304-405X(99)00057-4). *Journal of Financial Economics*.
-- **Rama Cont et al.** (2014). [The Price Impact of Order Book Events](https://doi.org/10.1093/jjfinec/nbt003). *Journal of Financial Econometrics*.
-- **Ryan Donnelly** (2022). [Optimal Execution: A Review](https://doi.org/10.1080/1350486X.2022.2161588). *Applied Mathematical Finance*.
-- **Zoltan Eisler et al.** (2010). [The price impact of order book events: market orders, limit orders and cancellations](https://doi.org/10.48550/arXiv.0904.0900).
-- **Andrea Frazzini et al.** (2018). [Trading Costs](https://doi.org/10.2139/ssrn.3229719).
-- **Xavier Gabaix and Ralph S. J. Koijen** (2021). [In Search of the Origins of Financial Fluctuations: The Inelastic Markets Hypothesis](https://doi.org/10.3386/w28967).
-- **Joel Hasbrouck** (1991). [Measuring the Information Content of Stock Trades](https://doi.org/10.2307/2328693). *The Journal of Finance*.
-- **Nikolaus Hautsch and Ruihong Huang** (2012). [The market impact of a limit order](https://doi.org/10.1016/j.jedc.2011.09.012). *Journal of Economic Dynamics and Control*.
-- **Nina Karnaukh et al.** (2015). [Understanding FX Liquidity](https://doi.org/10.2139/ssrn.2329738).
 - **Albert S. Kyle** (1985). [Continuous Auctions and Insider Trading](https://doi.org/10.2307/1913210). *Econometrica*.
 - **Ananth Madhavan** (2002). [Market Microstructure: A Practitioner's Guide](https://www.jstor.org/stable/4480415). *Financial Analysts Journal*.
+- **Andrea Frazzini et al.** (2018). [Trading Costs](https://doi.org/10.2139/ssrn.3229719).
 - **Anna A. Obizhaeva and Jiang Wang** (2013). [Optimal trading strategy and supply/demand dynamics](https://doi.org/10.1016/j.finmar.2012.09.001). *Journal of Financial Markets*.
-- **Giuseppe A. Paleologo** (2025). The Elements of Quantitative Investing. *John Wiley & Sons*.
-- **Emilio Said** (2022). [Market Impact: Empirical Evidence, Theory and Practice](http://arxiv.org/abs/2205.07385).
-- **Yuki Sato and Kiyoshi Kanazawa** (2024). [Does the square-root price impact law belong to the strict universal scalings?: quantitative support by a complete survey of the Tokyo stock exchange market](https://doi.org/10.48550/arXiv.2411.13965).
+- **Bence Toth et al.** (2011). [Anomalous price impact and the critical nature of liquidity in financial markets](https://doi.org/10.1103/PhysRevX.1.021006). *Physical Review X*.
 - **Christopher Schwarz et al.** (2022). [The 'Actual Retail Price' of Equity Trades](https://doi.org/10.2139/ssrn.4189239).
 - **Damian Eduardo Taranto et al.** (2018). [Linear models for the impact of order flow on prices. I. History dependent impact models](https://doi.org/10.1080/14697688.2017.1395903). *Quantitative Finance*.
-- **Bence Toth et al.** (2011). [Anomalous price impact and the critical nature of liquidity in financial markets](https://doi.org/10.1103/PhysRevX.1.021006). *Physical Review X*.
+- **Dmitriy Muravyev and Neil D. Pearson** (2020). [Option Trading Costs Are Lower than You Think](https://doi.org/10.2139/ssrn.2580548).
+- **Emilio Said** (2022). [Market Impact: Empirical Evidence, Theory and Practice](http://arxiv.org/abs/2205.07385).
+- **Giuseppe A. Paleologo** (2025). The Elements of Quantitative Investing. *John Wiley & Sons*.
+- **Hector Chan** (2022). [Market Impact Decay and Capacity](https://doi.org/10.3905/jpm.2022.1.382). *The Journal of Portfolio Management*.
+- **James O'Donovan and Gloria Yang Yu** (2024). [A Transaction Cost Perspective on Option Anomalies](https://doi.org/10.2139/ssrn.4806038).
+- **Jean-Philippe Bouchaud** (2022). [The inelastic market hypothesis: a microstructural interpretation](https://doi.org/10.1080/14697688.2022.2068052). *Quantitative Finance*.
+- **Joel Hasbrouck** (1991). [Measuring the Information Content of Stock Trades](https://doi.org/10.2307/2328693). *The Journal of Finance*.
+- **Marco Avellaneda and Sasha Stoikov** (2008). [High-frequency trading in a limit order book](https://doi.org/10.1080/14697680701381228). *Quantitative Finance*.
+- **Nikolaus Hautsch and Ruihong Huang** (2012). [The market impact of a limit order](https://doi.org/10.1016/j.jedc.2011.09.012). *Journal of Economic Dynamics and Control*.
+- **Nina Karnaukh et al.** (2015). [Understanding FX Liquidity](https://doi.org/10.2139/ssrn.2329738).
+- **Rama Cont et al.** (2014). [The Price Impact of Order Book Events](https://doi.org/10.1093/jjfinec/nbt003). *Journal of Financial Econometrics*.
+- **Robert Almgren and Neil Chriss** (2001). [Optimal execution of portfolio transactions](https://doi.org/10.21314/jor.2001.041). *The Journal of Risk*.
+- **Ryan Donnelly** (2022). [Optimal Execution: A Review](https://doi.org/10.1080/1350486X.2022.2161588). *Applied Mathematical Finance*.
+- **Steven L. Heston et al.** (2023). [Option Momentum](https://papers.ssrn.com/abstract=4113680).
+- **Tarun Chordia et al.** (2000). [Commonality in liquidity](https://doi.org/10.1016/S0304-405X(99)00057-4). *Journal of Financial Economics*.
+- **Thomas Ho and Hans R. Stoll** (1981). [Optimal dealer pricing under transactions and return uncertainty](https://doi.org/10.1016/0304-405X(81)90020-9). *Journal of Financial Economics*.
+- **Xavier Gabaix and Ralph S. J. Koijen** (2021). [In Search of the Origins of Financial Fluctuations: The Inelastic Markets Hypothesis](https://doi.org/10.3386/w28967).
+- **Yakov Amihud** (2002). [Illiquidity and stock returns: cross-section and time-series effects](https://doi.org/10.1016/S1386-4181(01)00024-6). *Journal of Financial Markets*.
+- **Yuki Sato and Kiyoshi Kanazawa** (2024). [Does the square-root price impact law belong to the strict universal scalings?: quantitative support by a complete survey of the Tokyo stock exchange market](https://doi.org/10.48550/arXiv.2411.13965).
+- **Yuriy Nevmyvaka et al.** (2006). [Reinforcement learning for optimized trade execution](https://doi.org/10.1145/1143844.1143929). *Association for Computing Machinery*.
+- **Zoltan Eisler et al.** (2010). [The price impact of order book events: market orders, limit orders and cancellations](https://doi.org/10.48550/arXiv.0904.0900).
