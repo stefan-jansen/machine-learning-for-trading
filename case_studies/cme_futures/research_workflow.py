@@ -1171,10 +1171,18 @@ def pre_overlay_results(
     *,
     label: str,
     execution_tier: str,
+    supersedes_by_set: Mapping[str, str] | None = None,
 ) -> tuple[BacktestResult, ...]:
-    """The signal and allocation pool for one label, at the tier that produced it."""
+    """The signal and allocation pool for one label, at the tier that produced it.
+
+    ``supersedes_by_set`` is forwarded to the set this builds. Without it a caller could declare
+    a generation for `cme_futures-pre-overlay-<label>-v1` and still be refused, because the
+    canonical branch creates that set here and the declaration never arrived: measured
+    2026-09-19, when the weekend risk lane passed all six set names as ``live`` and stopped on
+    the one name this function owns.
+    """
     if execution_tier == "canonical":
-        pool = pre_overlay_candidate_set(study, label=label)
+        pool = pre_overlay_candidate_set(study, label=label, supersedes_by_set=supersedes_by_set)
         return tuple(Result.open(study, value) for value in pool.members)
     return (
         *stage_backtest_results(study, stage="signal", label=label, execution_tier=execution_tier),
@@ -1189,13 +1197,21 @@ def final_validation_results(
     *,
     label: str,
     execution_tier: str,
+    supersedes_by_set: Mapping[str, str] | None = None,
 ) -> tuple[BacktestResult, ...]:
     """The full selection pool for one label: signal, allocation and the risk overlay."""
     if execution_tier == "canonical":
-        pool = final_validation_candidate_set(study, label=label)
+        pool = final_validation_candidate_set(
+            study, label=label, supersedes_by_set=supersedes_by_set
+        )
         return tuple(Result.open(study, value) for value in pool.members)
     return (
-        *pre_overlay_results(study, label=label, execution_tier=execution_tier),
+        *pre_overlay_results(
+            study,
+            label=label,
+            execution_tier=execution_tier,
+            supersedes_by_set=supersedes_by_set,
+        ),
         *stage_backtest_results(study, stage="risk", label=label, execution_tier=execution_tier),
     )
 
