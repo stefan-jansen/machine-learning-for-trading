@@ -695,6 +695,16 @@ def tstr_utility_level(auc_trtr: float, auc_tstr: float) -> str:
     return "LIMITED"
 
 
+def tstr_level_tally(levels: list[str]) -> str:
+    """Count each verdict word once, in the order the draws first earned it.
+
+    Deduplicated with ``dict.fromkeys`` rather than ``set``: a set defines no order, and
+    the point of the line is that the reader can see the verdict move from draw to draw.
+    Ordering it by count would hide a single outlying draw behind the majority word.
+    """
+    return ", ".join(f"{level} x{levels.count(level)}" for level in dict.fromkeys(levels))
+
+
 # %%
 # Check we have enough samples AND both classes in synthetic data
 synth_classes = np.unique(y_synth)
@@ -766,11 +776,14 @@ else:
 #
 # The cell below separates them. It holds the real sample fixed, holds the fine-tune
 # fixed, and repeats only the generator's draw `TSTR_DRAWS` times, so the spread it
-# reports is the sampling variance alone. Sampling is what it costs, not the fit: measured
-# 2026-09-19, one 500-row pass takes around 330 s, so `TSTR_DRAWS` passes are most of the
-# notebook's runtime whenever `RETRAIN` is False and a checkpoint is already on disk - that
-# cell then takes under two seconds. On a cold checkpoint the fit dominates instead and the
-# draws are the cheap part. Cost the run by which of the two it is.
+# reports is the sampling variance alone. Sampling is what it costs, not the fit: whenever
+# `RETRAIN` is False and a checkpoint is already on disk the fit cell takes under two
+# seconds and the draws are most of the notebook's runtime. On a cold checkpoint the fit
+# dominates instead and the draws are the cheap part. Cost the run by which of the two it
+# is - and by what else the machine is doing, because three executions of this notebook on
+# 2026-09-19, all warm and all producing byte-identical output, took 1,603 s, 1,658 s and
+# 3,481 s. The last ran beside several case-study notebooks. A per-pass figure quoted from
+# a quiet machine is a floor rather than a price.
 #
 # `be_great` exposes no seed or generator argument on `sample()`, so the draws cannot be
 # pinned one by one; what pins them is the global torch seed set above, and only once
@@ -834,8 +847,7 @@ if usable:
         levels = [tstr_utility_level(auc_trtr, auc) for auc in usable]
         print(f"TRTR baseline on the same test split: {auc_trtr:.3f}")
         print(
-            f"\nVerdicts earned across the {len(usable)} usable draws: "
-            + ", ".join(f"{level} x{levels.count(level)}" for level in dict.fromkeys(levels))
+            f"\nVerdicts earned across the {len(usable)} usable draws: " + tstr_level_tally(levels)
         )
         print(
             "The verdict is a draw too. Reporting the one the median earns would publish "
