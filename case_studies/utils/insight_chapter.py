@@ -637,7 +637,10 @@ def collect_grid_per_cs(
         except RegistrySelectionError:
             continue
         selected = []
-        for config_name in metrics["config_name"].unique().to_list():
+        # `Series.unique` does not define an order, so this loop set `dl_grid`'s row
+        # order and every group order downstream of it. Sorted, the frame is a function
+        # of the registry.
+        for config_name in sorted(metrics["config_name"].unique().to_list()):
             config_metrics = metrics.filter(pl.col("config_name") == config_name)
             try:
                 selected.append(

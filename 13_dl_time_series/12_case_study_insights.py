@@ -263,7 +263,10 @@ architecture_coverage = (
     )
     .group_by("architecture", maintain_order=True)
     .agg(n_case_studies=pl.col("case_study").n_unique())
-    .sort("n_case_studies", descending=True)
+    # Ties break on the name. NLinear and LSTM both cover 8 and TCN and PatchTST both
+    # cover 3, and `sort` does not keep tied rows in input order, so without this the
+    # table, the chart's bar order and the sentence built from it permute between runs.
+    .sort(["n_case_studies", "architecture"], descending=[True, False])
 )
 missing_dl = [
     SHORT_NAMES[cs] for cs in CASE_STUDY_IDS if cs not in set(dl_grid["case_study"].to_list())
@@ -429,7 +432,7 @@ arch_top_counts = (
         ic_min=pl.col("ic_mean_daily").min(),
         ic_max=pl.col("ic_mean_daily").max(),
     )
-    .sort("n_cs_with_highest_ic", descending=True)
+    .sort(["n_cs_with_highest_ic", "architecture"], descending=[True, False])
 )
 print("Architecture achieving the highest IC at the primary label (count across DL-covered CSs):")
 arch_top_counts
@@ -1251,7 +1254,7 @@ class_top_per_cs = (
     .first()
     .group_by("arch_class", maintain_order=True)
     .agg(n_cs_with_highest_ic=pl.col("short_name").len())
-    .sort("n_cs_with_highest_ic", descending=True)
+    .sort(["n_cs_with_highest_ic", "arch_class"], descending=[True, False])
 )
 print("Architectural class achieving the highest IC per case study (count):")
 class_top_per_cs
