@@ -114,6 +114,7 @@ N_GENERATE = 500  # Synthetic samples to generate
 EPOCHS = 50  # Fine-tuning epochs
 BATCH_SIZE = 16  # Training batch size
 TRAIN_FRACTION = 0.7  # Earliest share of the sample used for training; the rest is held out
+TSTR_DRAWS = 5  # Synthetic draws the TSTR spread is measured over; the fine-tune is done once
 SEED = 42
 
 # %%
@@ -178,7 +179,13 @@ def load_etf_tabular_data(
     # Create tabular features per observation
     records = []
 
-    for symbol in df["symbol"].unique().to_list():
+    # `Series.unique` defines no order, so the symbols came back in a different order in
+    # each process. That order reaches the row set: the timestamp sort below ties on every
+    # trading day, `head(n_samples)` cuts inside the last tied day, and the 70/30 split cuts
+    # inside another - so which symbols land in the test split changed between executions.
+    # Measured 2026-09-19 on one unchanged source parquet: the test split's positive rate
+    # came back 0.0467 in one process and 0.0533 in the next.
+    for symbol in sorted(df["symbol"].unique().to_list()):
         symbol_df = df.filter(pl.col("symbol") == symbol).sort(date_col)
 
         if len(symbol_df) < 30:
@@ -232,8 +239,11 @@ def load_etf_tabular_data(
 
     result_df = pd.DataFrame(records)
 
-    # Sort by date for proper temporal split (critical for financial data)
-    result_df = result_df.sort_values("timestamp").reset_index(drop=True)
+    # Sort by date for proper temporal split (critical for financial data). Tie on the
+    # symbol and sort stably: a hundred symbols share every timestamp, and pandas'
+    # default quicksort is not stable, so "sorted by timestamp" leaves the within-day
+    # order to the input and the two cuts below land wherever that order put things.
+    result_df = result_df.sort_values(["timestamp", "symbol"], kind="stable").reset_index(drop=True)
 
     # Compute extreme move target: |fwd_ret| > 90th percentile
     # This exploits volatility clustering which has real predictive signal
@@ -592,19 +602,29 @@ n_train = int(len(X_real) * TRAIN_FRACTION)
 X_train_real, X_test = X_real[:n_train], X_real[n_train:]
 y_train_real, y_test = y_real[:n_train], y_real[n_train:]
 
+
 # Synthetic data - need to handle potential parsing issues. reindex rather than []: a
 # column the sampler did not return then arrives as all-null and reaches the guarded
 # branch below, instead of raising a missing-column error at this line.
-synth_frame = synthetic_df.reindex(columns=[*feature_cols, target_col])
-synth_features = synth_frame[feature_cols].apply(pd.to_numeric, errors="coerce")
-synth_target = pd.to_numeric(synth_frame[target_col], errors="coerce")
+def synthetic_training_set(frame):
+    """The (X, y) a TSTR classifier trains on, from one raw sample of the generator.
 
-# Drop rows with NaN and convert target to binary
-valid_mask = ~(synth_features.isna().any(axis=1) | synth_target.isna())
-X_synth = synth_features[valid_mask].values
-y_synth_raw = synth_target[valid_mask].values
-# Convert to binary: round and clip to 0/1
-y_synth = np.clip(np.round(y_synth_raw), 0, 1).astype(int)
+    One function because the spread below has to be measured over exactly the pipeline
+    the single draw above uses; a second copy of the parsing rules would make the two
+    incomparable without saying so.
+    """
+    synth_frame = frame.reindex(columns=[*feature_cols, target_col])
+    synth_features = synth_frame[feature_cols].apply(pd.to_numeric, errors="coerce")
+    synth_target = pd.to_numeric(synth_frame[target_col], errors="coerce")
+    # Drop rows with NaN and convert target to binary
+    valid_mask = ~(synth_features.isna().any(axis=1) | synth_target.isna())
+    return (
+        synth_features[valid_mask].values,
+        np.clip(np.round(synth_target[valid_mask].values), 0, 1).astype(int),
+    )
+
+
+X_synth, y_synth = synthetic_training_set(synthetic_df)
 
 print(f"\nReal training samples: {len(X_train_real)}")
 print(f"Synthetic training samples: {len(X_synth)}")
@@ -638,28 +658,41 @@ def tstr_utility_verdict(auc_trtr: float, auc_tstr: float) -> str:
     borderline case - and against a baseline barely above chance it would otherwise
     divide to a "HIGH utility" verdict.
     """
-    if auc_tstr <= 0.5:
+    level = tstr_utility_level(auc_trtr, auc_tstr)
+    if level == "NONE":
         return (
             f"TSTR AUC {auc_tstr:.3f} is at or below chance: a classifier trained on the "
             "synthetic data ranks real test rows no better than a coin flip, so the synthetic "
             "data carries NO usable signal for model training."
         )
-    if auc_trtr <= 0.5:
+    if level == "NO BASELINE":
         return (
             f"TRTR AUC {auc_trtr:.3f} is at or below chance, so the real-data baseline ranks "
             "nothing and there is no utility for the synthetic data to preserve."
         )
-    ratio = auc_tstr / auc_trtr
-    if ratio > 0.95:
-        level = "HIGH"
-    elif ratio > 0.85:
-        level = "MODERATE"
-    else:
-        level = "LIMITED"
     return (
-        f"TSTR AUC ratio: {ratio:.1%} - GReaT synthetic data has {level} utility "
+        f"TSTR AUC ratio: {auc_tstr / auc_trtr:.1%} - GReaT synthetic data has {level} utility "
         "for model training."
     )
+
+
+def tstr_utility_level(auc_trtr: float, auc_tstr: float) -> str:
+    """The verdict word alone, so one draw's verdict can be compared against another's.
+
+    Split out of the sentence because the spread below has to show that the *verdict*
+    moves between draws and not only the number under it. A reader given one sentence
+    per draw would have to re-derive the thresholds to see that.
+    """
+    if auc_tstr <= 0.5:
+        return "NONE"
+    if auc_trtr <= 0.5:
+        return "NO BASELINE"
+    ratio = auc_tstr / auc_trtr
+    if ratio > 0.95:
+        return "HIGH"
+    if ratio > 0.85:
+        return "MODERATE"
+    return "LIMITED"
 
 
 # %%
@@ -669,6 +702,10 @@ has_both_classes = len(synth_classes) >= 2
 print(f"Synthetic classes present: {synth_classes}, both classes: {has_both_classes}")
 
 # %%
+# Bound before the branch so the spread cell below can say the baseline is missing
+# rather than raise on a name that a skipped branch never created.
+auc_trtr = None
+
 if len(X_synth) > 10 and has_both_classes:
     # TRTR: Train Real, Test Real (baseline)
     model_real = GradientBoostingClassifier(n_estimators=50, max_depth=3, random_state=42)
@@ -710,6 +747,95 @@ else:
         print("Need both classes (0 and 1) for classification - increase n_generate.")
     else:
         print("This can happen with very short training - increase epochs.")
+
+# %% [markdown]
+# ### The single AUC above is a draw, not a measurement
+#
+# `great.sample()` draws with temperature, so each execution trains the downstream
+# classifier on a different 500 rows and earns a different AUC on the same held-out real
+# rows. Earlier executions of this notebook at this seed returned TSTR AUCs of 0.70, 0.30
+# and 0.78 - a spread wide enough to contain "synthetic training data preserves
+# downstream utility" and its negation. Those three also differed in the real sample they
+# were built on, because the loader iterated `Series.unique` and sorted on a tied
+# timestamp, so they confound three sources of movement and are quoted here only to say
+# that the quantity moves.
+#
+# The cell below separates them. It holds the real sample fixed, holds the fine-tune
+# fixed, and repeats only the generator's draw `TSTR_DRAWS` times, so the spread it
+# reports is the sampling variance alone. The fine-tune is done once and is the expensive
+# part; each further draw is one sampling pass plus one classifier fit. `be_great`
+# exposes no seed or generator on `sample()`, so the draw cannot be pinned through the
+# public API - and pinning it would publish a stable number while hiding the variance
+# that is the thing worth teaching here.
+
+
+# %%
+def tstr_auc_for_draw(frame):
+    """AUC on the real test split for a classifier trained on one synthetic draw.
+
+    ``None`` where the draw does not survive parsing or carries one class only. That is
+    a property of the draw and is reported as such below, not skipped: a generator that
+    returns an unusable sample two runs in five is part of the answer.
+    """
+    X_draw, y_draw = synthetic_training_set(frame)
+    if len(X_draw) <= 10 or len(np.unique(y_draw)) < 2:
+        return None
+    model = GradientBoostingClassifier(n_estimators=50, max_depth=3, random_state=42)
+    model.fit(X_draw, y_draw)
+    return float(roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]))
+
+
+# The first draw is the sample already generated above, so only the rest are new.
+draw_frames = [synthetic_df]
+for _ in range(max(TSTR_DRAWS - 1, 0)):
+    draw_frames.append(
+        great.sample(n_samples=CONFIG["n_generate"], max_length=500, guided_sampling=True)
+    )
+draw_aucs = [tstr_auc_for_draw(frame) for frame in draw_frames]
+
+print("\n" + "=" * 70)
+print(f"TSTR AUC ACROSS {len(draw_frames)} SYNTHETIC DRAWS (one fine-tune, one test split)")
+print("=" * 70)
+for index, auc in enumerate(draw_aucs, start=1):
+    if auc is None:
+        print(f"  draw {index}: unusable sample")
+    elif auc_trtr is None:
+        print(f"  draw {index}: {auc:.3f}")
+    else:
+        print(f"  draw {index}: {auc:.3f}  ({tstr_utility_level(auc_trtr, auc)})")
+
+usable = [auc for auc in draw_aucs if auc is not None]
+if usable:
+    print(
+        f"\nmedian {float(np.median(usable)):.3f}, "
+        f"range {min(usable):.3f} to {max(usable):.3f}, "
+        f"{len(usable)} of {len(draw_aucs)} draws usable"
+    )
+    if auc_trtr is None:
+        print("\nNo TRTR baseline was computed above, so no ratio verdict is available.")
+    else:
+        levels = [tstr_utility_level(auc_trtr, auc) for auc in usable]
+        print(f"TRTR baseline on the same test split: {auc_trtr:.3f}")
+        print(
+            f"\nVerdicts earned across the {len(usable)} usable draws: "
+            + ", ".join(f"{level} x{levels.count(level)}" for level in dict.fromkeys(levels))
+        )
+        print(
+            "The verdict is a draw too. Reporting the one the median earns would publish "
+            "a reading the other draws contradict, so the notebook reports the spread and "
+            "the book's sentence has to be read against it."
+        )
+else:
+    print("\nNo draw produced a usable training set, so the spread cannot be measured.")
+
+# %% [markdown]
+# **Observation**: read the spread, not the median. What the repeat measures is how much
+# of the TSTR result belongs to the method and how much to one sample from it. A range
+# that straddles one-half means the notebook cannot claim the synthetic data preserves
+# downstream utility on this task, however favourable the draw printed above happened to
+# be; a range that sits clear of one-half means it can. Two things would narrow it: a
+# longer fine-tune, and generating more than 500 rows per draw so each downstream
+# classifier sees a larger training set.
 
 # %% [markdown]
 # ## 8. Statistical Tests
