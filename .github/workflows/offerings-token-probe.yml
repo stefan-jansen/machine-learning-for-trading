@@ -39,7 +39,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.OFFERINGS_TOKEN }}
         run: |
-          set -uo pipefail
+          # Actions runs a `run:` block as `bash --noprofile --norc -eo pipefail {0}`,
+          # so -e is already on and `set -uo pipefail` does not clear it. Every
+          # answer this step wants to read is a non-zero exit - `gh api graphql`
+          # returns 1 whenever the response carries a GraphQL error, and the
+          # authorized answer IS a GraphQL error - so -e has to come off or the
+          # step dies before the verdict.
+          set +e
+          set -u
           if [ -z "${GH_TOKEN:-}" ]; then
             echo "OFFERINGS_TOKEN is not set on this repository" >&2
             exit 1
