@@ -17,8 +17,13 @@
 #     422  the token reached it and the request was rejected on head == base
 #          - the scope is present
 #
-# Dispatch-only, one API call, no checkout, no write of any kind. Delete it once
-# the answer is recorded.
+# Dispatch-only, one API call, no checkout, no write of any kind. The full
+# response is printed, so the 422 can be read as the head == base refusal
+# rather than taken on faith.
+#
+# workflow_dispatch only fires for a workflow file on the default branch, so
+# this has to land on `main` before it can be run, and deleting it afterwards
+# is a second commit to `main`.
 name: OFFERINGS_TOKEN probe
 
 on:
@@ -40,9 +45,14 @@ jobs:
             exit 1
           fi
 
-          status=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/pulls" \
-                     -f head=main -f base=main -f title="scope probe" \
-                     --include --silent 2>&1 | sed -n 's|^HTTP/[0-9.]* \([0-9]*\).*|\1|p' | head -1)
+          response=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/pulls" \
+                       -f head=main -f base=main -f title="scope probe" \
+                       --include 2>&1)
+          echo "--- raw response ---"
+          printf '%s\n' "$response"
+          echo "--- end raw response ---"
+          status=$(printf '%s\n' "$response" \
+                     | sed -n 's|^HTTP/[0-9.]* \([0-9]*\).*|\1|p' | head -1)
 
           echo "createPullRequest returned HTTP ${status:-<none>}"
           case "$status" in
