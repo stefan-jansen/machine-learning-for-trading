@@ -120,6 +120,10 @@ PREVIEW_LABELS = []
 PREVIEW_MAX_BASELINE_ROWS = 0
 PREVIEW_MAX_ALLOCATORS = 0
 MAX_SYMBOLS = 0
+# None means the width `setup.yaml` declares; an int overrides it. Declared here because
+# papermill only binds a name the parameters cell already holds - a run that passes
+# TOP_N_PREDICTIONS to a notebook without it sweeps the declared width and exits 0.
+TOP_N_PREDICTIONS = None
 
 # %% [markdown]
 # ## 2. The baseline this notebook varies
@@ -241,7 +245,9 @@ excluded.select("label", "family", "config_name", "prediction_hash", "sharpe", "
 # below is evidence against one existing.
 
 # %% tags=["results"]
-top_n = get_top_n_predictions(CASE_STUDY_ID, "allocation")
+if TOP_N_PREDICTIONS is None:
+    TOP_N_PREDICTIONS = get_top_n_predictions(CASE_STUDY_ID, "allocation")
+top_n = TOP_N_PREDICTIONS
 checkpoints_per_config = get_checkpoints_per_config(CASE_STUDY_ID)
 if checkpoints_per_config != 1:
     raise ValueError(

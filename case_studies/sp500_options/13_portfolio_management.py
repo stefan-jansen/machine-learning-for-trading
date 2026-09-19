@@ -91,6 +91,10 @@ PREVIEW_ALLOCATORS: tuple[str, ...] = ("score_weighted",)
 SUPERSEDES_BASELINE_CANDIDATES: str = ""
 SUPERSEDES_ALLOCATION_POPULATION: str = ""
 SUPERSEDES_STRATEGY_CANDIDATES: str = ""
+# None means the width `setup.yaml` declares; an int overrides it. Declared here because
+# papermill only binds a name the parameters cell already holds - a run that passes
+# TOP_N_PREDICTIONS to a notebook without it sweeps the declared width and exits 0.
+TOP_N_PREDICTIONS = None
 
 # %% [markdown]
 # ## Freeze what is being selected from
@@ -161,7 +165,9 @@ if baseline_table.get_column("sharpe").null_count():
 # a strategy is chosen on what it earned after costs.
 
 # %%
-top_n_configs = get_top_n_predictions(CASE_STUDY, "allocation")
+if TOP_N_PREDICTIONS is None:
+    TOP_N_PREDICTIONS = get_top_n_predictions(CASE_STUDY, "allocation")
+top_n_configs = TOP_N_PREDICTIONS
 checkpoints_per_config = get_checkpoints_per_config(CASE_STUDY)
 ranked = baseline_table.sort("sharpe", "backtest_hash", descending=[True, False])
 shortlist = (
