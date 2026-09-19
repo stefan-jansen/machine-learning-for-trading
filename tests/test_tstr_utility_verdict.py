@@ -43,37 +43,15 @@ def _load(name: str):
 
 
 def _load_verdict():
-    """Lift ``tstr_utility_verdict`` out of the notebook without executing the notebook.
+    """``tstr_utility_verdict``, lifted with every notebook function it calls.
 
-    It is lifted with every notebook-level function it calls, found rather than listed.
-    ``tstr_utility_verdict`` delegates its thresholds to ``tstr_utility_level``, and a lift
-    that took the verdict alone would exec a body whose call target is undefined: all seven
-    cases here would fail with ``NameError`` instead of on what they assert, which is a
-    suite that cannot fail for the right reason. Finding the callees means the next
-    delegation does not have to be noticed by hand.
+    It delegates its thresholds to ``tstr_utility_level``, and a lift that took the
+    verdict alone would exec a body whose call target is undefined: every case here
+    would fail with ``NameError`` instead of on what it asserts, which is a suite that
+    cannot fail for the right reason. ``_load`` finds the callees rather than listing
+    them, so the next delegation does not have to be noticed by hand.
     """
-    tree = ast.parse(NOTEBOOK.read_text())
-    defined = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
-    assert "tstr_utility_verdict" in defined, "the notebook no longer defines the verdict"
-
-    wanted, queue = set(), ["tstr_utility_verdict"]
-    while queue:
-        name = queue.pop()
-        if name in wanted:
-            continue
-        wanted.add(name)
-        queue += [
-            call.func.id
-            for call in ast.walk(defined[name])
-            if isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Name)
-            and call.func.id in defined
-        ]
-
-    functions = [node for name, node in defined.items() if name in wanted]
-    namespace: dict = {}
-    exec(compile(ast.Module(body=functions, type_ignores=[]), str(NOTEBOOK), "exec"), namespace)
-    return namespace["tstr_utility_verdict"]
+    return _load("tstr_utility_verdict")
 
 
 def test_a_below_chance_tstr_auc_is_refused_rather_than_scored():

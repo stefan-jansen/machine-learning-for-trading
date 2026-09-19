@@ -22,9 +22,9 @@
 # then was keyed on literal line numbers, which every insert above them invalidates.
 # Keyed on the two section headings instead, and the answer checked against the
 # number above before it was written here:
-#   awk '/^# Needs the modelling environment/{f=1} \
-#        /^# Executes notebooks through Papermill/{f=0} \
-#        f&&/^tests\//{n++} END{print n+0}' .github/ci/unit-test-quarantine.txt
+# One line on purpose: written as a shell continuation with `#` on each line, pasting it
+# yields one comment and prints nothing, which is how a recount command stops being run.
+#   awk '/^# Needs the modelling environment/{f=1} /^# Executes notebooks through Papermill/{f=0} f&&/^tests\//{n++} END{print n+0}' .github/ci/unit-test-quarantine.txt
 #
 # `case_studies/utils/gbm.py` imports torch at module scope, so the LightGBM
 # files are behind this boundary too even though LightGBM itself is a small

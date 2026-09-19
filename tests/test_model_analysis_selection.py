@@ -356,19 +356,13 @@ def test_a_feature_no_booster_split_on_is_not_charted(tmp_path, monkeypatch) -> 
     charted = load_gbm_feature_importance("test", label="fwd_ret_5d", top_n=2)["feature"]
     assert charted.unique().to_list() == ["strong"]
 
-    # And the same boosters give the same answer on every load, which is the half a
-    # single call cannot show.
-    repeats = {
-        tuple(
-            sorted(
-                load_gbm_feature_importance("test", label="fwd_ret_5d", top_n=2)["feature"]
-                .unique()
-                .to_list()
-            )
-        )
-        for _ in range(5)
-    }
-    assert repeats == {("strong",)}
+    # The rule's other half - that a tied block is cut the same way on every load - is not
+    # testable from here and is not tested from here. Once `weak` is dropped this fixture
+    # has one surviving feature against a `top_n` of 2, so there is no tie to break and no
+    # cut boundary to land inside, and a repeat loop would pass against any tie-break rule
+    # including none. Building two real boosters that tie on pooled gain to reach it would
+    # be a worse test than the direct one:
+    # `tests/test_gbm_importance.py::test_a_tie_block_straddling_the_cut_is_resolved_the_same_way_every_time`.
 
 
 def test_gbm_importance_still_reads_the_older_booster_layouts(tmp_path, monkeypatch) -> None:
