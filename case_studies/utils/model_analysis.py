@@ -993,12 +993,23 @@ def load_gbm_feature_importance(
 
     df = pl.DataFrame(results)
 
+    # A (config, fold) whose booster made no split at all has a maximum gain of zero, so
+    # normalising by it divides zero by zero and gives NaN for every feature of that fold.
+    # NaN then propagates through the mean the ranking rule takes, and because polars
+    # answers True to `NaN > 0` and sorts NaN above every float, one dead fold would make
+    # the whole figure an alphabetical list presented as a gain ranking. It is dropped
+    # here rather than refused: this loader pools every gbm configuration in the case
+    # study, so one dead fold among many still leaves the others worth ranking, whereas
+    # `insight_chapter`'s loader reads a single configuration and raises instead.
+    # Measured 2026-09-19: no (config, fold) in the four case studies this serves has a
+    # zero maximum, across 331 groups, so nothing published today reaches this.
+    df = df.with_columns(fold_max=pl.col("importance").max().over(["config_name", "fold_id"]))
+    df = df.filter(pl.col("fold_max") > 0)
+    if df.is_empty():
+        return None
+
     # Normalize per (config, fold) to [0, 1]
-    df = df.with_columns(
-        (pl.col("importance") / pl.col("importance").max().over(["config_name", "fold_id"])).alias(
-            "importance_norm"
-        )
-    )
+    df = df.with_columns(importance_norm=pl.col("importance") / pl.col("fold_max")).drop("fold_max")
 
     # Ranked and cut by the shared rule, which drops never-split features and breaks
     # ties on the name. This loader pools every gbm configuration in the case study,

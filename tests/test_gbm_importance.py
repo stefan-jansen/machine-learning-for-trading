@@ -111,9 +111,54 @@ def test_asking_for_more_than_there_are_returns_what_there_is() -> None:
     assert top_features_by_gain(importance, top_n=50) == ["alpha", "beta"]
 
 
-def test_a_frame_where_nothing_was_split_on_charts_nothing() -> None:
-    """Reachable from a booster that made no split at all, and the caller's
-    `is_in([])` then renders an empty figure rather than an arbitrary one."""
-    importance = pl.DataFrame({"feature": ["alpha", "beta"], "importance_norm": [0.0, 0.0]})
+def _normalised(feature, fold_id, importance):
+    """The frame both loaders build, normalised the way they normalise it.
 
-    assert top_features_by_gain(importance, top_n=5) == []
+    Written out rather than hand-filled because the interesting input is what a fold
+    whose booster made no split produces, and that is `0 / 0`. A fixture that types
+    `0.0` into `importance_norm` instead cannot reach it: neither loader can emit that
+    value, and the case that did so passed against the bug it was named for.
+    """
+    return pl.DataFrame(
+        {"feature": feature, "fold_id": fold_id, "importance": importance}
+    ).with_columns(
+        importance_norm=pl.col("importance") / pl.col("importance").max().over("fold_id")
+    )
+
+
+def test_a_fold_whose_booster_made_no_split_normalises_to_nan_not_zero() -> None:
+    """The premise of the two cases below, asserted rather than assumed."""
+    frame = _normalised(["alpha", "beta"], [0, 0], [0.0, 0.0])
+
+    assert frame["importance_norm"].is_nan().all()
+    # And polars' own answers, which are what make the naive filter wrong.
+    assert pl.DataFrame({"x": [float("nan")]}).select(pl.col("x") > 0).item() is True
+
+
+def test_a_dead_fold_cannot_turn_the_ranking_into_an_alphabetical_list() -> None:
+    """The failure this rule exists to prevent, and it is silent without the guard.
+
+    `mean()` propagates NaN, `NaN > 0` is True, and polars sorts NaN above every float,
+    so filtering on `> 0` alone keeps exactly the features the rule promises to drop and
+    ranks them first - and the name tie-break then makes that alphabetical and
+    reproducible. Here `zeta` is the only feature any tree split on.
+    """
+    frame = _normalised(
+        ["zeta", "alpha", "beta", "zeta", "alpha", "beta"],
+        [0, 0, 0, 1, 1, 1],
+        [0.0, 0.0, 0.0, 100.0, 50.0, 0.0],
+    )
+
+    charted = top_features_by_gain(frame, top_n=2)
+    assert "alpha" not in charted and "beta" not in charted
+    # Nothing survives, because the dead fold poisons every feature's mean. That is why
+    # the loaders drop a dead fold before normalising rather than relying on this.
+    assert charted == []
+
+
+def test_a_frame_where_nothing_was_split_on_charts_nothing() -> None:
+    """A run whose every fold is dead, and the caller's `is_in([])` then renders an
+    empty figure rather than an arbitrary one."""
+    frame = _normalised(["alpha", "beta"], [0, 0], [0.0, 0.0])
+
+    assert top_features_by_gain(frame, top_n=5) == []
