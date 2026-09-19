@@ -171,7 +171,7 @@ labels = list(LABELS) if LABELS else list(ALL_LABELS)
 # does not redeclare it.
 
 # %%
-CANONICAL_RUN = EXECUTION_TIER == "canonical" and not WORKSPACE
+CANONICAL_RUN = EXECUTION_TIER == "canonical"
 if PREVIEW_FOLDS and CANONICAL_RUN:
     raise ValueError(
         "PREVIEW_FOLDS narrows the coverage gate and a canonical run may not narrow it: "
