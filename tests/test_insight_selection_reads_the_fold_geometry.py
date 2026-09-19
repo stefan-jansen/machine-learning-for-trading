@@ -430,12 +430,30 @@ def test_a_prediction_set_with_no_metrics_row_does_not_set_the_geometry(
     full-length geometry that disagrees with the two real candidates', which before the
     restriction raised `IncomparableFoldGeometryError` and stopped the whole chapter over
     a row `select_rank1` could never have returned.
+
+    Asserted on all three collectors. The first version of this fix restricted the frame
+    inside `collect_rank1_per_cs` and left `collect_grid_per_cs` and
+    `collect_multi_label_per_cs` resolving a geometry from the unrestricted one, so the
+    selection succeeded and the chapter died one cell later at the horizon census -
+    which reads as a problem with the horizon labels rather than with a stray
+    registration. The restriction belongs in the shared builder for that reason.
     """
     selects_from(tmp_path, [("nlinear", 0.05, STRIDE_FIVE), ("lstm", 0.02, STRIDE_FIVE)])
     _register_without_metrics(tmp_path, "interrupted", (1, 6, 11, 16))
 
-    selected = collect_rank1_per_cs(["test"], "deep_learning")
-
-    assert selected.height == 1
-    assert selected["config_name"].to_list() == ["nlinear"]
-    assert selected["n_folds_scored"].to_list() == [4]
+    collected = {
+        "rank1": collect_rank1_per_cs(["test"], "deep_learning"),
+        "multi_label": collect_multi_label_per_cs(["test"], "deep_learning", [LABEL]),
+        "grid": collect_grid_per_cs(["test"], "deep_learning"),
+    }
+    # Reaching this line at all is most of the assertion: without the restriction each
+    # of the three raises IncomparableFoldGeometryError on the stray geometry.
+    for name, frame in collected.items():
+        assert not frame.is_empty(), name
+        assert "interrupted" not in frame["config_name"].to_list(), name
+        assert set(frame["n_folds_scored"].to_list()) == {4}, name
+    # rank1 and the horizon census return the selected row; the grid returns every
+    # candidate, which is why the config assertions differ.
+    assert collected["rank1"]["config_name"].to_list() == ["nlinear"]
+    assert collected["multi_label"]["config_name"].to_list() == ["nlinear"]
+    assert sorted(collected["grid"]["config_name"].to_list()) == ["lstm", "nlinear"]

@@ -364,7 +364,23 @@ def _raw_primary_candidates(
         ).fetchall()
         retired = retired_prediction_hashes(db)
     rows = [row for row in rows if row["prediction_hash"] not in retired]
-    fold_rows = [row for row in fold_rows if row["prediction_hash"] not in retired]
+    # The fold frame is restricted to the prediction sets the metrics frame holds, and
+    # that is not the same filter as dropping the retired ones. The metrics query joins
+    # `prediction_metrics` and the fold query does not, and the two tables are written by
+    # separate calls - `register_prediction_set` then `register_fold_metrics` - so a set
+    # interrupted between them, or registered with `metrics=None`, has fold rows and no
+    # metrics row. It is unrankable, and it used to reach `resolve_expected_fold_ids`
+    # anyway: a full-length but differently numbered geometry from one raised
+    # `IncomparableFoldGeometryError` and stopped a whole chapter over a candidate
+    # `select_rank1` could never have returned. Restricted here rather than at each call
+    # site because all three collectors resolve a geometry from this frame and only one
+    # of them had the guard.
+    rankable = {row["prediction_hash"] for row in rows}
+    fold_rows = [
+        row
+        for row in fold_rows
+        if row["prediction_hash"] not in retired and row["prediction_hash"] in rankable
+    ]
     if not rows:
         return pl.DataFrame(), pl.DataFrame(), 0
     metrics = pl.DataFrame([dict(row) for row in rows], infer_schema_length=None)
@@ -398,21 +414,7 @@ def collect_rank1_per_cs(
         if n_folds <= 0:
             raise RegistrySelectionError(f"{case_study}/{family}/{label}: n_folds is not declared")
         try:
-            # The geometry standard is set by the candidates that could be selected, not
-            # by every row with fold metrics. `_raw_primary_candidates` builds `metrics`
-            # through a join on `prediction_metrics` and `folds` without one, and the two
-            # tables are written by separate calls - `register_prediction_set` then
-            # `register_fold_metrics` - so a prediction set with fold rows and no metrics
-            # row still contributes a geometry here. A stray full-length but differently
-            # numbered one would raise `IncomparableFoldGeometryError` and stop the whole
-            # chapter over a candidate `select_rank1` could never have returned.
-            # A semi-join rather than `is_in(metrics["prediction_hash"])`: polars
-            # deprecates `is_in` against a Series of the same dtype as ambiguous, and
-            # the join says what this is.
-            rankable = folds.join(
-                metrics.select("prediction_hash").unique(), on="prediction_hash", how="semi"
-            )
-            expected_fold_ids = resolve_expected_fold_ids(rankable, n_folds)
+            expected_fold_ids = resolve_expected_fold_ids(folds, n_folds)
             row = select_rank1(metrics, folds, expected_fold_ids=expected_fold_ids)
         except IncomparableFoldGeometryError as exc:
             raise IncomparableFoldGeometryError(f"{case_study}/{family}/{label}: {exc}") from exc
