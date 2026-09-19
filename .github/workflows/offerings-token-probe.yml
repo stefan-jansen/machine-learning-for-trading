@@ -1,0 +1,53 @@
+# Does OFFERINGS_TOKEN carry pull-requests:write?
+#
+# The daily README Offerings job failed from 2026-09-16 with
+#
+#     GraphQL: Resource not accessible by personal access token (createPullRequest)
+#
+# and its own success does not answer the question: the pull request step opens
+# with `git diff --quiet -- README.md` and exits early whenever the rendered
+# block is current, so a green run can mean the call was never made. On
+# 2026-09-19 that is exactly what happened.
+#
+# This workflow asks the token directly. It POSTs a pull request with head and
+# base both `main`, which GitHub refuses as a validation error BEFORE it decides
+# anything about content, so nothing is ever created:
+#
+#     403  the token cannot reach the pull request API - the scope is missing
+#     422  the token reached it and the request was rejected on head == base
+#          - the scope is present
+#
+# Dispatch-only, one API call, no checkout, no write of any kind. Delete it once
+# the answer is recorded.
+name: OFFERINGS_TOKEN probe
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask the token whether it can open a pull request
+        env:
+          GH_TOKEN: ${{ secrets.OFFERINGS_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "OFFERINGS_TOKEN is not set on this repository" >&2
+            exit 1
+          fi
+
+          status=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/pulls" \
+                     -f head=main -f base=main -f title="scope probe" \
+                     --include --silent 2>&1 | sed -n 's|^HTTP/[0-9.]* \([0-9]*\).*|\1|p' | head -1)
+
+          echo "createPullRequest returned HTTP ${status:-<none>}"
+          case "$status" in
+            422) echo "PASS: the token holds pull-requests:write. 422 is the head == base refusal." ;;
+            403) echo "FAIL: the token still lacks pull-requests:write." >&2; exit 1 ;;
+            201) echo "UNEXPECTED: a pull request was created. Close it." >&2; exit 1 ;;
+            *)   echo "INCONCLUSIVE: unexpected status, read the raw response above." >&2; exit 1 ;;
+          esac
