@@ -92,6 +92,42 @@ def _register(case_dir: Path, config_name: str, daily_ic: float, fold_ids: tuple
     return prediction_hash
 
 
+def _register_without_metrics(case_dir: Path, config_name: str, fold_ids: tuple[int, ...]) -> str:
+    """A prediction set with fold metrics and no `prediction_metrics` row.
+
+    `register_prediction_set` takes `metrics=None`, and the two tables are written by
+    separate calls, so this is a state the registry reaches on its own - an interrupted
+    run that got as far as its folds, or a set registered for its predictions alone.
+    """
+    training_hash = register_training_run(
+        "test",
+        {
+            "family": "deep_learning",
+            "label": LABEL,
+            "config_name": config_name,
+            "params": {},
+            "seed": 42,
+            "n_folds": 4,
+        },
+        case_dir=case_dir,
+    )
+    prediction_hash = register_prediction_set(
+        "test",
+        training_hash,
+        checkpoint_value=5,
+        checkpoint_kind="epoch",
+        split="validation",
+        case_dir=case_dir,
+    )
+    register_fold_metrics(
+        "test",
+        prediction_hash,
+        {fold_id: {"ic": 0.05} for fold_id in fold_ids},
+        case_dir=case_dir,
+    )
+    return prediction_hash
+
+
 def _publish(case_dir: Path, members: list[str]) -> None:
     """One live population, so the supersession filter keeps every member."""
     snapshot = {
@@ -381,3 +417,25 @@ def test_an_underivable_grid_is_null_rather_than_false(tmp_path, selects_from, m
     assert row["n_folds_scored"] == 4
     assert row["n_folds_canonical"] is None
     assert row["covers_fold_grid"] is None
+
+
+def test_a_prediction_set_with_no_metrics_row_does_not_set_the_geometry(
+    tmp_path, selects_from
+) -> None:
+    """The geometry standard comes from candidates that could be selected.
+
+    `_raw_primary_candidates` builds its metrics frame through a join on
+    `prediction_metrics` and its folds frame without one, so a set with fold rows and no
+    metrics row reaches the resolver while being unrankable. Here it reports a
+    full-length geometry that disagrees with the two real candidates', which before the
+    restriction raised `IncomparableFoldGeometryError` and stopped the whole chapter over
+    a row `select_rank1` could never have returned.
+    """
+    selects_from(tmp_path, [("nlinear", 0.05, STRIDE_FIVE), ("lstm", 0.02, STRIDE_FIVE)])
+    _register_without_metrics(tmp_path, "interrupted", (1, 6, 11, 16))
+
+    selected = collect_rank1_per_cs(["test"], "deep_learning")
+
+    assert selected.height == 1
+    assert selected["config_name"].to_list() == ["nlinear"]
+    assert selected["n_folds_scored"].to_list() == [4]

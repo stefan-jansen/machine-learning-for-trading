@@ -398,7 +398,21 @@ def collect_rank1_per_cs(
         if n_folds <= 0:
             raise RegistrySelectionError(f"{case_study}/{family}/{label}: n_folds is not declared")
         try:
-            expected_fold_ids = resolve_expected_fold_ids(folds, n_folds)
+            # The geometry standard is set by the candidates that could be selected, not
+            # by every row with fold metrics. `_raw_primary_candidates` builds `metrics`
+            # through a join on `prediction_metrics` and `folds` without one, and the two
+            # tables are written by separate calls - `register_prediction_set` then
+            # `register_fold_metrics` - so a prediction set with fold rows and no metrics
+            # row still contributes a geometry here. A stray full-length but differently
+            # numbered one would raise `IncomparableFoldGeometryError` and stop the whole
+            # chapter over a candidate `select_rank1` could never have returned.
+            # A semi-join rather than `is_in(metrics["prediction_hash"])`: polars
+            # deprecates `is_in` against a Series of the same dtype as ambiguous, and
+            # the join says what this is.
+            rankable = folds.join(
+                metrics.select("prediction_hash").unique(), on="prediction_hash", how="semi"
+            )
+            expected_fold_ids = resolve_expected_fold_ids(rankable, n_folds)
             row = select_rank1(metrics, folds, expected_fold_ids=expected_fold_ids)
         except IncomparableFoldGeometryError as exc:
             raise IncomparableFoldGeometryError(f"{case_study}/{family}/{label}: {exc}") from exc
@@ -1128,7 +1142,17 @@ def plot_multi_label_horizon(
     markers = ["o", "s", "D", "^", "v", "P", "X", "*"]
     linestyles = ["-", "--", "-.", ":", "-", "--", "-.", ":"]
     for idx, cs in enumerate(cs_sorted):
-        sub = plot_df.filter(pl.col("short_name") == cs).sort("horizon_days")
+        # Sorted on (horizon_days, label). HORIZON_DAYS maps several labels onto one
+        # value - fwd_ret_1d and fwd_ret_24h onto 1.0, fwd_ret_5d and
+        # fwd_ret_risk_adj_5d onto 5.0, fwd_ret_21d, fwd_ret_1m and fwd_ret_1m_win onto
+        # 21.0 - so a case study carrying both members of a pair has two points at one x
+        # and the tie order decides which the line reaches first. The tie is live, not
+        # hypothetical: measured 2026-09-19, SP500 Eq+Opt has fwd_ret_5d and
+        # fwd_ret_risk_adj_5d in the deep_learning census, and gbm, linear and tabular_dl
+        # each add US Firms at fwd_ret_1m against fwd_ret_1m_win. Sorting on the horizon
+        # alone left the drawn order a property of the frame; it happens to match today,
+        # so pinning it moves no committed figure.
+        sub = plot_df.filter(pl.col("short_name") == cs).sort(["horizon_days", "label"])
         if sub.height < 2:
             continue
         x = sub["horizon_days"].to_numpy()
