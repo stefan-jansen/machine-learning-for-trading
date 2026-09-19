@@ -117,6 +117,21 @@ def _publish(case_dir: Path, members: list[str]) -> None:
         )
 
 
+@pytest.fixture(autouse=True)
+def _clear_canonical_fold_cache():
+    """`canonical_fold_ids` is lru_cached on (case study, label).
+
+    That key is stable for the life of a run and is not stable across tests: every test
+    here declares a different grid for the same "test"/fwd_ret_5d pair, and the ones that
+    never stub it cache a None. Cleared on the way in and on the way out, so the leak does
+    not reach `test_insight_selection_reads_the_live_generation.py`, which uses the same
+    pair and runs after this file.
+    """
+    canonical_fold_ids.cache_clear()
+    yield
+    canonical_fold_ids.cache_clear()
+
+
 @pytest.fixture
 def selects_from(monkeypatch):
     """`collect_rank1_per_cs(["test"], "deep_learning")` against one temp registry."""
@@ -286,10 +301,6 @@ def _grid(monkeypatch, fold_ids):
         return [{"fold": fold_id} for fold_id in fold_ids]
 
     monkeypatch.setattr("case_studies.utils.insight_chapter.modeling_fold_boundaries", _boundaries)
-    # `canonical_fold_ids` is lru_cached on (case study, label). That is stable within a
-    # run and is not stable across tests, each of which declares a different grid for the
-    # same "test"/fwd_ret_5d key - and the tests above it cache a None for that key.
-    canonical_fold_ids.cache_clear()
 
 
 def test_a_subsampled_grid_is_selected_and_says_so(tmp_path, selects_from, monkeypatch) -> None:
