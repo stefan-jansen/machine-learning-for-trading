@@ -57,6 +57,7 @@ import polars as pl
 # %%
 from case_studies.research import (
     PLAN_STAGE_KEYS,
+    SUPERSEDES_LIVE,
     CandidateSet,
     OfficialPopulation,
     Study,
@@ -466,7 +467,16 @@ RISK_POPULATION = sweep_plan_name(
 # Empty, for the reason `SUPERSEDES_ALLOCATION_POPULATIONS` is: a declaration naming the
 # generation in force pre-authorizes a membership change under that name instead of recording
 # one that happened. Add an entry when a run is refused, with the hash the refusal prints.
-SUPERSEDES_RISK_POPULATIONS: dict[str, str] = {}
+SUPERSEDES_RISK_POPULATIONS: dict[str, str] = {
+    # Re-published 2026-09-19 after the twin-row drop deleted the plans of the 2026-09-18 sweep.
+    # The generation these retire predates that sweep and survived the drop, so the members moved
+    # under a name that already had a tip. `live` rather than the hash the refusal printed: the
+    # hash names the tip, the tip moves whenever these three re-run, and a quoted one is wrong
+    # from the next run onward.
+    "sp500_equity_option_analytics-risk-fwd_ret_5d-fe0f6ceeb71c": SUPERSEDES_LIVE,
+    "sp500_equity_option_analytics-risk-fwd_ret_10d-fe0f6ceeb71c": SUPERSEDES_LIVE,
+    "sp500_equity_option_analytics-risk-fwd_ret_risk_adj_5d-fe0f6ceeb71c": SUPERSEDES_LIVE,
+}
 
 _risk_plan = None
 try:
