@@ -1,0 +1,146 @@
+{
+  "backtest_config": {
+    "account": {
+      "allow_leverage": false,
+      "allow_short_selling": false,
+      "fixed_margin_schedule": null,
+      "initial_margin": 0.5,
+      "lock_notional_update_mode": "position_legs",
+      "long_maintenance_margin": 0.25,
+      "margin_pct_schedule": null,
+      "short_cash_policy": "credit",
+      "short_maintenance_margin": 0.3
+    },
+    "calendar": {
+      "calendar": "NYSE",
+      "data_frequency": "daily",
+      "enforce_sessions": false,
+      "timezone": "UTC"
+    },
+    "cash": {
+      "buffer_pct": 0.0,
+      "initial": 1000000.0
+    },
+    "commission": {
+      "minimum": 0.0,
+      "model": "percentage",
+      "per_share": 0.0,
+      "per_trade": 0.0,
+      "rate": 0.00039
+    },
+    "execution": {
+      "execution_mode": "next_bar",
+      "execution_price": "open",
+      "mark_price": "price"
+    },
+    "feed": {
+      "ask_col": null,
+      "ask_size_col": null,
+      "bar_type": "quote",
+      "bid_col": null,
+      "bid_size_col": null,
+      "calendar": "NYSE",
+      "close_col": "close",
+      "data_frequency": "daily",
+      "entity_col": "symbol",
+      "high_col": "high",
+      "low_col": "low",
+      "mid_col": null,
+      "open_col": "open",
+      "price_col": "close",
+      "session_start_time": null,
+      "timestamp_col": "timestamp",
+      "timestamp_semantics": null,
+      "timezone": "UTC",
+      "volume_col": "volume",
+      "vwap_col": null
+    },
+    "metadata": {
+      "cadence": "weekly_friday_close",
+      "case_study": "sp500_equity_option_analytics",
+      "chapter": "ch17",
+      "fill_timing": "MONDAY_OPEN",
+      "prediction_hash": "8fff36062ce7",
+      "preset_path": "case_studies/sp500_equity_option_analytics/config/backtest/base.yaml",
+      "signal_direction": "long_only"
+    },
+    "orders": {
+      "buying_power_reservation": false,
+      "entry_order_priority": "submission",
+      "fill_ordering": "exit_first",
+      "immediate_fill": false,
+      "late_asset_min_bars": 1,
+      "late_asset_policy": "allow",
+      "missing_price_policy": "skip",
+      "next_bar_queue_shadow_validation": false,
+      "next_bar_simple_cash_check": false,
+      "next_bar_submission_precheck": false,
+      "partial_fills_allowed": false,
+      "rebalance_headroom_pct": 1.0,
+      "rebalance_mode": "incremental",
+      "reject_on_insufficient_cash": true,
+      "skip_cash_validation": false
+    },
+    "position_sizing": {
+      "share_rounding": "nearest",
+      "share_type": "integer"
+    },
+    "result": {
+      "retain_intent_history": false,
+      "retain_lifecycle_history": false
+    },
+    "settlement": {
+      "delay": 0,
+      "reduces_buying_power": true
+    },
+    "slippage": {
+      "fixed": 0.0,
+      "model": "percentage",
+      "rate": 0.00026000000000000003,
+      "spread": 0.0,
+      "spread_by_asset": {},
+      "spread_convention": "full_spread",
+      "stop_rate": 0.0
+    },
+    "stops": {
+      "initial_hwm_source": "fill_price",
+      "stop_fill_mode": "stop_price",
+      "stop_level_basis": "fill_price",
+      "trail_hwm_source": "close",
+      "trail_include_entry_bar_extremes": false,
+      "trail_stop_timing": "lagged"
+    }
+  },
+  "chapter": "ch19",
+  "preset_id": "sp500_equity_option_analytics:base",
+  "strategy": {
+    "allocation": {
+      "long_short": false,
+      "method": "hrp",
+      "top_k": 5,
+      "vol_window": 63
+    },
+    "rebalance": {
+      "cadence": "weekly_friday_close",
+      "min_trade_value": 100.0,
+      "min_weight_change": 0.005,
+      "mode": "engine",
+      "step": 1
+    },
+    "risk": {
+      "name": "stop_loss_3pct",
+      "position_rules": [
+        {
+          "threshold": 0.03,
+          "type": "stop_loss"
+        }
+      ]
+    },
+    "signal": {
+      "long_short": false,
+      "method": "equal_weight_top_k",
+      "top_k": 5
+    }
+  },
+  "version": 2
+}
