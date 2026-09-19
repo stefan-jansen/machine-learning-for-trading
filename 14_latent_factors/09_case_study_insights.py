@@ -413,7 +413,12 @@ def paired_daily_ic(latent: pl.DataFrame, supervised: pl.DataFrame) -> pl.DataFr
         pl.col("latent_target").rank(method="average").over("timestamp").alias("target_rank"),
     )
     return (
-        ranked.group_by("timestamp", maintain_order=True)
+        # No maintain_order: the chain ends in .sort("timestamp") and timestamp is the
+        # only group key, so it is unique after the aggregation and the sort determines
+        # the order completely. Pinning a group_by whose order is already decided reads
+        # to the next person like the Chapter 13 defect, where ten unordered group_bys
+        # permuted five rendered cells between executions, and this was never that.
+        ranked.group_by("timestamp")
         .agg(
             pl.len().alias("n_obs"),
             pl.corr("latent_rank", "target_rank").alias("latent_ic"),
@@ -572,7 +577,9 @@ def mean_daily_score_correlation(left: pl.DataFrame, right: pl.DataFrame) -> flo
         pl.col("right_score").rank(method="average").over("timestamp").alias("right_rank"),
     )
     daily = (
-        ranked.group_by("timestamp", maintain_order=True)
+        # Same as `paired_daily_ic` above: unique key, terminal sort, and the caller
+        # takes a mean, which no ordering can move.
+        ranked.group_by("timestamp")
         .agg(pl.len().alias("n_obs"), pl.corr("left_rank", "right_rank").alias("correlation"))
         .filter(pl.col("n_obs") >= 5)
         .drop_nulls("correlation")
