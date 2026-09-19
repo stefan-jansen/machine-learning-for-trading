@@ -111,7 +111,7 @@ PREVIEW_MAX_BASELINE_ROWS = 0
 # None means the width `setup.yaml` declares; an int overrides it. Declared here because
 # papermill only binds a name the parameters cell already holds - a run that passes
 # TOP_N_PREDICTIONS to a notebook without it sweeps the declared width and exits 0.
-TOP_N_PREDICTIONS: int | None = None
+TOP_N_PREDICTIONS = None
 
 # The allocation population is immutable under its name, so a run whose members have moved has
 # to say which generation it retires. Anything upstream that changes a backtest identity moves

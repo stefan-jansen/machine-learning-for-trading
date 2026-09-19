@@ -1,21 +1,24 @@
 """Every allocation notebook has to honour a width the launcher passes.
 
-Papermill binds an override only into a name the parameters cell already holds. A notebook
-that omits `TOP_N_PREDICTIONS` and calls `get_top_n_predictions` unconditionally therefore
-sweeps the width its `setup.yaml` declares, prints one advisory `Passed unknown parameter`
-line among a few hundred, and **exits 0** - the registry gains rows, every identity and
-isolation check passes, and nothing says the width did not move. On 2026-09-18 that cost a
-full canonical-tier `sp500_options` sweep launched at 999 against 46 advancing prediction
-sets, caught only because a private pin recorded a number the sweep never reached
-(`ml4t/agent-workspace#1200`).
+Papermill binds an override only into a name the parameters cell already holds, and only when
+its own line-splitting parser can see that name. A notebook that omits `TOP_N_PREDICTIONS` and
+calls `get_top_n_predictions` unconditionally therefore sweeps the width its `setup.yaml`
+declares, prints one advisory `Passed unknown parameter` line among a few hundred, and
+**exits 0** - the registry gains rows, every identity and isolation check passes, and nothing
+says the width did not move. On 2026-09-18 that cost a full canonical-tier `sp500_options`
+sweep launched at 999 against 46 advancing prediction sets, caught only because a private pin
+recorded a number the sweep never reached (`ml4t/agent-workspace#1200`).
 
-Four of the nine had the defect: `cme_futures`, `crypto_perps_funding`, `sp500_options` and
-`us_equities_panel`. The issue named the first three; the fourth is the same shape.
+Three assertions, because each passes on a notebook the other two catch:
 
-Both halves are asserted, because either alone passes on a notebook that still ignores the
-override. Declaring the name without reading it is the failure mode papermill cannot see, and
-reading a name the parameters cell does not bind is a `NameError` at run time rather than a
-silent narrowing - so the pair is what makes the parameter mean anything.
+- the parameters cell binds the name, or papermill drops the override;
+- papermill can see it there, since `X: int | None = None` is valid Python that its parser
+  cannot read (`tests/pm_helpers._papermill_visible`), so the name is bound and the override
+  still never lands. `test_every_declared_parameter_reaches_its_notebook` covers only names a
+  smoke configuration actually passes, which leaves a parameter no config uses unguarded;
+- `TOP_N_PREDICTIONS` reaches the statement that reads the declared width, or the override is
+  accepted and then overwritten - the shape `fx_pairs` had, where the name was bound, read
+  only by the narrowing guard, and the width came from `TOP_N_CONFIGS`.
 """
 
 from __future__ import annotations
@@ -27,8 +30,9 @@ import pytest
 
 from tests.pm_helpers import (
     PARAMETERS_CELL_MARKER,
+    _papermill_visible,
     _percent_cell_bounds,
-    _top_level_bindings,
+    parameters_cell_names,
 )
 
 CASE_STUDIES = Path(__file__).resolve().parents[1] / "case_studies"
@@ -40,45 +44,42 @@ def _allocation_notebooks() -> list[Path]:
     return sorted(CASE_STUDIES.glob("*/*_portfolio_management.py"))
 
 
-def _parameters_cell_bounds(source: str) -> tuple[int, int] | None:
-    return next(
-        (
-            (first, last)
-            for header, first, last in _percent_cell_bounds(source)
-            if PARAMETERS_CELL_MARKER in header
-        ),
-        None,
-    )
+def _parameter_cell_spans(source: str) -> list[tuple[int, int]]:
+    return [
+        (lo, hi)
+        for header, lo, hi in _percent_cell_bounds(source)
+        if PARAMETERS_CELL_MARKER in header
+    ]
 
 
 def _depends_on_the_override(tree: ast.Module, call: ast.Call) -> bool:
     """Whether `TOP_N_PREDICTIONS` reaches the statement that reads the declared width.
 
-    Either it is in the same expression, so the declared width is one branch of it, or an
-    enclosing `if` tests it, so the declared width is the fallback. Both are honouring the
-    override; a call that neither guards nor mentions it overwrites whatever was passed.
+    Either an enclosing `if` tests it, so the declared width is the fallback, or it is in the
+    assigned expression itself, so the declared width is one branch of it. A call that neither
+    guards on it nor mentions it overwrites whatever the launcher passed.
     """
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             child.parent = node  # type: ignore[attr-defined]
+
+    def mentions(node: ast.AST | None) -> bool:
+        return node is not None and any(
+            isinstance(name, ast.Name) and name.id == WIDTH_PARAMETER for name in ast.walk(node)
+        )
+
     current: ast.AST | None = call
     while current is not None:
-        if isinstance(current, ast.If) and any(
-            isinstance(name, ast.Name) and name.id == WIDTH_PARAMETER
-            for name in ast.walk(current.test)
-        ):
+        if isinstance(current, ast.If) and mentions(current.test):
             return True
-        if isinstance(current, (ast.Assign, ast.AnnAssign)) and any(
-            isinstance(name, ast.Name) and name.id == WIDTH_PARAMETER
-            for name in ast.walk(current.value)  # type: ignore[arg-type]
-        ):
+        if isinstance(current, (ast.Assign, ast.AnnAssign)) and mentions(current.value):
             return True
         current = getattr(current, "parent", None)
     return False
 
 
 def test_every_case_study_has_an_allocation_notebook_to_check() -> None:
-    """The glob is the test's subject, so an empty one would pass everything below."""
+    """The glob is the subject of everything below, so an empty one would pass it all."""
     found = {path.parent.name for path in _allocation_notebooks()}
     expected = {path.name for path in CASE_STUDIES.iterdir() if (path / "config").is_dir()}
     assert found == expected, f"allocation notebooks missing for {sorted(expected - found)}"
@@ -88,13 +89,7 @@ def test_every_case_study_has_an_allocation_notebook_to_check() -> None:
     "notebook", _allocation_notebooks(), ids=lambda p: f"{p.parent.name}/{p.stem}"
 )
 def test_the_parameters_cell_binds_the_width(notebook: Path) -> None:
-    source = notebook.read_text(encoding="utf-8")
-    bounds = _parameters_cell_bounds(source)
-    assert bounds is not None, f"{notebook} has no parameters cell"
-    first, last = bounds
-    tree = ast.parse(source, filename=str(notebook))
-    declared = {name for name, line in _top_level_bindings(tree) if first <= line <= last}
-    assert WIDTH_PARAMETER in declared, (
+    assert WIDTH_PARAMETER in parameters_cell_names(notebook), (
         f"{notebook.parent.name}/{notebook.name} does not bind {WIDTH_PARAMETER} in its "
         "parameters cell, so papermill drops an override and the sweep runs at the width "
         "setup.yaml declares while exiting 0"
@@ -104,21 +99,33 @@ def test_the_parameters_cell_binds_the_width(notebook: Path) -> None:
 @pytest.mark.parametrize(
     "notebook", _allocation_notebooks(), ids=lambda p: f"{p.parent.name}/{p.stem}"
 )
+def test_papermill_can_see_the_width(notebook: Path) -> None:
+    visible = _papermill_visible(notebook)
+    assert visible is not None, f"{notebook} has no paired .ipynb for papermill to inspect"
+    assert WIDTH_PARAMETER in visible, (
+        f"papermill cannot see {WIDTH_PARAMETER} in {notebook.parent.name}/{notebook.name}; "
+        "it splits the parameters cell on '=' line by line, so a PEP 604 annotation or a "
+        "trailing comment containing '=' hides a name that is bound in plain Python"
+    )
+
+
+@pytest.mark.parametrize(
+    "notebook", _allocation_notebooks(), ids=lambda p: f"{p.parent.name}/{p.stem}"
+)
 def test_the_declared_width_is_only_a_fallback(notebook: Path) -> None:
     source = notebook.read_text(encoding="utf-8")
-    bounds = _parameters_cell_bounds(source)
-    assert bounds is not None
-    first, last = bounds
+    spans = _parameter_cell_spans(source)
+    assert spans, f"{notebook} has no parameters cell"
     tree = ast.parse(source, filename=str(notebook))
-    reads_after_the_cell = [
+    reads_outside_the_cell = [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Name)
         and node.id == WIDTH_PARAMETER
         and isinstance(node.ctx, ast.Load)
-        and not (first <= node.lineno <= last)
+        and not any(lo <= node.lineno <= hi for lo, hi in spans)
     ]
-    assert reads_after_the_cell, (
+    assert reads_outside_the_cell, (
         f"{notebook.parent.name}/{notebook.name} binds {WIDTH_PARAMETER} and never reads it, "
         "so an override is accepted and discarded"
     )

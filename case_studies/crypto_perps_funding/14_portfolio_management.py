@@ -92,7 +92,7 @@ POPULATION_SUFFIX = "v1"
 # None means the width `setup.yaml` declares; an int overrides it. Declared here because
 # papermill only binds a name the parameters cell already holds - a run that passes
 # TOP_N_PREDICTIONS to a notebook without it sweeps the declared width and exits 0.
-TOP_N_PREDICTIONS: int | None = None
+TOP_N_PREDICTIONS = None
 # Left empty, and it stays empty. The registry was reset for the stage-04 holdout rebuild, so
 # every name below is published at generation one and there is nothing to supersede. A
 # declaration is only needed when a re-run changes an existing name's membership: the refusal
