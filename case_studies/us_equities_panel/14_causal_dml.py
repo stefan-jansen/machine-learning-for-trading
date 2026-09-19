@@ -121,7 +121,11 @@ PRIMARY_LABEL = ""
 CONFIG_NAME = "dml"
 NUISANCE_OVERRIDES = {}
 EXECUTION_TIER = "canonical"
-WORKSPACE = "experiments"
+# Empty means this run writes to the case study's own store, which is what canonical
+# production execution wants. Any other value routes the run's writes there instead, at
+# either tier, and is how a rehearsal at full scale is compared against the published
+# result without being able to damage it.
+WORKSPACE = ""
 PREVIEW_MAX_SYMBOLS = 0
 PREVIEW_MAX_SAMPLES = 0
 PREVIEW_N_FOLDS = 0
@@ -181,17 +185,22 @@ if PREVIEW_N_PLACEBO:
 # Both tiers resolve the study through `open_study`. It reads the labels and features in place and
 # redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
 # publish over it.
+workspace_override = os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE
 if EXECUTION_TIER == "canonical":
     if preview_reductions:
         raise ValueError("Canonical execution cannot declare preview reductions")
-    study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER)
+    study = open_study(
+        CASE_STUDY_ID,
+        execution_tier=EXECUTION_TIER,
+        workspace=Path(workspace_override) if workspace_override else None,
+    )
 elif EXECUTION_TIER == "preview":
     if not preview_reductions:
         raise ValueError("Preview execution requires at least one declared reduction")
     study = open_study(
         CASE_STUDY_ID,
         execution_tier=EXECUTION_TIER,
-        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
+        workspace=Path(workspace_override or "experiments"),
     )
 else:
     raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
