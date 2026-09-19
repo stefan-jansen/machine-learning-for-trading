@@ -910,7 +910,7 @@ for col in numerical_cols:
 # The downstream scores do not show that. This draw's TSTR AUC is 0.764 against a TRTR
 # baseline of 0.736, a ratio of 103.8%, so the synthetic-trained classifier ranks the
 # real test set slightly *better* than the real-trained one does. Read that as one draw
-# rather than as a result: the spread cell below repeats the draw five times from the
+# rather than as a result: the spread cell above repeats the draw five times from the
 # same fine-tune and the same test split and gets 0.764, 0.720, 0.495, 0.681 and 0.750,
 # earning HIGH three times, MODERATE once and NONE once. The draw printed here is the
 # best of the five.
