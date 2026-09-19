@@ -224,7 +224,13 @@ for cs in CASE_STUDY_IDS:
         dl.with_columns(
             architecture=pl.col("config_name").map_elements(architecture, return_dtype=pl.Utf8)
         )
-        .group_by("architecture")
+        # maintain_order on every group_by in this notebook: polars does not preserve
+        # input order across a group_by, so five rendered cells - two tables and three
+        # computed sentences naming case studies - came back in a different order on
+        # each execution with identical data underneath. Nothing about the values
+        # changed, which is what made it hard to see: a real movement and a reshuffle
+        # look the same in a diff.
+        .group_by("architecture", maintain_order=True)
         .agg(pl.col("ic_mean_daily").max().alias("ic"))
     )
     arch_to_ic = dict(by_arch.iter_rows())
@@ -255,7 +261,7 @@ architecture_coverage = (
     dl_grid.with_columns(
         architecture=pl.col("config_name").map_elements(architecture, return_dtype=pl.Utf8)
     )
-    .group_by("architecture")
+    .group_by("architecture", maintain_order=True)
     .agg(n_case_studies=pl.col("case_study").n_unique())
     .sort("n_case_studies", descending=True)
 )
@@ -416,7 +422,7 @@ display(
 
 # %%
 arch_top_counts = (
-    dl_rank1_display.group_by("architecture")
+    dl_rank1_display.group_by("architecture", maintain_order=True)
     .agg(
         n_cs_with_highest_ic=pl.col("case_study").len(),
         ic_mean=pl.col("ic_mean_daily").mean(),
@@ -477,7 +483,9 @@ display(
 # %%
 checkpoint_folds = collect_checkpoint_fold_trajectories(dl_rank1)
 ckpt_df = (
-    checkpoint_folds.group_by(["short_name", "config_name", "checkpoint_value"])
+    checkpoint_folds.group_by(
+        ["short_name", "config_name", "checkpoint_value"], maintain_order=True
+    )
     .agg(
         ic_median=pl.col("ic").median(),
         ic_q25=pl.col("ic").quantile(0.25),
@@ -535,7 +543,7 @@ else:
 # %%
 trajectory_peaks = (
     ckpt_df.sort("ic_median", descending=True)
-    .group_by("short_name")
+    .group_by("short_name", maintain_order=True)
     .first()
     .select("short_name", "architecture", "checkpoint_value", "ic_median")
     .sort("checkpoint_value")
@@ -562,7 +570,7 @@ display(Markdown(f"**Computed checkpoint peaks.** Selected median-IC peaks occur
 # %%
 dl_fold = collect_fold_ic_per_cs(dl_rank1)
 dl_fold_summary = (
-    dl_fold.group_by(["case_study", "short_name"])
+    dl_fold.group_by(["case_study", "short_name"], maintain_order=True)
     .agg(
         n_folds=pl.col("ic").count(),
         median=pl.col("ic").median(),
@@ -1092,7 +1100,10 @@ else:
         )
 
 multi_horizon_cs = (
-    dl_horizon.group_by("short_name").len().filter(pl.col("len") >= 2)["short_name"].to_list()
+    dl_horizon.group_by("short_name", maintain_order=True)
+    .len()
+    .filter(pl.col("len") >= 2)["short_name"]
+    .to_list()
 )
 if multi_horizon_cs:
     fig, horizon_ax = plot_multi_label_horizon(
@@ -1150,7 +1161,7 @@ def architecture_class_rows(cs: str) -> list[dict]:
         return []
     by_class = (
         df.sort("ic_mean_daily", descending=True)
-        .group_by("arch_class")
+        .group_by("arch_class", maintain_order=True)
         .first()
         .select("arch_class", "ic_mean_daily", "ic_ci_lo", "ic_ci_hi", "ic_t_hac", "config_name")
     )
@@ -1236,9 +1247,9 @@ show_with_alt(
 # %%
 class_top_per_cs = (
     class_df.sort("ic_mean_daily", descending=True)
-    .group_by("short_name")
+    .group_by("short_name", maintain_order=True)
     .first()
-    .group_by("arch_class")
+    .group_by("arch_class", maintain_order=True)
     .agg(n_cs_with_highest_ic=pl.col("short_name").len())
     .sort("n_cs_with_highest_ic", descending=True)
 )
