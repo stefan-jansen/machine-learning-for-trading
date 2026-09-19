@@ -343,6 +343,30 @@ def test_a_full_grid_is_marked_covered(tmp_path, selects_from, monkeypatch) -> N
     assert row["covers_fold_grid"] is True
 
 
+def test_a_missing_label_surface_is_null_rather_than_complete(
+    tmp_path, selects_from, monkeypatch
+) -> None:
+    """The reader bundle: `run_log/` on disk and no `labels/`.
+
+    `case_studies/*/labels` is gitignored and the release bundle ships the registry alone,
+    so `modeling_fold_boundaries` returns None outright rather than refusing a boundary.
+    That is the second source of an underivable grid, and it has to read as "not measured"
+    exactly like the intraday one - a reader whose cells all came back null must not see a
+    census claiming every cell covered its grid.
+    """
+    monkeypatch.setattr(
+        "case_studies.utils.insight_chapter.modeling_fold_boundaries",
+        lambda _case_study, _label: None,
+    )
+    selects_from(tmp_path, [("nlinear", 0.02, STRIDE_FIVE)])
+
+    row = collect_rank1_per_cs(["test"], "deep_learning").row(0, named=True)
+
+    assert row["n_folds_scored"] == 4
+    assert row["n_folds_canonical"] is None
+    assert row["covers_fold_grid"] is None
+
+
 def test_an_underivable_grid_is_null_rather_than_false(tmp_path, selects_from, monkeypatch) -> None:
     """The intraday case studies, whose fold boundaries carry a time of day.
 

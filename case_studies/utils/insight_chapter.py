@@ -249,22 +249,30 @@ def resolve_expected_fold_ids(folds: pl.DataFrame, n_folds: int) -> tuple[int, .
 def canonical_fold_ids(case_study: str, label: str) -> tuple[int, ...] | None:
     """The case study's whole modelling fold grid for one label, or ``None``.
 
-    ``None`` only where the boundaries carry a time of day, which today means the two
-    intraday case studies: `modeling_fold_boundaries` runs its boundaries through `fold_boundary_date`,
+    ``None`` means the grid is not derivable here, and there are exactly two ways to get
+    it. The first is boundaries carrying a time of day, which today means the two intraday
+    case studies: `modeling_fold_boundaries` runs its boundaries through `fold_boundary_date`,
     which refuses a timestamp carrying a time of day - "the spans that read it are daily,
     so truncating it would move the fold". That is 28 of the corpus's 105 (case study,
     family, label) groups, all of them `crypto_perps_funding` at eight-hourly and
-    `nasdaq100_microstructure` at five, fifteen and sixty minutes. A caller reading
-    ``None`` learns that completeness was not measured, which is not the same as a group
-    measured and found complete, and the selected rows keep the two apart by carrying
-    ``n_folds_canonical`` as null rather than as a number.
+    `nasdaq100_microstructure` at five, fifteen and sixty minutes. The second is the label
+    surface not being on disk, where `modeling_fold_boundaries` returns ``None`` outright:
+    `case_studies/*/labels` is gitignored and the reader bundle ships `run_log/` alone, so
+    a reader who downloaded artifacts to run the insight chapters without training gets
+    this for every label, not just the intraday ones.
 
-    Nothing else is swallowed. `_derive_modeling_splits` raises `ValueError` deliberately
-    for config drift - a label with a parquet but no declared buffer, or one whose parquet
-    carries neither ``timestamp`` nor ``date`` - and `cv_window` states that as a loud-fail
-    contract. Caught here it would return ``None``, the caller would read "completeness not
-    measured", and the cell would stay in a census under the rule written for the intraday
-    case studies with nothing printed.
+    Both are the same answer to the caller - completeness was not measured, which is not
+    the same as a group measured and found complete - and the selected rows keep that apart
+    from a measurement by carrying ``n_folds_canonical`` as null rather than as a number.
+    A consumer that prints an exclusion list has to say how many cells were never measured,
+    or its "none" reads as "every cell was checked".
+
+    A misconfiguration is not swallowed. `_derive_modeling_splits` raises `ValueError`
+    deliberately for config drift - a label with a parquet but no declared buffer, or one
+    whose parquet carries neither ``timestamp`` nor ``date`` - and `cv_window` states that
+    as a loud-fail contract. Caught here it would arrive as a third meaning of ``None`` and
+    the cell would sit in a census under the rule written for the intraday case studies with
+    nothing printed.
     """
     try:
         boundaries = modeling_fold_boundaries(case_study, label)

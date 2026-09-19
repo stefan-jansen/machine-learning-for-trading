@@ -549,7 +549,7 @@ trajectory_peaks = (
     .group_by("short_name", maintain_order=True)
     .first()
     .select("short_name", "architecture", "checkpoint_value", "ic_median")
-    .sort("checkpoint_value")
+    .sort(["checkpoint_value", "short_name"])
 )
 peak_text = ", ".join(
     f"{row['short_name']}: {int(row['checkpoint_value'])}"
@@ -1085,14 +1085,22 @@ dl_horizon_all = collect_multi_label_per_cs(
 # grid could not be derived, both comparisons return null on a null, and `filter` drops
 # a null row. Written as a negation this silently removed the five intraday cells as
 # well as the one partial-grid cell, taking the census from 18 to 12.
-partial_grid = dl_horizon_all.filter(pl.col("covers_fold_grid") == False)  # noqa: E712
-dl_horizon = dl_horizon_all.filter(
-    pl.col("covers_fold_grid").is_null() | pl.col("covers_fold_grid")
-)
+if dl_horizon_all.is_empty():
+    partial_grid = dl_horizon_all
+    dl_horizon = dl_horizon_all
+else:
+    partial_grid = dl_horizon_all.filter(pl.col("covers_fold_grid") == False)  # noqa: E712
+    dl_horizon = dl_horizon_all.filter(
+        pl.col("covers_fold_grid").is_null() | pl.col("covers_fold_grid")
+    )
+unmeasured = 0 if dl_horizon.is_empty() else dl_horizon["covers_fold_grid"].null_count()
 print(
     f"DL multi-label horizon coverage: {dl_horizon.height} (CS, label) cells "
     f"across {dl_horizon['case_study'].n_unique() if not dl_horizon.is_empty() else 0} case studies."
 )
+# The exclusion below reports only the cells whose grid could be derived. Say how many
+# were never measured, so "none" is never read as "every cell was checked and passed".
+print(f"Fold grid not derivable for {unmeasured} of {dl_horizon.height} retained cells.")
 if partial_grid.is_empty():
     print("Excluded for scoring part of the fold grid: none")
 else:
