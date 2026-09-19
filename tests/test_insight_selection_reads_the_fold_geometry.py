@@ -272,3 +272,59 @@ def test_a_checkpoint_geometry_failure_names_the_case_study_and_run(tmp_path, mo
 
     with pytest.raises(RegistrySelectionError, match=f"test/{training_hash}: "):
         collect_checkpoint_fold_trajectories(rank1)
+
+
+def _grid(monkeypatch, fold_ids):
+    """Make the case study's canonical modelling grid `fold_ids`, or unavailable."""
+
+    def _boundaries(_case_study, _label):
+        if fold_ids is None:
+            raise ValueError("fold boundary carries a time of day")
+        return [{"fold": fold_id} for fold_id in fold_ids]
+
+    monkeypatch.setattr("case_studies.utils.insight_chapter.modeling_fold_boundaries", _boundaries)
+
+
+def test_a_subsampled_grid_is_selected_and_says_so(tmp_path, selects_from, monkeypatch) -> None:
+    """The one live case: 12_dl_weekly scores 4 of us_equities_panel's 16 modelling folds.
+
+    Comparability within the group is fine - all 30 candidates scored the same four - so
+    the selection stands. What must not happen is the row passing as complete: the ids
+    are canonical and the run declared the size of the subsample it chose, so a count
+    comparison is self-referential and only the grid can answer it.
+    """
+    _grid(monkeypatch, range(16))
+    selects_from(tmp_path, [("nlinear", 0.02, STRIDE_FIVE), ("lstm_h64", 0.05, STRIDE_FIVE)])
+
+    row = collect_rank1_per_cs(["test"], "deep_learning").row(0, named=True)
+
+    assert row["n_folds_scored"] == 4
+    assert row["n_folds_canonical"] == 16
+    assert row["covers_fold_grid"] is False
+
+
+def test_a_full_grid_is_marked_covered(tmp_path, selects_from, monkeypatch) -> None:
+    _grid(monkeypatch, (0, 5, 10, 15))
+    selects_from(tmp_path, [("nlinear", 0.02, STRIDE_FIVE)])
+
+    row = collect_rank1_per_cs(["test"], "deep_learning").row(0, named=True)
+
+    assert row["n_folds_scored"] == 4
+    assert row["n_folds_canonical"] == 4
+    assert row["covers_fold_grid"] is True
+
+
+def test_an_underivable_grid_is_null_rather_than_false(tmp_path, selects_from, monkeypatch) -> None:
+    """The intraday case studies, whose fold boundaries carry a time of day.
+
+    "Not measured" and "measured and short" are different answers and a consumer has to
+    be able to tell them apart, so the columns are null rather than False.
+    """
+    _grid(monkeypatch, None)
+    selects_from(tmp_path, [("nlinear", 0.02, STRIDE_FIVE)])
+
+    row = collect_rank1_per_cs(["test"], "deep_learning").row(0, named=True)
+
+    assert row["n_folds_scored"] == 4
+    assert row["n_folds_canonical"] is None
+    assert row["covers_fold_grid"] is None

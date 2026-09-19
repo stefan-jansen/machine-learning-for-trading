@@ -50,6 +50,7 @@ from case_studies.utils.conformal import (
     sizing_conformal_lag,
     walk_forward_conformal_coverage,
 )
+from case_studies.utils.cv_window import modeling_fold_boundaries
 from case_studies.utils.registry.specs import declared_fold_count
 from utils.paths import get_case_study_dir
 
@@ -188,23 +189,33 @@ def select_rank1(
 def resolve_expected_fold_ids(folds: pl.DataFrame, n_folds: int) -> tuple[int, ...]:
     """The fold ids a comparable candidate has to report, read off the candidates.
 
+    This answers comparability within one (case study, family, label) group and nothing
+    else. Whether that group covers the case study's whole fold grid is a different
+    question, answered by `canonical_fold_ids` and carried on the selected row as
+    ``n_folds_canonical`` and ``covers_fold_grid``.
+
     Neither live spec shape declares *which* folds a run used. Identity v3 nests a fold
     count under ``computation.expected_prediction_keys`` and the v2 shape carries
     ``n_folds`` at the top level; `declared_fold_count` reads both and there is no
     fold-id list in either. Every caller used to substitute ``range(n_folds)``, which is
-    right only for a run whose folds are numbered contiguously from zero.
+    right only where the ids run contiguously from zero, and one live group breaks it:
     ``us_equities_panel/deep_learning/fwd_ret_5d`` declares four folds and all 30 of its
-    prediction sets report 0, 5, 10 and 15 - a stride-5 sample of a wider geometry - so
-    every candidate failed the comparison and `select_rank1` raised on a case study it
-    had selected from before those rows existed.
+    prediction sets report 0, 5, 10 and 15, so every candidate failed the comparison and
+    `select_rank1` raised on a case study it had selected from before those rows existed.
 
-    The ids therefore come from the candidates that cover the declared count: the
-    candidates reporting exactly ``n_folds`` distinct folds must agree on which ones, and
-    that agreed set is what the gate compares against. A candidate reporting fewer folds
-    is still refused, which is the whole point of the gate - a shorter evaluation is an
-    easier one. Two disagreeing full-length geometries in one group are not comparable to
-    each other either, so that raises rather than letting the more numerous one define
-    the standard.
+    **Those ids are canonical and the run is a subsample, not a renumbering.**
+    ``us_equities_panel/12_dl_weekly`` sets ``MAX_FOLDS = 4`` and takes four of the case
+    study's sixteen modelling folds evenly spaced, keeping each one's canonical id. So a
+    count comparison is self-referential here: the run declares the size of the subsample
+    it chose and passes its own test. That is why completeness is measured against the
+    grid instead, and why this function does not decide it.
+
+    The ids come from the candidates that reach the declared count: those reporting
+    exactly ``n_folds`` distinct folds must agree on which ones, and the agreed set is
+    what the gate compares against. A candidate reporting fewer is still refused - a
+    shorter evaluation is an easier one. Two disagreeing full-length geometries in one
+    group are not comparable to each other either, so that raises rather than letting the
+    more numerous one define the standard.
     """
     if n_folds <= 0:
         raise RegistrySelectionError("n_folds is not declared")
@@ -228,6 +239,50 @@ def resolve_expected_fold_ids(folds: pl.DataFrame, n_folds: int) -> tuple[int, .
             f"candidates disagree on which {n_folds} folds they cover: {sorted(full_length)}"
         )
     return next(iter(full_length))
+
+
+def canonical_fold_ids(case_study: str, label: str) -> tuple[int, ...] | None:
+    """The case study's whole modelling fold grid for one label, or ``None``.
+
+    ``None`` where the grid cannot be derived, which today means the two intraday case
+    studies: `modeling_fold_boundaries` runs its boundaries through `fold_boundary_date`,
+    which refuses a timestamp carrying a time of day - "the spans that read it are daily,
+    so truncating it would move the fold". That is 28 of the corpus's 105 (case study,
+    family, label) groups, all of them `crypto_perps_funding` at eight-hourly and
+    `nasdaq100_microstructure` at five, fifteen and sixty minutes. A caller reading
+    ``None`` learns that completeness was not measured, which is not the same as a group
+    measured and found complete, and the selected rows keep the two apart by carrying
+    ``n_folds_canonical`` as null rather than as a number.
+    """
+    try:
+        boundaries = modeling_fold_boundaries(case_study, label)
+    except (ValueError, KeyError, FileNotFoundError):
+        return None
+    if not boundaries:
+        return None
+    return tuple(sorted(int(boundary["fold"]) for boundary in boundaries))
+
+
+def _fold_grid_columns(
+    case_study: str, label: str, expected_fold_ids: tuple[int, ...]
+) -> dict[str, int | bool | None]:
+    """How much of the case study's fold grid the selected candidate actually scored.
+
+    Carried on every selected row so a consumer that claims completeness can honour it.
+    `13_dl_time_series/12_case_study_insights`'s horizon figure is the one that has to:
+    it draws a line per case study across labels against a shared "average daily IC"
+    axis, and ``us_equities_panel/fwd_ret_5d`` is a Friday-resampled panel scored on four
+    of sixteen folds, so joining it to the daily ``fwd_ret_1d`` point would draw two
+    different quantities as one moving with horizon.
+    """
+    canonical = canonical_fold_ids(case_study, label)
+    return {
+        "n_folds_scored": len(expected_fold_ids),
+        "n_folds_canonical": len(canonical) if canonical is not None else None,
+        "covers_fold_grid": (
+            None if canonical is None else set(expected_fold_ids) == set(canonical)
+        ),
+    }
 
 
 def _raw_primary_candidates(
@@ -331,6 +386,7 @@ def collect_rank1_per_cs(
         row.update(
             case_study=case_study,
             short_name=SHORT_NAMES.get(case_study, case_study),
+            **_fold_grid_columns(case_study, label, expected_fold_ids),
         )
         rows.append(row)
     return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
@@ -397,6 +453,10 @@ def collect_checkpoint_fold_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
             )
         try:
             expected_folds = set(resolve_expected_fold_ids(checkpoints, n_folds))
+        except IncomparableFoldGeometryError as exc:
+            raise IncomparableFoldGeometryError(
+                f"{selected['case_study']}/{selected['training_hash']}: {exc}"
+            ) from exc
         except RegistrySelectionError as exc:
             raise RegistrySelectionError(
                 f"{selected['case_study']}/{selected['training_hash']}: {exc}"
@@ -583,6 +643,7 @@ def collect_grid_per_cs(
                 **selected_row,
                 "case_study": case_study,
                 "short_name": SHORT_NAMES.get(case_study, case_study),
+                **_fold_grid_columns(case_study, label, expected_fold_ids),
             }
             if config_parser is not None:
                 row.update(config_parser(row["config_name"]))
@@ -623,6 +684,7 @@ def collect_multi_label_per_cs(
             selected.update(
                 case_study=case_study,
                 short_name=SHORT_NAMES.get(case_study, case_study),
+                **_fold_grid_columns(case_study, label, expected_fold_ids),
             )
             rows.append(selected)
     return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()

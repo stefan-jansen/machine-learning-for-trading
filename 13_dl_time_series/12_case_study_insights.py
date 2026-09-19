@@ -1054,18 +1054,42 @@ def regression_labels(cs: str) -> list[str]:
 
 
 # %% [markdown]
-# Only complete registered labels enter the horizon census and figure.
+# Only complete registered labels enter the horizon census and figure, and "complete"
+# is measured against the case study's own fold grid rather than against what the run
+# declared. `us_equities_panel/12_dl_weekly` sets `MAX_FOLDS = 4` and scores four of
+# that case study's sixteen modelling folds on a Friday-resampled panel, so its
+# `fwd_ret_5d` point is a weekly IC over a quarter of the grid. Drawn on this figure it
+# would join the daily `fwd_ret_1d` point on a shared "average daily IC" axis and read
+# as one quantity moving with horizon. A cell whose grid could not be derived - the two
+# intraday case studies, whose fold boundaries carry a time of day - is kept, because
+# "not measured" is not "measured and short".
 
 # %%
-dl_horizon = collect_multi_label_per_cs(
+dl_horizon_all = collect_multi_label_per_cs(
     CASE_STUDY_IDS,
     family=FAMILY,
     labels=regression_labels,
+)
+# `!= False` is not the complement of `== False` here: the column is null wherever the
+# grid could not be derived, both comparisons return null on a null, and `filter` drops
+# a null row. Written as a negation this silently removed the five intraday cells as
+# well as the one partial-grid cell, taking the census from 18 to 12.
+partial_grid = dl_horizon_all.filter(pl.col("covers_fold_grid") == False)  # noqa: E712
+dl_horizon = dl_horizon_all.filter(
+    pl.col("covers_fold_grid").is_null() | pl.col("covers_fold_grid")
 )
 print(
     f"DL multi-label horizon coverage: {dl_horizon.height} (CS, label) cells "
     f"across {dl_horizon['case_study'].n_unique() if not dl_horizon.is_empty() else 0} case studies."
 )
+if partial_grid.is_empty():
+    print("Excluded for scoring part of the fold grid: none")
+else:
+    for row in partial_grid.iter_rows(named=True):
+        print(
+            f"Excluded {row['short_name']}/{row['label']}: "
+            f"{row['n_folds_scored']} of {row['n_folds_canonical']} modelling folds scored"
+        )
 
 multi_horizon_cs = (
     dl_horizon.group_by("short_name").len().filter(pl.col("len") >= 2)["short_name"].to_list()
