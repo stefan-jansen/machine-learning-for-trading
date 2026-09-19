@@ -1,24 +1,29 @@
 """Every allocation notebook has to honour a width the launcher passes.
 
-Papermill binds an override only into a name the parameters cell already holds, and only when
-its own line-splitting parser can see that name. A notebook that omits `TOP_N_PREDICTIONS` and
-calls `get_top_n_predictions` unconditionally therefore sweeps the width its `setup.yaml`
-declares, prints one advisory `Passed unknown parameter` line among a few hundred, and
-**exits 0** - the registry gains rows, every identity and isolation check passes, and nothing
-says the width did not move. On 2026-09-18 that cost a full canonical-tier `sp500_options`
-sweep launched at 999 against 46 advancing prediction sets, caught only because a private pin
+Papermill injects every parameter it is given into a cell of its own, so the name is always
+bound at run time. What decides whether the override does anything is whether the notebook
+reads it. Four allocation notebooks called `get_top_n_predictions` unconditionally and never
+read `TOP_N_PREDICTIONS`, so a run that passed one swept the width `setup.yaml` declares,
+printed one advisory `Passed unknown parameter` line among a few hundred, and **exited 0** -
+the registry gained rows, every identity and isolation check passed, and nothing said the
+width had not moved. On 2026-09-18 that cost a full canonical-tier `sp500_options` sweep
+launched at 999 against 46 advancing prediction sets, caught only because a private pin
 recorded a number the sweep never reached (`ml4t/agent-workspace#1200`).
 
 Three assertions, because each passes on a notebook the other two catch:
 
-- the parameters cell binds the name, or papermill drops the override;
-- papermill can see it there, since `X: int | None = None` is valid Python that its parser
-  cannot read (`tests/pm_helpers._papermill_visible`), so the name is bound and the override
-  still never lands. `test_every_declared_parameter_reaches_its_notebook` covers only names a
-  smoke configuration actually passes, which leaves a parameter no config uses unguarded;
+- the parameters cell binds the name. Papermill's injected cell comes after that one, so a
+  notebook that does not bind it has the name only from the injection and raises `NameError`
+  on any run that does not pass it;
+- papermill's inspector can see it there. This is not what makes the override land - measured
+  2026-09-19, a cell holding `X: int | None = None` still receives `X = 111` and prints it -
+  but the inspector drives the `Passed unknown parameter` warning, so a name it cannot parse
+  makes that line fire on a parameter the notebook does honour. The warning is the only
+  runtime signal this failure has, and a false one is worse than none;
 - `TOP_N_PREDICTIONS` reaches the statement that reads the declared width, or the override is
-  accepted and then overwritten - the shape `fx_pairs` had, where the name was bound, read
-  only by the narrowing guard, and the width came from `TOP_N_CONFIGS`.
+  bound and then overwritten. That is the defect itself, and the shape `fx_pairs` had, where
+  the name was bound, read only by the narrowing guard, and the width came from
+  `TOP_N_CONFIGS`.
 """
 
 from __future__ import annotations
@@ -100,12 +105,18 @@ def test_the_parameters_cell_binds_the_width(notebook: Path) -> None:
     "notebook", _allocation_notebooks(), ids=lambda p: f"{p.parent.name}/{p.stem}"
 )
 def test_papermill_can_see_the_width(notebook: Path) -> None:
+    """So `Passed unknown parameter` stays a true signal, not one fired on a honoured name."""
+    assert notebook.with_suffix(".ipynb").exists(), f"{notebook} has no paired notebook"
     visible = _papermill_visible(notebook)
-    assert visible is not None, f"{notebook} has no paired .ipynb for papermill to inspect"
+    assert visible is not None, (
+        f"papermill could not inspect {notebook.with_suffix('.ipynb').name} at all, which is a "
+        "malformed or unreadable notebook rather than a missing parameter"
+    )
     assert WIDTH_PARAMETER in visible, (
-        f"papermill cannot see {WIDTH_PARAMETER} in {notebook.parent.name}/{notebook.name}; "
-        "it splits the parameters cell on '=' line by line, so a PEP 604 annotation or a "
-        "trailing comment containing '=' hides a name that is bound in plain Python"
+        f"papermill's inspector cannot see {WIDTH_PARAMETER} in {notebook.parent.name}/"
+        f"{notebook.name}; it splits the parameters cell on '=' line by line, so a PEP 604 "
+        "annotation or a trailing comment containing '=' hides a name that is bound in plain "
+        "Python, and every run that passes the width is told it was unknown"
     )
 
 
