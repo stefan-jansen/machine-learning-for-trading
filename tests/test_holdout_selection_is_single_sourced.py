@@ -358,7 +358,8 @@ def test_an_empty_field_is_refused_rather_than_answered(case_dir: Path) -> None:
     selection raises `NoSelectableCandidates` rather than returning a row, so a caller
     cannot carry an unselected configuration into the holdout. `NoSelectableCandidates`
     subclasses `RuntimeError`; a caller that wants to treat "not run yet" as a normal
-    state catches it deliberately, which is what `tests/skip_blockers.py:158` does.
+    state catches it deliberately, which is what `blocker_unmet_reason`'s
+    `no_canonical_selection` branch in `tests/skip_blockers.py` does.
 
     The registry here is initialised and empty, which is a different cause from the ruin
     refusal `tests/test_common_support_trigger.py` pins.

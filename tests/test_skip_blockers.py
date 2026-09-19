@@ -21,6 +21,7 @@ from tests.skip_blockers import (
     NotTheFixture,
     blocker_unmet_reason,
     declared_kind,
+    honoured_skip_reason,
     is_ci_fixture,
     per_commit_tier,
     skip_declarations,
@@ -347,3 +348,75 @@ def test_another_repository_and_a_plain_directory_are_not_the_fixture(tmp_path):
     plain = tmp_path / "loose" / "data"
     plain.mkdir(parents=True)
     assert not is_ci_fixture(plain)
+
+
+def test_a_root_that_is_not_the_fixture_is_refused(monkeypatch, tmp_path):
+    """`_fixture_root` is where the refusal has to live, so delete it and this fails.
+
+    Both new tests above pass against a discriminator nothing consults; this is the one
+    that fails when the `NotTheFixture` raise goes.
+    """
+    from tests import skip_blockers
+
+    root = tmp_path / "full-dataset" / "data"
+    root.mkdir(parents=True)
+    monkeypatch.setattr("tests.conftest._resolve_data_path", lambda: root)
+
+    with pytest.raises(NotTheFixture, match="third-edition-test-data"):
+        skip_blockers._fixture_root()
+
+
+def test_no_data_root_at_all_is_still_the_other_undecidable(monkeypatch):
+    """ "Nothing to measure" and "a different dataset" are separate states."""
+    from tests import skip_blockers
+
+    monkeypatch.setattr("tests.conftest._resolve_data_path", lambda: None)
+    assert skip_blockers._fixture_root() is None
+
+
+def test_a_skip_is_honoured_on_a_machine_holding_the_file(monkeypatch, tmp_path):
+    """The workstation case: the file is here, and that says nothing about the fixture.
+
+    The full dataset carries the raw captures three live declarations rest on. Measuring
+    against it retired their skips and told the reader to un-skip notebooks that red CI,
+    so a root that is not the fixture has to leave the skip standing.
+    """
+    root = tmp_path / "full-dataset" / "data"
+    (root / "equities" / "market" / "microstructure" / "iex" / "deep").mkdir(parents=True)
+    (root / "equities/market/microstructure/iex/deep/20180908_IEXTP1_DEEP1.0.pcap.gz").touch()
+    monkeypatch.setattr("tests.conftest._resolve_data_path", lambda: root)
+
+    reason = honoured_skip_reason(
+        {
+            "skip": True,
+            "skip_reason": "the fixture ships only the already-parsed output",
+            "skip_blocker": {
+                "absent_fixture_path": "equities/market/microstructure/iex/deep/*.pcap.gz"
+            },
+        }
+    )
+    assert reason == "the fixture ships only the already-parsed output"
+
+
+def test_the_same_skip_expires_against_a_fixture_that_grew_the_file(monkeypatch, tmp_path):
+    """And the refusal must not swallow a real expiry: inside a fixture checkout it reports.
+
+    Without this half, honouring the skip unconditionally would pass the test above.
+    """
+    root = _checkout(tmp_path / "fixture", "git@github.com:ml4t/third-edition-test-data.git")
+    (root / "equities" / "market" / "microstructure" / "iex" / "deep").mkdir(parents=True)
+    (root / "equities/market/microstructure/iex/deep/20180908_IEXTP1_DEEP1.0.pcap.gz").touch()
+    monkeypatch.setattr("tests.conftest._resolve_data_path", lambda: root)
+
+    assert (
+        honoured_skip_reason(
+            {
+                "skip": True,
+                "skip_reason": "the fixture ships only the already-parsed output",
+                "skip_blocker": {
+                    "absent_fixture_path": "equities/market/microstructure/iex/deep/*.pcap.gz"
+                },
+            }
+        )
+        is None
+    )
