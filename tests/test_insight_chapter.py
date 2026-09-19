@@ -74,6 +74,7 @@ def _selected(prediction_hash: str, spec: dict, *, label: str = "fwd_ret_5d") ->
 
 
 _TWO_FOLD_SPEC = {"computation": {"expected_prediction_keys": {"n_folds": 2}}}
+_FOUR_FOLD_SPEC = {"computation": {"expected_prediction_keys": {"n_folds": 4}}}
 
 
 def test_selected_prediction_conformal_coverage_measures_the_sizing_widths(
@@ -141,6 +142,53 @@ def test_selected_prediction_conformal_coverage_defaults_to_the_reviewed_horizon
     with pytest.raises(insight_chapter.RegistrySelectionError, match="names a label"):
         insight_chapter.conformal_coverage_for_selected_prediction(
             unlabelled | {"spec_json": json.dumps(_TWO_FOLD_SPEC)}, levels=(0.80,)
+        )
+
+
+def test_selected_prediction_conformal_coverage_takes_a_non_contiguous_geometry(
+    tmp_path, monkeypatch
+) -> None:
+    """A run may number its folds any way it likes, and one live sweep does.
+
+    ``us_equities_panel/deep_learning/fwd_ret_5d`` declares four folds and writes 0, 5, 10
+    and 15. The check is that every declared fold is present, not that the ids count from
+    zero: comparing against ``range(n_folds)`` refused the artifact outright and is what
+    stopped Chapter 13 executing.
+    """
+    case_dir = tmp_path / "case_studies" / "probe"
+    prediction_dir = case_dir / "run_log" / "predictions" / "prediction-a"
+    prediction_dir.mkdir(parents=True)
+    stride_five = [(step // 20) * 5 for step in range(80)]
+    assert sorted(set(stride_five)) == [0, 5, 10, 15]
+    _write_prediction_panel(
+        prediction_dir, {"CALM": [0.1] * 80, "WILD": [10.0] * 80}, fold_ids=stride_five
+    )
+    monkeypatch.setattr(insight_chapter, "get_case_study_dir", lambda _case_study: case_dir)
+
+    result = insight_chapter.conformal_coverage_for_selected_prediction(
+        _selected("prediction-a", _FOUR_FOLD_SPEC), levels=(0.80,), embargo_steps=1
+    )
+
+    assert result.height == 1
+
+
+def test_selected_prediction_conformal_coverage_still_refuses_a_missing_fold(
+    tmp_path, monkeypatch
+) -> None:
+    """Three of the four declared folds, non-contiguous. A missing fold is the failure."""
+    case_dir = tmp_path / "case_studies" / "probe"
+    prediction_dir = case_dir / "run_log" / "predictions" / "prediction-a"
+    prediction_dir.mkdir(parents=True)
+    short = [(step // 27) * 5 for step in range(80)]
+    assert sorted(set(short)) == [0, 5, 10]
+    _write_prediction_panel(
+        prediction_dir, {"CALM": [0.1] * 80, "WILD": [10.0] * 80}, fold_ids=short
+    )
+    monkeypatch.setattr(insight_chapter, "get_case_study_dir", lambda _case_study: case_dir)
+
+    with pytest.raises(insight_chapter.RegistrySelectionError, match="expected 4 declared folds"):
+        insight_chapter.conformal_coverage_for_selected_prediction(
+            _selected("prediction-a", _FOUR_FOLD_SPEC), levels=(0.80,), embargo_steps=1
         )
 
 

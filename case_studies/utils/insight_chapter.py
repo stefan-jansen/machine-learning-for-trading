@@ -324,6 +324,8 @@ def collect_rank1_per_cs(
         try:
             expected_fold_ids = resolve_expected_fold_ids(folds, n_folds)
             row = select_rank1(metrics, folds, expected_fold_ids=expected_fold_ids)
+        except IncomparableFoldGeometryError as exc:
+            raise IncomparableFoldGeometryError(f"{case_study}/{family}/{label}: {exc}") from exc
         except RegistrySelectionError as exc:
             raise RegistrySelectionError(f"{case_study}/{family}/{label}: {exc}") from exc
         row.update(
@@ -612,6 +614,10 @@ def collect_multi_label_per_cs(
             try:
                 expected_fold_ids = resolve_expected_fold_ids(folds, n_folds)
                 selected = select_rank1(metrics, folds, expected_fold_ids=expected_fold_ids)
+            except IncomparableFoldGeometryError as exc:
+                raise IncomparableFoldGeometryError(
+                    f"{case_study}/{family}/{label}: {exc}"
+                ) from exc
             except RegistrySelectionError as exc:
                 raise RegistrySelectionError(f"{case_study}/{family}/{label}: {exc}") from exc
             selected.update(
