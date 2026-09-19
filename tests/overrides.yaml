@@ -232,6 +232,11 @@
     EPOCHS: 1
     N_GENERATE: 10
     N_SAMPLES: 50
+    # Sampling is this notebook's dominant cost - 332.5 s for one 500-row pass in the
+    # production render - and the four extra draws buy nothing here: at N_GENERATE 10
+    # every draw short-circuits on `len(X_draw) <= 10` and the cell prints that no draw
+    # produced a usable training set either way.
+    TSTR_DRAWS: 1
   timeout: 120
 05_synthetic_data/07_dp_gan:
   docker_env: py312

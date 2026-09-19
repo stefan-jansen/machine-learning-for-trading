@@ -1235,7 +1235,14 @@ jobs:
           print(f"{len(cases)} tests ran against the test-data checkout, none skipped")
           PY
   # ---------------------------------------------------------------------------
-  # The 47 test files that need the modelling environment.
+  # The test files that need the modelling environment, one per line below.
+  #
+  # The count is deliberately not repeated here. It used to be, it said 47 against a
+  # 46-entry list, and the same number three lines into
+  # .github/ci/unit-test-quarantine.txt had already been corrected once - two copies of
+  # one count, and the one nobody was looking at was the wrong one. That file's header
+  # carries the number and a one-line awk that recomputes it; the guard below is what
+  # holds this list and that file in agreement.
   #
   # These ran in NO job. .github/ci/unit-test-quarantine.txt excluded them from
   # test-unit's sweep for needing torch, and said they "belong in a job that runs
@@ -1314,7 +1321,8 @@ jobs:
     # outcome this job must never have.
     if: always()
     runs-on: ubuntu-latest
-    # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 47.
+    # The 26 files measured on 2026-08-24 ran in 3m21s. No count here either; the
+    # quarantine file's header carries it.
     # --timeout=900 bounds a hung test but not a hung
     # import, collection or image pull, which would otherwise fall through to
     # GitHub's six-hour default.
@@ -1404,6 +1412,7 @@ jobs:
             tests/test_gbm_identity.py \
             tests/test_gbm_runtime.py \
             tests/test_insight_chapter.py \
+            tests/test_insight_selection_reads_the_fold_geometry.py \
             tests/test_insight_selection_reads_the_live_generation.py \
             tests/test_latent_epoch_ic_over_dates.py \
             tests/test_latent_factors_identity.py \

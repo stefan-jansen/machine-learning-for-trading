@@ -224,7 +224,13 @@ for cs in CASE_STUDY_IDS:
         dl.with_columns(
             architecture=pl.col("config_name").map_elements(architecture, return_dtype=pl.Utf8)
         )
-        .group_by("architecture")
+        # maintain_order on every group_by in this notebook: polars does not preserve
+        # input order across a group_by, so five rendered cells - two tables and three
+        # computed sentences naming case studies - came back in a different order on
+        # each execution with identical data underneath. Nothing about the values
+        # changed, which is what made it hard to see: a real movement and a reshuffle
+        # look the same in a diff.
+        .group_by("architecture", maintain_order=True)
         .agg(pl.col("ic_mean_daily").max().alias("ic"))
     )
     arch_to_ic = dict(by_arch.iter_rows())
@@ -255,9 +261,12 @@ architecture_coverage = (
     dl_grid.with_columns(
         architecture=pl.col("config_name").map_elements(architecture, return_dtype=pl.Utf8)
     )
-    .group_by("architecture")
+    .group_by("architecture", maintain_order=True)
     .agg(n_case_studies=pl.col("case_study").n_unique())
-    .sort("n_case_studies", descending=True)
+    # Ties break on the name. NLinear and LSTM both cover 8 and TCN and PatchTST both
+    # cover 3, and `sort` does not keep tied rows in input order, so without this the
+    # table, the chart's bar order and the sentence built from it permute between runs.
+    .sort(["n_case_studies", "architecture"], descending=[True, False])
 )
 missing_dl = [
     SHORT_NAMES[cs] for cs in CASE_STUDY_IDS if cs not in set(dl_grid["case_study"].to_list())
@@ -416,14 +425,14 @@ display(
 
 # %%
 arch_top_counts = (
-    dl_rank1_display.group_by("architecture")
+    dl_rank1_display.group_by("architecture", maintain_order=True)
     .agg(
         n_cs_with_highest_ic=pl.col("case_study").len(),
         ic_mean=pl.col("ic_mean_daily").mean(),
         ic_min=pl.col("ic_mean_daily").min(),
         ic_max=pl.col("ic_mean_daily").max(),
     )
-    .sort("n_cs_with_highest_ic", descending=True)
+    .sort(["n_cs_with_highest_ic", "architecture"], descending=[True, False])
 )
 print("Architecture achieving the highest IC at the primary label (count across DL-covered CSs):")
 arch_top_counts
@@ -477,7 +486,9 @@ display(
 # %%
 checkpoint_folds = collect_checkpoint_fold_trajectories(dl_rank1)
 ckpt_df = (
-    checkpoint_folds.group_by(["short_name", "config_name", "checkpoint_value"])
+    checkpoint_folds.group_by(
+        ["short_name", "config_name", "checkpoint_value"], maintain_order=True
+    )
     .agg(
         ic_median=pl.col("ic").median(),
         ic_q25=pl.col("ic").quantile(0.25),
@@ -535,10 +546,10 @@ else:
 # %%
 trajectory_peaks = (
     ckpt_df.sort("ic_median", descending=True)
-    .group_by("short_name")
+    .group_by("short_name", maintain_order=True)
     .first()
     .select("short_name", "architecture", "checkpoint_value", "ic_median")
-    .sort("checkpoint_value")
+    .sort(["checkpoint_value", "short_name"])
 )
 peak_text = ", ".join(
     f"{row['short_name']}: {int(row['checkpoint_value'])}"
@@ -562,7 +573,7 @@ display(Markdown(f"**Computed checkpoint peaks.** Selected median-IC peaks occur
 # %%
 dl_fold = collect_fold_ic_per_cs(dl_rank1)
 dl_fold_summary = (
-    dl_fold.group_by(["case_study", "short_name"])
+    dl_fold.group_by(["case_study", "short_name"], maintain_order=True)
     .agg(
         n_folds=pl.col("ic").count(),
         median=pl.col("ic").median(),
@@ -1054,21 +1065,66 @@ def regression_labels(cs: str) -> list[str]:
 
 
 # %% [markdown]
-# Only complete registered labels enter the horizon census and figure.
+# Only complete registered labels enter the horizon census and figure, and "complete"
+# is measured against the case study's own fold grid rather than against what the run
+# declared. `us_equities_panel/12_dl_weekly` sets `MAX_FOLDS = 4` and scores four of
+# that case study's sixteen modelling folds on a Friday-resampled panel, so its
+# `fwd_ret_5d` point is a weekly IC over a quarter of the grid. Drawn on this figure it
+# would join the daily `fwd_ret_1d` point on a shared "average daily IC" axis and read
+# as one quantity moving with horizon. A cell whose grid could not be derived is kept,
+# because "not measured" is not "measured and short", and the cell below prints how many
+# of the retained cells that covers.
+#
+# The grid fails to derive for two different reasons, and the printed count does not
+# separate them. On this worktree it is the two intraday case studies, whose fold
+# boundaries carry a time of day that `fold_boundary_date` refuses. The second reason
+# reaches a reader rather than us: `case_studies/*/labels` is gitignored and the release
+# bundle ships `run_log/` alone, so running this chapter from a downloaded bundle derives
+# no grid for any case study. That prints "not derivable" for every retained cell and
+# excludes nothing - including the `us_equities_panel` weekly point this filter exists to
+# exclude. A census reading "17 of 17" means the label surfaces are absent, not that
+# seventeen grids were checked and found underivable.
 
 # %%
-dl_horizon = collect_multi_label_per_cs(
+dl_horizon_all = collect_multi_label_per_cs(
     CASE_STUDY_IDS,
     family=FAMILY,
     labels=regression_labels,
 )
+# `!= False` is not the complement of `== False` here: the column is null wherever the
+# grid could not be derived, both comparisons return null on a null, and `filter` drops
+# a null row. Written as a negation this silently removed the five intraday cells as
+# well as the one partial-grid cell, taking the census from 18 to 12.
+if dl_horizon_all.is_empty():
+    partial_grid = dl_horizon_all
+    dl_horizon = dl_horizon_all
+else:
+    partial_grid = dl_horizon_all.filter(pl.col("covers_fold_grid") == False)  # noqa: E712
+    dl_horizon = dl_horizon_all.filter(
+        pl.col("covers_fold_grid").is_null() | pl.col("covers_fold_grid")
+    )
+unmeasured = 0 if dl_horizon.is_empty() else dl_horizon["covers_fold_grid"].null_count()
 print(
     f"DL multi-label horizon coverage: {dl_horizon.height} (CS, label) cells "
     f"across {dl_horizon['case_study'].n_unique() if not dl_horizon.is_empty() else 0} case studies."
 )
+# The exclusion below reports only the cells whose grid could be derived. Say how many
+# were never measured, so "none" is never read as "every cell was checked and passed".
+print(f"Fold grid not derivable for {unmeasured} of {dl_horizon.height} retained cells.")
+if partial_grid.is_empty():
+    print("Excluded for scoring part of the fold grid: none")
+else:
+    for row in partial_grid.iter_rows(named=True):
+        print(
+            f"Excluded {row['short_name']}/{row['label']}: "
+            f"{row['n_folds_scored']} of {row['n_folds_canonical']} modelling folds scored"
+        )
 
 multi_horizon_cs = (
-    dl_horizon.group_by("short_name").len().filter(pl.col("len") >= 2)["short_name"].to_list()
+    dl_horizon.group_by("short_name", maintain_order=True)
+    .len()
+    .filter(pl.col("len") >= 2)["short_name"]
+    .to_list()
 )
 if multi_horizon_cs:
     fig, horizon_ax = plot_multi_label_horizon(
@@ -1092,9 +1148,12 @@ else:
 # %%
 display(
     Markdown(
-        f"**Computed horizon coverage.** {len(multi_horizon_cs)} case studies have at least "
-        f"two complete DL horizons ({', '.join(multi_horizon_cs) or 'none'}). Cross-panel horizon "
-        "claims remain out of scope when the remaining panels have only one trained label."
+        f"**Computed horizon coverage.** {len(multi_horizon_cs)} case studies carry at least "
+        f"two DL horizons the census retained ({', '.join(multi_horizon_cs) or 'none'}). "
+        "Retained means the label covered the case study's modelling fold grid, or the grid "
+        "could not be derived for it - not that every one was checked and found complete, "
+        "which the count printed above says it was not. Cross-panel horizon claims remain out "
+        "of scope when the remaining panels have only one trained label."
     )
 )
 
@@ -1126,7 +1185,7 @@ def architecture_class_rows(cs: str) -> list[dict]:
         return []
     by_class = (
         df.sort("ic_mean_daily", descending=True)
-        .group_by("arch_class")
+        .group_by("arch_class", maintain_order=True)
         .first()
         .select("arch_class", "ic_mean_daily", "ic_ci_lo", "ic_ci_hi", "ic_t_hac", "config_name")
     )
@@ -1212,11 +1271,11 @@ show_with_alt(
 # %%
 class_top_per_cs = (
     class_df.sort("ic_mean_daily", descending=True)
-    .group_by("short_name")
+    .group_by("short_name", maintain_order=True)
     .first()
-    .group_by("arch_class")
+    .group_by("arch_class", maintain_order=True)
     .agg(n_cs_with_highest_ic=pl.col("short_name").len())
-    .sort("n_cs_with_highest_ic", descending=True)
+    .sort(["n_cs_with_highest_ic", "arch_class"], descending=[True, False])
 )
 print("Architectural class achieving the highest IC per case study (count):")
 class_top_per_cs

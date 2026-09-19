@@ -36,6 +36,7 @@ import json
 import math
 import sqlite3
 from collections.abc import Callable, Iterable
+from functools import lru_cache
 
 import polars as pl
 
@@ -50,6 +51,11 @@ from case_studies.utils.conformal import (
     sizing_conformal_lag,
     walk_forward_conformal_coverage,
 )
+from case_studies.utils.cv_window import (
+    IntradayFoldBoundaryError,
+    modeling_fold_boundaries,
+)
+from case_studies.utils.gbm_importance import top_features_by_gain
 from case_studies.utils.registry.specs import declared_fold_count
 from utils.paths import get_case_study_dir
 
@@ -58,6 +64,16 @@ LabelResolver = Callable[[str], str | None]
 
 class RegistrySelectionError(ValueError):
     """Raised when registry candidates cannot support a comparable rank-one selection."""
+
+
+class IncomparableFoldGeometryError(RegistrySelectionError):
+    """Raised when two candidates each cover the declared fold count, but different folds.
+
+    Distinct from "nothing reaches the declared count", which is a case study with no
+    complete candidate and is a reason to leave it out of a table. Two disagreeing
+    full-length geometries are a registry that cannot be ranked at all, so every caller
+    surfaces it rather than skipping the case study.
+    """
 
 
 def compare_ic_on_shared_timestamps(
@@ -175,6 +191,121 @@ def select_rank1(
     return max(comparable, key=lambda row: float(row["ic_mean_daily"]))
 
 
+def resolve_expected_fold_ids(folds: pl.DataFrame, n_folds: int) -> tuple[int, ...]:
+    """The fold ids a comparable candidate has to report, read off the candidates.
+
+    This answers comparability within one (case study, family, label) group and nothing
+    else. Whether that group covers the case study's whole fold grid is a different
+    question, answered by `canonical_fold_ids` and carried on the selected row as
+    ``n_folds_canonical`` and ``covers_fold_grid``.
+
+    Neither live spec shape declares *which* folds a run used. Identity v3 nests a fold
+    count under ``computation.expected_prediction_keys`` and the v2 shape carries
+    ``n_folds`` at the top level; `declared_fold_count` reads both and there is no
+    fold-id list in either. Every caller used to substitute ``range(n_folds)``, which is
+    right only where the ids run contiguously from zero, and one live group breaks it:
+    ``us_equities_panel/deep_learning/fwd_ret_5d`` declares four folds and all 30 of its
+    prediction sets report 0, 5, 10 and 15, so every candidate failed the comparison and
+    `select_rank1` raised on a case study it had selected from before those rows existed.
+
+    **Those ids are canonical and the run is a subsample, not a renumbering.**
+    ``us_equities_panel/12_dl_weekly`` sets ``MAX_FOLDS = 4`` and takes four of the case
+    study's sixteen modelling folds evenly spaced, keeping each one's canonical id. So a
+    count comparison is self-referential here: the run declares the size of the subsample
+    it chose and passes its own test. That is why completeness is measured against the
+    grid instead, and why this function does not decide it.
+
+    The ids come from the candidates that reach the declared count: those reporting
+    exactly ``n_folds`` distinct folds must agree on which ones, and the agreed set is
+    what the gate compares against. A candidate reporting fewer is still refused - a
+    shorter evaluation is an easier one. Two disagreeing full-length geometries in one
+    group are not comparable to each other either, so that raises rather than letting the
+    more numerous one define the standard.
+    """
+    if n_folds <= 0:
+        raise RegistrySelectionError("n_folds is not declared")
+    if folds.is_empty() or "fold_id" not in folds.columns:
+        raise RegistrySelectionError("no fold rows to resolve the declared fold ids from")
+    per_candidate = (
+        folds.select("prediction_hash", "fold_id")
+        .unique()
+        .group_by("prediction_hash")
+        .agg(pl.col("fold_id").sort())
+    )
+    full_length = {
+        tuple(int(fold_id) for fold_id in ids)
+        for ids in per_candidate["fold_id"].to_list()
+        if len(ids) == n_folds
+    }
+    if not full_length:
+        raise RegistrySelectionError(f"no candidate reports all {n_folds} declared folds")
+    if len(full_length) > 1:
+        raise IncomparableFoldGeometryError(
+            f"candidates disagree on which {n_folds} folds they cover: {sorted(full_length)}"
+        )
+    return next(iter(full_length))
+
+
+@lru_cache(maxsize=256)
+def canonical_fold_ids(case_study: str, label: str) -> tuple[int, ...] | None:
+    """The case study's whole modelling fold grid for one label, or ``None``.
+
+    ``None`` means the grid is not derivable here, and there are exactly two ways to get
+    it. The first is boundaries carrying a time of day, which today means the two intraday
+    case studies: `modeling_fold_boundaries` runs its boundaries through `fold_boundary_date`,
+    which refuses a timestamp carrying a time of day - "the spans that read it are daily,
+    so truncating it would move the fold". That is 28 of the corpus's 105 (case study,
+    family, label) groups, all of them `crypto_perps_funding` at eight-hourly and
+    `nasdaq100_microstructure` at five, fifteen and sixty minutes. The second is the label
+    surface not being on disk, where `modeling_fold_boundaries` returns ``None`` outright:
+    `case_studies/*/labels` is gitignored and the reader bundle ships `run_log/` alone, so
+    a reader who downloaded artifacts to run the insight chapters without training gets
+    this for every label, not just the intraday ones.
+
+    Both are the same answer to the caller - completeness was not measured, which is not
+    the same as a group measured and found complete - and the selected rows keep that apart
+    from a measurement by carrying ``n_folds_canonical`` as null rather than as a number.
+    A consumer that prints an exclusion list has to say how many cells were never measured,
+    or its "none" reads as "every cell was checked".
+
+    A misconfiguration is not swallowed. `_derive_modeling_splits` raises `ValueError`
+    deliberately for config drift - a label with a parquet but no declared buffer, or one
+    whose parquet carries neither ``timestamp`` nor ``date`` - and `cv_window` states that
+    as a loud-fail contract. Caught here it would arrive as a third meaning of ``None`` and
+    the cell would sit in a census under the rule written for the intraday case studies with
+    nothing printed.
+    """
+    try:
+        boundaries = modeling_fold_boundaries(case_study, label)
+    except IntradayFoldBoundaryError:
+        return None
+    if not boundaries:
+        return None
+    return tuple(sorted(int(boundary["fold"]) for boundary in boundaries))
+
+
+def _fold_grid_columns(
+    case_study: str, label: str, expected_fold_ids: tuple[int, ...]
+) -> dict[str, int | bool | None]:
+    """How much of the case study's fold grid the selected candidate actually scored.
+
+    Carried on every selected row so a consumer that claims completeness can honour it.
+    `13_dl_time_series/12_case_study_insights`'s horizon figure is the one that has to:
+    it draws a line per case study across labels against a shared "average daily IC"
+    axis, and ``us_equities_panel/fwd_ret_5d`` is a Friday-resampled panel scored on four
+    of sixteen folds, so joining it to the daily ``fwd_ret_1d`` point would draw two
+    different quantities as one moving with horizon.
+    """
+    canonical = canonical_fold_ids(case_study, label)
+    return {
+        "n_folds_scored": len(expected_fold_ids),
+        "n_folds_canonical": len(canonical) if canonical is not None else None,
+        "covers_fold_grid": (
+            None if canonical is None else set(expected_fold_ids) == set(canonical)
+        ),
+    }
+
+
 def _raw_primary_candidates(
     case_study: str, family: str, label: str
 ) -> tuple[pl.DataFrame, pl.DataFrame, int]:
@@ -233,7 +364,25 @@ def _raw_primary_candidates(
         ).fetchall()
         retired = retired_prediction_hashes(db)
     rows = [row for row in rows if row["prediction_hash"] not in retired]
-    fold_rows = [row for row in fold_rows if row["prediction_hash"] not in retired]
+    # The fold frame is restricted to the prediction sets the metrics frame holds, and
+    # that is not the same filter as dropping the retired ones. The metrics query joins
+    # `prediction_metrics` and the fold query does not, and the two tables are written by
+    # separate calls - `register_prediction_set` then `register_fold_metrics` - so a set
+    # interrupted between them, or registered with `metrics=None`, has fold rows and no
+    # metrics row. It is unrankable, and it used to reach `resolve_expected_fold_ids`
+    # anyway: a full-length but differently numbered geometry from one raised
+    # `IncomparableFoldGeometryError` and stopped a whole chapter over a candidate
+    # `select_rank1` could never have returned. Restricted here rather than at each call
+    # site because the three collectors that take this frame resolve a geometry from it
+    # and only one of them had the guard. `collect_checkpoint_fold_trajectories` is a
+    # fourth resolver and does not take this frame - it queries the registry itself, and
+    # carries the same two filters inline.
+    rankable = {row["prediction_hash"] for row in rows}
+    fold_rows = [
+        row
+        for row in fold_rows
+        if row["prediction_hash"] not in retired and row["prediction_hash"] in rankable
+    ]
     if not rows:
         return pl.DataFrame(), pl.DataFrame(), 0
     metrics = pl.DataFrame([dict(row) for row in rows], infer_schema_length=None)
@@ -267,12 +416,16 @@ def collect_rank1_per_cs(
         if n_folds <= 0:
             raise RegistrySelectionError(f"{case_study}/{family}/{label}: n_folds is not declared")
         try:
-            row = select_rank1(metrics, folds, expected_fold_ids=range(n_folds))
+            expected_fold_ids = resolve_expected_fold_ids(folds, n_folds)
+            row = select_rank1(metrics, folds, expected_fold_ids=expected_fold_ids)
+        except IncomparableFoldGeometryError as exc:
+            raise IncomparableFoldGeometryError(f"{case_study}/{family}/{label}: {exc}") from exc
         except RegistrySelectionError as exc:
             raise RegistrySelectionError(f"{case_study}/{family}/{label}: {exc}") from exc
         row.update(
             case_study=case_study,
             short_name=SHORT_NAMES.get(case_study, case_study),
+            **_fold_grid_columns(case_study, label, expected_fold_ids),
         )
         rows.append(row)
     return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
@@ -322,22 +475,45 @@ def collect_checkpoint_fold_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
         uri = f"file:{db_path}?mode=ro"
         with sqlite3.connect(uri, uri=True) as db:
             db.row_factory = sqlite3.Row
+            # Joined to `prediction_metrics` and filtered for retired hashes for the
+            # same reasons `_raw_primary_candidates` does both, and this is the fourth
+            # site that resolves a fold geometry. A checkpoint with fold rows and no
+            # metrics row is unrankable and would still set the standard here, and a
+            # retired generation under this same `training_hash` would too. Chapter 13
+            # calls this collector immediately after rank-one selection, so without the
+            # join the chapter dies one cell past the one the restriction fixed, saying
+            # the fold geometries disagree rather than that a registration is stray.
+            # Measured 2026-09-19 across all nine canonical registries: no metric-less
+            # validation prediction set and no duplicate (training_hash,
+            # checkpoint_value) group, so nothing reaches it today.
             checkpoint_rows = db.execute(
                 """
                 SELECT p.prediction_hash, p.checkpoint_value, fm.fold_id, fm.ic
                 FROM prediction_sets p
                 JOIN fold_metrics fm ON fm.prediction_hash = p.prediction_hash
+                JOIN prediction_metrics pm ON pm.prediction_hash = p.prediction_hash
                 WHERE p.training_hash = ? AND p.split = 'validation'
                 ORDER BY p.checkpoint_value, fm.fold_id
                 """,
                 (selected["training_hash"],),
             ).fetchall()
+            retired = retired_prediction_hashes(db)
+        checkpoint_rows = [r for r in checkpoint_rows if r["prediction_hash"] not in retired]
         checkpoints = pl.DataFrame([dict(row) for row in checkpoint_rows], infer_schema_length=None)
         if checkpoints.is_empty():
             raise RegistrySelectionError(
                 f"{selected['case_study']}/{selected['training_hash']}: no checkpoint folds"
             )
-        expected_folds = set(range(n_folds))
+        try:
+            expected_folds = set(resolve_expected_fold_ids(checkpoints, n_folds))
+        except IncomparableFoldGeometryError as exc:
+            raise IncomparableFoldGeometryError(
+                f"{selected['case_study']}/{selected['training_hash']}: {exc}"
+            ) from exc
+        except RegistrySelectionError as exc:
+            raise RegistrySelectionError(
+                f"{selected['case_study']}/{selected['training_hash']}: {exc}"
+            ) from exc
         for checkpoint in checkpoints["checkpoint_value"].unique().sort().to_list():
             current = checkpoints.filter(pl.col("checkpoint_value") == checkpoint)
             fold_ids = current["fold_id"].to_list()
@@ -429,11 +605,22 @@ def conformal_coverage_for_selected_prediction(
     usable = predictions.drop_nulls(required_columns)
     for column in ("y_true", "y_score"):
         usable = usable.filter(pl.col(column).cast(pl.Float64, strict=False).is_finite())
+    # The artifact has to carry every fold the spec declared. It is compared by count
+    # rather than against ``range(n_folds)`` because a run may number its folds any way
+    # it likes and one live sweep does: ``us_equities_panel/deep_learning/fwd_ret_5d``
+    # declares four folds and writes 0, 5, 10 and 15.
+    #
+    # The exact geometry is available - ``fold_metrics`` is keyed by ``prediction_hash``
+    # and records the ids this run scored - and the count is used instead because nothing
+    # downstream reads an id at all. `walk_forward_widths` selects ``fold_id`` and carries
+    # it to the output untouched; precedence comes from the ``step`` index built off the
+    # unique timestamps, so relabelling every fold changes no width. What would break the
+    # calibration is a fold that is missing, and that is what the count catches.
     fold_ids = sorted(usable["fold_id"].unique().to_list())
-    if fold_ids != list(range(n_folds)):
+    if len(fold_ids) != n_folds:
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: "
-            f"expected fold IDs {list(range(n_folds))}, observed {fold_ids}"
+            f"expected {n_folds} declared folds, observed {fold_ids}"
         )
     if embargo_steps is None:
         label = selected.get("label") or spec.get("label")
@@ -482,18 +669,31 @@ def collect_grid_per_cs(
         metrics, folds, n_folds = _raw_primary_candidates(case_study, family, label)
         if metrics.is_empty() or n_folds <= 0:
             continue
+        # Resolved once over the whole group: a configuration whose candidates are all
+        # short would otherwise define its own standard and rank against complete ones.
+        try:
+            expected_fold_ids = resolve_expected_fold_ids(folds, n_folds)
+        except IncomparableFoldGeometryError as exc:
+            raise IncomparableFoldGeometryError(f"{case_study}/{family}/{label}: {exc}") from exc
+        except RegistrySelectionError:
+            continue
         selected = []
-        for config_name in metrics["config_name"].unique().to_list():
+        # `Series.unique` does not define an order, so this loop set `dl_grid`'s row
+        # order and every group order downstream of it. Sorted, the frame is a function
+        # of the registry.
+        for config_name in sorted(metrics["config_name"].unique().to_list()):
             config_metrics = metrics.filter(pl.col("config_name") == config_name)
             try:
                 selected.append(
-                    select_rank1(config_metrics, folds, expected_fold_ids=range(n_folds))
+                    select_rank1(config_metrics, folds, expected_fold_ids=expected_fold_ids)
                 )
             except RegistrySelectionError:
                 continue
         if not selected:
             continue
         full_days = max(float(row["ic_n_days"]) for row in selected)
+        # Loop-invariant, and not free: it reads the label parquet's time column.
+        grid_columns = _fold_grid_columns(case_study, label, expected_fold_ids)
         for selected_row in selected:
             if float(selected_row["ic_n_days"]) != full_days:
                 continue
@@ -501,6 +701,7 @@ def collect_grid_per_cs(
                 **selected_row,
                 "case_study": case_study,
                 "short_name": SHORT_NAMES.get(case_study, case_study),
+                **grid_columns,
             }
             if config_parser is not None:
                 row.update(config_parser(row["config_name"]))
@@ -530,12 +731,18 @@ def collect_multi_label_per_cs(
                     f"{case_study}/{family}/{label}: n_folds is not declared"
                 )
             try:
-                selected = select_rank1(metrics, folds, expected_fold_ids=range(n_folds))
+                expected_fold_ids = resolve_expected_fold_ids(folds, n_folds)
+                selected = select_rank1(metrics, folds, expected_fold_ids=expected_fold_ids)
+            except IncomparableFoldGeometryError as exc:
+                raise IncomparableFoldGeometryError(
+                    f"{case_study}/{family}/{label}: {exc}"
+                ) from exc
             except RegistrySelectionError as exc:
                 raise RegistrySelectionError(f"{case_study}/{family}/{label}: {exc}") from exc
             selected.update(
                 case_study=case_study,
                 short_name=SHORT_NAMES.get(case_study, case_study),
+                **_fold_grid_columns(case_study, label, expected_fold_ids),
             )
             rows.append(selected)
     return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
@@ -626,14 +833,7 @@ def load_gbm_feature_importance(
     result = result.with_columns(importance_norm=pl.col("importance") / pl.col("fold_max")).drop(
         "fold_max"
     )
-    top_features = (
-        result.group_by("feature")
-        .agg(pl.col("importance_norm").mean().alias("mean_importance"))
-        .sort("mean_importance", descending=True)
-        .head(top_n)["feature"]
-        .to_list()
-    )
-    return result.filter(pl.col("feature").is_in(top_features))
+    return result.filter(pl.col("feature").is_in(top_features_by_gain(result, top_n)))
 
 
 def plot_cross_cs_forest(
@@ -960,7 +1160,17 @@ def plot_multi_label_horizon(
     markers = ["o", "s", "D", "^", "v", "P", "X", "*"]
     linestyles = ["-", "--", "-.", ":", "-", "--", "-.", ":"]
     for idx, cs in enumerate(cs_sorted):
-        sub = plot_df.filter(pl.col("short_name") == cs).sort("horizon_days")
+        # Sorted on (horizon_days, label). HORIZON_DAYS maps several labels onto one
+        # value - fwd_ret_1d and fwd_ret_24h onto 1.0, fwd_ret_5d and
+        # fwd_ret_risk_adj_5d onto 5.0, fwd_ret_21d, fwd_ret_1m and fwd_ret_1m_win onto
+        # 21.0 - so a case study carrying both members of a pair has two points at one x
+        # and the tie order decides which the line reaches first. The tie is live, not
+        # hypothetical: measured 2026-09-19, SP500 Eq+Opt has fwd_ret_5d and
+        # fwd_ret_risk_adj_5d in the deep_learning census, and gbm, linear and tabular_dl
+        # each add US Firms at fwd_ret_1m against fwd_ret_1m_win. Sorting on the horizon
+        # alone left the drawn order a property of the frame; it happens to match today,
+        # so pinning it moves no committed figure.
+        sub = plot_df.filter(pl.col("short_name") == cs).sort(["horizon_days", "label"])
         if sub.height < 2:
             continue
         x = sub["horizon_days"].to_numpy()

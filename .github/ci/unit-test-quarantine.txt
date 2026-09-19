@@ -17,9 +17,16 @@
 
 # ---------------------------------------------------------------------------
 # Needs the modelling environment - run by test-unit-image, in ml4t/ml4t:latest.
-# 45 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
-# The count read 47 against 44 entries before 2026-09-18 and is now counted rather
-# than incremented: `awk 'NR>=19 && NR<=146 && /^tests\//{n++} END{print n}'`.
+# 46 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
+# The count read 47 against 44 entries before 2026-09-18, and the recount offered
+# then was keyed on literal line numbers, which every insert above them invalidates.
+# Keyed on the two section headings instead, and the answer checked against the
+# number above before it was written here:
+#   awk '/^# Needs the modelling environment/{f=1} /^# Executes notebooks through Papermill/{f=0} f&&/^tests\//{n++} END{print n+0}' .github/ci/unit-test-quarantine.txt
+#
+# It is long; leave it long. Wrapped across several lines each one would need its own
+# `#` and would therefore be a separate shell comment, so pasting the command would
+# print nothing - which is how a recount command quietly stops being run.
 #
 # `case_studies/utils/gbm.py` imports torch at module scope, so the LightGBM
 # files are behind this boundary too even though LightGBM itself is a small
@@ -84,6 +91,7 @@ tests/test_gbm_holdout_rekey.py
 tests/test_gbm_identity.py
 tests/test_gbm_runtime.py
 tests/test_insight_chapter.py
+tests/test_insight_selection_reads_the_fold_geometry.py
 tests/test_insight_selection_reads_the_live_generation.py
 tests/test_latent_epoch_ic_over_dates.py
 tests/test_latent_factors_identity.py
