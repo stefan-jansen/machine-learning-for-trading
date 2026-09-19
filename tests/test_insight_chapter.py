@@ -282,15 +282,22 @@ def test_selected_prediction_conformal_coverage_still_rejects_a_single_fold(
 
 
 def _write_booster(booster_dir, *, fold: int) -> None:
-    """A real two-feature LightGBM booster, so the loader parses what the pipeline writes."""
+    """A real two-feature LightGBM booster, so the loader parses what the pipeline writes.
+
+    `weak` is weak but genuinely split on - 287 and 160 gain against `strong`'s 9,125 and
+    7,312 on the two folds. It used to carry a coefficient of 0.1 over five rounds, which
+    left its gain at exactly zero, so the ordering asserted below was over a feature the
+    booster had never used. `top_features_by_gain` now drops those, which is what turned
+    that into a failure.
+    """
     import lightgbm as lgb
     import numpy as np
 
     booster_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(fold)
     x = rng.normal(size=(200, 2))
-    y = 3.0 * x[:, 0] + 0.1 * x[:, 1] + rng.normal(scale=0.01, size=200)
-    model = lgb.LGBMRegressor(n_estimators=5, num_leaves=4, min_child_samples=5, verbose=-1)
+    y = 3.0 * x[:, 0] + 0.6 * x[:, 1] + rng.normal(scale=0.01, size=200)
+    model = lgb.LGBMRegressor(n_estimators=30, num_leaves=4, min_child_samples=5, verbose=-1)
     model.fit(x, y, feature_name=["strong", "weak"])
     model.booster_.save_model(str(booster_dir / f"fold_{fold}.txt"))
 
@@ -372,7 +379,43 @@ def test_gbm_feature_importance_measures_only_the_selected_checkpoint(
     first_three = gain(3)
     everything = gain(None)
 
-    assert first_three["late"] < everything["late"]
+    # At three rounds no tree has split on `late` at all, so it carries zero gain and is
+    # not a ranked feature; over the whole booster it is. That is the same disagreement
+    # this test was written for, stated at its sharpest.
+    assert "late" not in first_three
+    assert everything["late"] > 0
     assert insight_chapter.load_gbm_feature_importance(
         "probe", "h", "probe-config", top_n=2, num_iteration=10_000
     ).equals(insight_chapter.load_gbm_feature_importance("probe", "h", "probe-config", top_n=2))
+
+
+def test_top_features_by_gain_drops_never_split_features_and_is_deterministic() -> None:
+    """A zero-gain feature was never split on, so it has no rank to report.
+
+    Both halves matter to the same consumer. Chapter 12's rank-shift cell reports
+    `linear_rank - gbm_rank` per common feature, and a plain `sort(...).head(top_n)`
+    gave it both a set of features the booster never used and a different set on each
+    load, because polars' sort is not stable and every zero-gain feature ties.
+    """
+    importance = pl.DataFrame(
+        {
+            "feature": ["alpha", "beta", "gamma", "delta", "epsilon"],
+            "importance_norm": [1.0, 0.5, 0.0, 0.0, 0.0],
+        }
+    )
+
+    assert insight_chapter.top_features_by_gain(importance, top_n=4) == ["alpha", "beta"]
+    # Ties break on the name, so the same frame in any row order gives the same answer.
+    shuffled = importance.sort("feature", descending=True)
+    assert insight_chapter.top_features_by_gain(shuffled, top_n=4) == ["alpha", "beta"]
+
+
+def test_top_features_by_gain_breaks_a_nonzero_tie_on_the_name() -> None:
+    importance = pl.DataFrame(
+        {
+            "feature": ["zulu", "alpha", "mike"],
+            "importance_norm": [0.4, 0.4, 0.9],
+        }
+    )
+
+    assert insight_chapter.top_features_by_gain(importance, top_n=2) == ["mike", "alpha"]

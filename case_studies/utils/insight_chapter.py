@@ -721,6 +721,33 @@ def collect_gbm_checkpoint_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
     return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
 
+def top_features_by_gain(importance: pl.DataFrame, top_n: int) -> list[str]:
+    """The `top_n` features a booster actually split on, most important first.
+
+    Two things this does that a plain ``sort(...).head(top_n)`` did not.
+
+    **A feature with zero mean gain is left out whatever `top_n` is.** Gain is zero
+    exactly when no tree split on the feature, so it has no rank to report and the
+    consumer of this list reads one: `12_gradient_boosting/12_case_study_insights`
+    reports `linear_rank - gbm_rank` per common feature. On the selected ETFs booster 25
+    of 71 features carry zero gain and the top-50 cut landed inside that block, so four
+    never-split features were reported with a rank shift.
+
+    **The order is fully determined.** Polars' sort is not stable and every zero-gain
+    feature ties, so repeated loads of the same booster returned different 50s - the
+    symmetric difference was four features on sp500_options and six on ETFs across three
+    loads in one process. Ties now break on the feature name, so the cut is a property
+    of the booster rather than of the run.
+    """
+    ranked = (
+        importance.group_by("feature")
+        .agg(pl.col("importance_norm").mean().alias("mean_importance"))
+        .filter(pl.col("mean_importance") > 0)
+        .sort(["mean_importance", "feature"], descending=[True, False])
+    )
+    return ranked.head(top_n)["feature"].to_list()
+
+
 def load_gbm_feature_importance(
     case_study: str,
     training_hash: str,
@@ -775,14 +802,7 @@ def load_gbm_feature_importance(
     result = result.with_columns(importance_norm=pl.col("importance") / pl.col("fold_max")).drop(
         "fold_max"
     )
-    top_features = (
-        result.group_by("feature")
-        .agg(pl.col("importance_norm").mean().alias("mean_importance"))
-        .sort("mean_importance", descending=True)
-        .head(top_n)["feature"]
-        .to_list()
-    )
-    return result.filter(pl.col("feature").is_in(top_features))
+    return result.filter(pl.col("feature").is_in(top_features_by_gain(result, top_n)))
 
 
 def plot_cross_cs_forest(
