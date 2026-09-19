@@ -45,6 +45,7 @@ from case_studies.research.population import retired_prediction_hashes
 from utils.paths import get_case_study_dir
 
 from .booster_paths import booster_dir
+from .gbm_importance import top_features_by_gain
 from .notebook_contracts import defined_ic, degenerate_prediction_sql
 
 # ---------------------------------------------------------------------------
@@ -999,16 +1000,11 @@ def load_gbm_feature_importance(
         )
     )
 
-    # Filter to top_n features by mean importance across folds
-    top_features = (
-        df.group_by("feature")
-        .agg(pl.col("importance_norm").mean().alias("mean_imp"))
-        .sort("mean_imp", descending=True)
-        .head(top_n)["feature"]
-        .to_list()
-    )
-
-    return df.filter(pl.col("feature").is_in(top_features))
+    # Ranked and cut by the shared rule, which drops never-split features and breaks
+    # ties on the name. This loader pools every gbm configuration in the case study,
+    # so it is the mean over (configuration, fold) rather than over folds alone; the
+    # rule is the same either way and its docstring says what pooling changes.
+    return df.filter(pl.col("feature").is_in(top_features_by_gain(df, top_n)))
 
 
 def load_linear_coefficients(

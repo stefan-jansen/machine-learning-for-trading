@@ -329,7 +329,46 @@ def test_gbm_importance_reads_the_boosters_the_training_stage_writes(tmp_path, m
         .sort("importance_norm", descending=True)["feature"]
         .to_list()
     )
-    assert ordered == ["strong", "weak"]
+    # "weak" contributes 0.1 of a target dominated by "strong", so across five trees of
+    # four leaves the booster never splits on it: 15 splits and 5402.9 gain against 0
+    # and 0.0. It is therefore not charted - see the test below, which is what that
+    # asserts. This case is about which directory the boosters were read from.
+    assert ordered == ["strong"]
+
+
+def test_a_feature_no_booster_split_on_is_not_charted(tmp_path, monkeypatch) -> None:
+    """The loader shares Chapter 12's ranking rule rather than cutting on a raw sort.
+
+    Gain is zero exactly when no tree split on the feature, and this fixture has one:
+    `_write_booster` fits `3.0 * strong + 0.1 * weak` with five trees of four leaves, so
+    `weak` takes 0 splits and 0.0 gain in every fold. The loader used to pass it to the
+    figure anyway, because `sort("mean_imp", descending=True).head(top_n)` ranks a
+    zero-gain feature like any other and polars' sort is not stable, so which members of
+    the tied zero block were charted also moved between loads of the same boosters.
+    """
+    pytest.importorskip("lightgbm")
+    training_hash = _register_gbm(tmp_path, "probe_config")
+    booster_dir = tmp_path / "run_log" / "training" / training_hash / "models" / "boosters"
+    _write_booster(booster_dir, fold=0)
+    _write_booster(booster_dir, fold=1)
+    monkeypatch.setattr("case_studies.utils.model_analysis.get_case_study_dir", lambda _: tmp_path)
+
+    charted = load_gbm_feature_importance("test", label="fwd_ret_5d", top_n=2)["feature"]
+    assert charted.unique().to_list() == ["strong"]
+
+    # And the same boosters give the same answer on every load, which is the half a
+    # single call cannot show.
+    repeats = {
+        tuple(
+            sorted(
+                load_gbm_feature_importance("test", label="fwd_ret_5d", top_n=2)["feature"]
+                .unique()
+                .to_list()
+            )
+        )
+        for _ in range(5)
+    }
+    assert repeats == {("strong",)}
 
 
 def test_gbm_importance_still_reads_the_older_booster_layouts(tmp_path, monkeypatch) -> None:

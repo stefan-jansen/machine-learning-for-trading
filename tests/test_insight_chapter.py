@@ -387,35 +387,3 @@ def test_gbm_feature_importance_measures_only_the_selected_checkpoint(
     assert insight_chapter.load_gbm_feature_importance(
         "probe", "h", "probe-config", top_n=2, num_iteration=10_000
     ).equals(insight_chapter.load_gbm_feature_importance("probe", "h", "probe-config", top_n=2))
-
-
-def test_top_features_by_gain_drops_never_split_features_and_is_deterministic() -> None:
-    """A zero-gain feature was never split on, so it has no rank to report.
-
-    Both halves matter to the same consumer. Chapter 12's rank-shift cell reports
-    `linear_rank - gbm_rank` per common feature, and a plain `sort(...).head(top_n)`
-    gave it both a set of features the booster never used and a different set on each
-    load, because polars' sort is not stable and every zero-gain feature ties.
-    """
-    importance = pl.DataFrame(
-        {
-            "feature": ["alpha", "beta", "gamma", "delta", "epsilon"],
-            "importance_norm": [1.0, 0.5, 0.0, 0.0, 0.0],
-        }
-    )
-
-    assert insight_chapter.top_features_by_gain(importance, top_n=4) == ["alpha", "beta"]
-    # Ties break on the name, so the same frame in any row order gives the same answer.
-    shuffled = importance.sort("feature", descending=True)
-    assert insight_chapter.top_features_by_gain(shuffled, top_n=4) == ["alpha", "beta"]
-
-
-def test_top_features_by_gain_breaks_a_nonzero_tie_on_the_name() -> None:
-    importance = pl.DataFrame(
-        {
-            "feature": ["zulu", "alpha", "mike"],
-            "importance_norm": [0.4, 0.4, 0.9],
-        }
-    )
-
-    assert insight_chapter.top_features_by_gain(importance, top_n=2) == ["mike", "alpha"]
