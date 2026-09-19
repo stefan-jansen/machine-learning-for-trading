@@ -373,8 +373,10 @@ def _raw_primary_candidates(
     # anyway: a full-length but differently numbered geometry from one raised
     # `IncomparableFoldGeometryError` and stopped a whole chapter over a candidate
     # `select_rank1` could never have returned. Restricted here rather than at each call
-    # site because all three collectors resolve a geometry from this frame and only one
-    # of them had the guard.
+    # site because the three collectors that take this frame resolve a geometry from it
+    # and only one of them had the guard. `collect_checkpoint_fold_trajectories` is a
+    # fourth resolver and does not take this frame - it queries the registry itself, and
+    # carries the same two filters inline.
     rankable = {row["prediction_hash"] for row in rows}
     fold_rows = [
         row
@@ -473,16 +475,30 @@ def collect_checkpoint_fold_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
         uri = f"file:{db_path}?mode=ro"
         with sqlite3.connect(uri, uri=True) as db:
             db.row_factory = sqlite3.Row
+            # Joined to `prediction_metrics` and filtered for retired hashes for the
+            # same reasons `_raw_primary_candidates` does both, and this is the fourth
+            # site that resolves a fold geometry. A checkpoint with fold rows and no
+            # metrics row is unrankable and would still set the standard here, and a
+            # retired generation under this same `training_hash` would too. Chapter 13
+            # calls this collector immediately after rank-one selection, so without the
+            # join the chapter dies one cell past the one the restriction fixed, saying
+            # the fold geometries disagree rather than that a registration is stray.
+            # Measured 2026-09-19 across all nine canonical registries: no metric-less
+            # validation prediction set and no duplicate (training_hash,
+            # checkpoint_value) group, so nothing reaches it today.
             checkpoint_rows = db.execute(
                 """
                 SELECT p.prediction_hash, p.checkpoint_value, fm.fold_id, fm.ic
                 FROM prediction_sets p
                 JOIN fold_metrics fm ON fm.prediction_hash = p.prediction_hash
+                JOIN prediction_metrics pm ON pm.prediction_hash = p.prediction_hash
                 WHERE p.training_hash = ? AND p.split = 'validation'
                 ORDER BY p.checkpoint_value, fm.fold_id
                 """,
                 (selected["training_hash"],),
             ).fetchall()
+            retired = retired_prediction_hashes(db)
+        checkpoint_rows = [r for r in checkpoint_rows if r["prediction_hash"] not in retired]
         checkpoints = pl.DataFrame([dict(row) for row in checkpoint_rows], infer_schema_length=None)
         if checkpoints.is_empty():
             raise RegistrySelectionError(

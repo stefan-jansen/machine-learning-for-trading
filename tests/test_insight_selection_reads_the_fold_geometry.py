@@ -457,3 +457,74 @@ def test_a_prediction_set_with_no_metrics_row_does_not_set_the_geometry(
     assert collected["rank1"]["config_name"].to_list() == ["nlinear"]
     assert collected["multi_label"]["config_name"].to_list() == ["nlinear"]
     assert sorted(collected["grid"]["config_name"].to_list()) == ["lstm", "nlinear"]
+
+
+def test_a_metric_less_checkpoint_does_not_set_the_trajectory_geometry(
+    tmp_path, monkeypatch
+) -> None:
+    """The fourth resolver, and it queries the registry itself rather than taking the
+    frame `_raw_primary_candidates` restricts.
+
+    `collect_checkpoint_fold_trajectories` runs immediately after rank-one selection in
+    `13_dl_time_series/12_case_study_insights`, so an unguarded geometry here stops the
+    chapter one cell past the one the restriction fixed, saying the fold geometries
+    disagree rather than that a registration is stray. Here checkpoint 10 has fold rows
+    and no metrics row and reports a geometry the two real checkpoints do not share.
+    """
+    training_hash = register_training_run(
+        "test",
+        {
+            "family": "deep_learning",
+            "label": LABEL,
+            "config_name": "nlinear",
+            "params": {},
+            "seed": 42,
+            "n_folds": 4,
+        },
+        case_dir=tmp_path,
+    )
+    for checkpoint in (5, 15):
+        prediction_hash = register_prediction_set(
+            "test",
+            training_hash,
+            checkpoint_value=checkpoint,
+            checkpoint_kind="epoch",
+            split="validation",
+            metrics={"ic_mean": 0.02, "ic_mean_daily": 0.02, "ic_n_days": 100},
+            case_dir=tmp_path,
+        )
+        register_fold_metrics(
+            "test",
+            prediction_hash,
+            {fold_id: {"ic": 0.02} for fold_id in STRIDE_FIVE},
+            case_dir=tmp_path,
+        )
+    ghost = register_prediction_set(
+        "test",
+        training_hash,
+        checkpoint_value=10,
+        checkpoint_kind="epoch",
+        split="validation",
+        case_dir=tmp_path,
+    )
+    register_fold_metrics(
+        "test", ghost, {fold_id: {"ic": 0.9} for fold_id in (1, 6, 11, 16)}, case_dir=tmp_path
+    )
+    monkeypatch.setattr("case_studies.utils.insight_chapter.get_case_study_dir", lambda _: tmp_path)
+    rank1 = pl.DataFrame(
+        [
+            {
+                "case_study": "test",
+                "short_name": "Test",
+                "family": "deep_learning",
+                "config_name": "nlinear",
+                "label": LABEL,
+                "training_hash": training_hash,
+                "spec_json": json.dumps({"n_folds": 4}),
+            }
+        ]
+    )
+
+    trajectories = collect_checkpoint_fold_trajectories(rank1)
+
+    assert sorted(trajectories["checkpoint_value"].unique().to_list()) == [5, 15]
