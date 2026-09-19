@@ -318,7 +318,7 @@ loss_top_per_cs = (
     .group_by("loss", maintain_order=True)
     .len()
     .rename({"len": "n_cs_with_highest_ic"})
-    .sort("n_cs_with_highest_ic", descending=True)
+    .sort(["n_cs_with_highest_ic", "loss"], descending=[True, False])
 )
 print(
     "Loss function achieving the highest IC per case study (count across regression-primary CSs):"
@@ -1568,11 +1568,16 @@ else:
     if len(rank_shift_summary) == 1:
         axes = [axes]
     for ax, entry in zip(axes, rank_shift_summary, strict=False):
-        s = entry["_shifts"].sort("rank_shift", descending=True)
+        # `rank_shift` is an integer and features tie on it readily, so head/tail would
+        # otherwise pick an arbitrary member of a tied block: which feature names the
+        # panel draws would change between executions on identical data.
+        s = entry["_shifts"].sort(["rank_shift", "feature"], descending=[True, False])
         n_show = min(15, s.height)
         top_promotions = s.head(n_show // 2)
         bot_promotions = s.tail(n_show - top_promotions.height)
-        plot_set = pl.concat([top_promotions, bot_promotions]).sort("rank_shift", descending=False)
+        plot_set = pl.concat([top_promotions, bot_promotions]).sort(
+            ["rank_shift", "feature"], descending=[False, True]
+        )
         y = np.arange(plot_set.height)
         colors = [
             COLORS["blue"] if v > 0 else COLORS["amber"] for v in plot_set["rank_shift"].to_list()
