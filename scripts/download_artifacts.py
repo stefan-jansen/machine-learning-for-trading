@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path, PurePosixPath
@@ -34,8 +35,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # GitHub release configuration
 GITHUB_REPO = "stefan-jansen/machine-learning-for-trading"
-RELEASE_TAG = "v3.0.0-artifacts"
+RELEASE_TAG = "v3.1.0-artifacts"
 BASE_URL = f"https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}"
+
+# Case studies served from a release other than RELEASE_TAG. v3.1 rebuilt all nine, so this
+# is empty; it earns its place because a later release need not rebuild every bundle, and the
+# download URL, the gh fallback and the failure hint all have to follow the bundle rather than
+# the newest tag. The tests drive it with an injected entry.
+ARTIFACT_RELEASE: dict[str, str] = {}
 
 CASE_STUDIES = [
     "etfs",
@@ -53,29 +60,37 @@ CASE_STUDIES = [
 # They are uploaded as `<cs>.tar.gz.part00`, `.part01`, ... and concatenated back
 # into the tarball before anything is verified, so the whole-file checksum in
 # ARTIFACT_SHA256 still decides whether the download is good.
-ARTIFACT_PARTS: dict[str, int] = {}
+ARTIFACT_PARTS: dict[str, int] = {
+    "nasdaq100_microstructure": 2,
+    "us_equities_panel": 2,
+}
 
 ARTIFACT_SHA256 = {
-    "cme_futures": "ab1c97276cdf74aa95d894cc0b0f3ea909c3ed8356f41f217e008c971e34b4f8",
-    "crypto_perps_funding": "517030f3def6d0264984c2b545032741100df4ee3d159e44ef4c348a314c4c7f",
-    "etfs": "93d3e24dcb4872b965f355a6931f163e0871a58729c1bd1ea6d99f369f2baf39",
-    "fx_pairs": "0555a5b2788576ba9eeb8fd874f5375a651d5094b2952eb42aa01aac4bee38e6",
-    "nasdaq100_microstructure": "a688081f30f97b2ab9f7f926e0608734ed4145ecfd1bf189624709d694c2167f",
-    "us_equities_panel": "ebf5b0b846da310e2611126b0059e5c51f116e185f82d47248f81cf088f32e27",
+    "cme_futures": "d0d0d762ba10272a2cab45a04d96573cdd0e2d82f03108743e361f75be81517a",
+    "crypto_perps_funding": "9b5d5eedfce4dd2a2385c713f47cc5e1fa2e8c89b8145bd83ae956269ae08058",
+    "etfs": "46693e83409c15f533fc3b0986eb9cf006426ff06f6d7dea0732ed6a65104ceb",
+    "fx_pairs": "132503d469fea1efb1d717f21227694ce4257557d6562d4a8b73a653f870e1c2",
+    "nasdaq100_microstructure": "c29f964b6b03b81185ca038f09f679a1138370c2c4ae1b680e83beafdc95fb00",
     "sp500_equity_option_analytics": (
-        "4eba2aadcc1fc5af322f0cfb0a8d4dcfb036391141adff59a0358c2a8401ca49"
+        "af621fa9c5e6f76dd1d74b6290c8d0a949bfb1bfcea98efcca6c158bcac44c40"
     ),
-    "sp500_options": "55333f313d3a2180a468e326030aa80d713b271c85d41d55989532f9567fccb2",
-    "us_firm_characteristics": ("2ec2087a054e1a075f7baa51546a2453c0d7db6108211e9cfbb80f95d894cffb"),
+    "sp500_options": "816b3810ae65422e49ca9b11eb840d31efde2d274991bcf41fc4454036b73464",
+    "us_equities_panel": "39e83df556edd920a3b9b692e443b27f250eff7ff20b6ca34fda3ee3db4e696f",
+    "us_firm_characteristics": "9eb5602da0828c71dfeb4a3bda6ac92a4664caebb01a21158916aef74bd99d1e",
 }
 
 
-RELEASE_HINT = (
-    f"The pre-computed artifacts release ({RELEASE_TAG}) may not be published yet.\n"
-    "The artifacts are added as the case-study chapters roll out; until then every\n"
-    "notebook still runs end to end from scratch - the artifacts only skip retraining.\n"
-    f"Check the latest releases at https://github.com/{GITHUB_REPO}/releases"
-)
+def release_hint(*tags: str) -> str:
+    """The failure hint has to name the releases the caller was actually reading."""
+    unique = sorted(set(tags) or {RELEASE_TAG})
+    names = ", ".join(unique)
+    noun = "release" if len(unique) == 1 else "releases"
+    return (
+        f"The pre-computed artifacts {noun} ({names}) may not be published yet.\n"
+        "The artifacts are added as the case-study chapters roll out; until then every\n"
+        "notebook still runs end to end from scratch - the artifacts only skip retraining.\n"
+        f"Check the latest releases at https://github.com/{GITHUB_REPO}/releases"
+    )
 
 
 def _get_github_token() -> str | None:
@@ -90,8 +105,19 @@ def _get_github_token() -> str | None:
         return None
 
 
-def _download_with_gh(asset_name: str, dest: Path, desc: str) -> bool:
+def _tag_from_url(url: str) -> str:
+    """The release a download URL points at. Not every asset comes from the latest one."""
+    parts = PurePosixPath(urllib.parse.urlsplit(url).path).parts
+    if "download" in parts:
+        index = parts.index("download")
+        if index + 1 < len(parts):
+            return parts[index + 1]
+    return RELEASE_TAG
+
+
+def _download_with_gh(url: str, dest: Path, desc: str) -> bool:
     """Download using gh CLI (handles auth automatically)."""
+    asset_name = PurePosixPath(urllib.parse.urlsplit(url).path).name
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
@@ -99,7 +125,7 @@ def _download_with_gh(asset_name: str, dest: Path, desc: str) -> bool:
                 "gh",
                 "release",
                 "download",
-                RELEASE_TAG,
+                _tag_from_url(url),
                 "--repo",
                 GITHUB_REPO,
                 "--pattern",
@@ -156,7 +182,7 @@ def download_file(url: str, dest: Path, desc: str) -> bool:
         return True
     except urllib.error.HTTPError as e:
         if e.code in (401, 403, 404) and shutil.which("gh"):
-            return _download_with_gh(Path(url).name, dest, desc)
+            return _download_with_gh(url, dest, desc)
         if e.code in (401, 403, 404):
             print(f"\r  {desc}: FAILED ({e.code} {e.reason}) - likely missing authentication")
         else:
@@ -167,6 +193,19 @@ def download_file(url: str, dest: Path, desc: str) -> bool:
         return False
 
 
+def _release_tag(cs_id: str) -> str:
+    """The release this case study's bundle comes from, which is not always the latest."""
+    return ARTIFACT_RELEASE.get(cs_id, RELEASE_TAG)
+
+
+def _base_url(cs_id: str) -> str:
+    """Where this case study's assets live, which is not always the current release."""
+    tag = ARTIFACT_RELEASE.get(cs_id)
+    if tag is None:
+        return BASE_URL
+    return f"https://github.com/{GITHUB_REPO}/releases/download/{tag}"
+
+
 def _fetch_parts(cs_id: str, count: int, dest: Path) -> bool:
     """Download a split bundle and concatenate it back into one tarball."""
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -175,7 +214,8 @@ def _fetch_parts(cs_id: str, count: int, dest: Path) -> bool:
         for index in range(count):
             name = f"{cs_id}.tar.gz.part{index:02d}"
             part = dest.parent / name
-            if not download_file(f"{BASE_URL}/{name}", part, f"{cs_id} part {index + 1}/{count}"):
+            url = f"{_base_url(cs_id)}/{name}"
+            if not download_file(url, part, f"{cs_id} part {index + 1}/{count}"):
                 return False
             parts.append(part)
         with dest.open("wb") as combined:
@@ -317,7 +357,7 @@ def download_case_study(cs_id: str, force: bool = False) -> bool:
 
     expected_sha256 = ARTIFACT_SHA256.get(cs_id)
     if expected_sha256 is None:
-        print(f"  {cs_id}: artifact bundle is not published in {RELEASE_TAG}")
+        print(f"  {cs_id}: artifact bundle is not published in {_release_tag(cs_id)}")
         return False
 
     tarball_name = f"{cs_id}.tar.gz"
@@ -327,7 +367,7 @@ def download_case_study(cs_id: str, force: bool = False) -> bool:
     if parts:
         ok = _fetch_parts(cs_id, parts, tmp_path)
     else:
-        ok = download_file(f"{BASE_URL}/{tarball_name}", tmp_path, cs_id)
+        ok = download_file(f"{_base_url(cs_id)}/{tarball_name}", tmp_path, cs_id)
     if not ok:
         tmp_path.unlink(missing_ok=True)
         return False
@@ -380,15 +420,20 @@ def main():
             sys.exit(1)
 
     print(f"Downloading artifacts for {len(cs_list)} case study(ies)")
-    print(f"Source: {BASE_URL}\n")
+    for tag in sorted({_release_tag(cs) for cs in cs_list}):
+        print(f"Source: https://github.com/{GITHUB_REPO}/releases/download/{tag}")
+    print()
 
     # Ensure cache dir
     (REPO_ROOT / ".cache").mkdir(exist_ok=True)
 
     success = 0
+    failed: list[str] = []
     for cs_id in cs_list:
         if download_case_study(cs_id, force=args.force):
             success += 1
+        else:
+            failed.append(cs_id)
 
     # Clean up cache dir
     cache = REPO_ROOT / ".cache"
@@ -398,7 +443,7 @@ def main():
     print(f"\nDone: {success}/{len(cs_list)} case studies ready.")
     if success < len(cs_list):
         print()
-        print(RELEASE_HINT)
+        print(release_hint(*(_release_tag(cs) for cs in failed)))
         sys.exit(1)
 
 
