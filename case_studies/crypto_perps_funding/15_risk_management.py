@@ -62,7 +62,7 @@ import polars as pl
 from case_studies.crypto_perps_funding.research_workflow import (
     ALL_LABELS,
     allocation_pool,
-    selected_allocation_result,
+    selected_allocation_results,
 )
 from case_studies.research import (
     Result,
@@ -77,6 +77,7 @@ from case_studies.utils.strategy_analysis import rank_returns_on_common_support
 from case_studies.utils.sweep_config import (
     get_portfolio_risk_controls,
     get_position_risk_controls,
+    get_top_n_predictions,
 )
 from case_studies.utils.uncertainty import periods_per_year_from_setup
 from utils.style import COLORS, show_plotly_with_alt
@@ -92,6 +93,14 @@ POPULATION_SUFFIX = "v2"
 # prints the name and the hash, and it is resolved through the shared resolver rather than
 # offered straight, because a reader's clean clone has no generation for it to replace.
 SUPERSEDES: dict[str, str] = {}
+# How many parents per label the overlay grid sits on. `None` reads
+# `backtest.sweep.top_n_predictions.risk_overlay`, which this case study declares as 1 for the
+# reason stated below. Until 2026-09-20 that 1 was a literal inside
+# `selected_allocation_result`, so the declared width could not be read and no launch could ask
+# a wider question. A run above the declared width publishes one population per parent and
+# control rather than per label and control, because its member list is no longer a function of
+# the label alone.
+TOP_N_COMBOS = None
 
 # %%
 study = open_study(
@@ -110,6 +119,10 @@ STORAGE_ROOT = study.storage_root(study.execution_tier)
 # written, and stopped with 'no preview baseline or allocation backtest ... traded in this
 # workspace'.
 CANONICAL_RUN = EXECUTION_TIER == "canonical"
+if TOP_N_COMBOS is None:
+    TOP_N_COMBOS = get_top_n_predictions("crypto_perps_funding", "risk_overlay")
+if TOP_N_COMBOS < 1:
+    raise ValueError("the risk overlay needs at least one parent per label")
 
 # %% [markdown]
 # ## 1. What the overlay is applied to
@@ -126,9 +139,13 @@ CANONICAL_RUN = EXECUTION_TIER == "canonical"
 
 # %%
 chosen_by_label = {
-    label: selected_allocation_result(study, label=label, canonical=CANONICAL_RUN)
+    label: selected_allocation_results(
+        study, label=label, canonical=CANONICAL_RUN, top_n=TOP_N_COMBOS
+    )
     for label in labels
 }
+chosen_pairs = [(label, chosen) for label, results in chosen_by_label.items() for chosen in results]
+chosen_hashes = [chosen.hash for _, chosen in chosen_pairs]
 # The pool each winner was chosen from. Kept because the paired difference below is taken
 # against the unprotected result of the same generation, not against whatever the registry
 # happens to hold under that label.
@@ -144,9 +161,7 @@ allocation_pool_hashes = [
 
 # %% tags=["results"]
 backtests = study.backtests.table(include_preview=not CANONICAL_RUN)
-baseline = backtests.filter(
-    pl.col("backtest_hash").is_in([result.hash for result in chosen_by_label.values()])
-).select(
+baseline = backtests.filter(pl.col("backtest_hash").is_in(chosen_hashes)).select(
     "label",
     "stage",
     "family",
@@ -157,7 +172,7 @@ baseline = backtests.filter(
     "num_trades",
     "backtest_hash",
 )
-if baseline.height != len(chosen_by_label):
+if baseline.height != len(chosen_hashes):
     raise RuntimeError("a selected result is absent from the backtest catalog")
 baseline.drop("backtest_hash").sort("label")
 
@@ -241,8 +256,7 @@ def as_risk_spec(control: dict) -> dict:
 
 # %%
 overlays = []
-for label in labels:
-    chosen = chosen_by_label[label]
+for label, chosen in chosen_pairs:
     strategy = chosen.spec()["strategy"]
     allocation = strategy.get("allocation")
     warmup = strategy_warmup_periods({"allocation": allocation} if allocation else {})
@@ -264,7 +278,14 @@ for label in labels:
             prices=prices,
             chapter="ch19",
             population_name=(
-                (risk_population := f"crypto-risk-{label}-{control['name']}-{POPULATION_SUFFIX}")
+                (
+                    risk_population := (
+                        f"crypto-risk-{label}-{control['name']}-{POPULATION_SUFFIX}"
+                        if TOP_N_COMBOS == 1
+                        else f"crypto-risk-{label}-{chosen.hash[:12]}-{control['name']}"
+                        f"-{POPULATION_SUFFIX}"
+                    )
+                )
                 if CANONICAL_RUN
                 else None
             ),
@@ -325,19 +346,28 @@ def traded_folds(backtest_hash: str, windows: pl.DataFrame) -> tuple[int, ...]:
 
 
 # %%
+# One entry per label, spanning every parent that label contributes. At the declared width of
+# one parent per label this is that parent's own windows. Above it, two parents of the same label
+# can carry different decision dates for the same fold - a sequence model needs a warmup its
+# tree-based sibling does not - so a fold's window is the span any admitted parent produced for
+# it, and `traded_folds` below asks whether a result held a position anywhere inside that span.
 windows_by_label = {
-    label: fold_windows(chosen.spec()["backtest_config"]["metadata"]["prediction_hash"])
-    for label, chosen in chosen_by_label.items()
+    label: pl.concat(
+        [
+            fold_windows(chosen.spec()["backtest_config"]["metadata"]["prediction_hash"])
+            for chosen in results_for_label
+        ]
+    )
+    .group_by("fold")
+    .agg(fold_start=pl.col("fold_start").min(), fold_end=pl.col("fold_end").max())
+    .sort("fold_start")
+    for label, results_for_label in chosen_by_label.items()
 }
 # The predecessor set's members plus this run's own overlays, named by hash. Reading
 # `stage IN (signal, allocation, risk_overlay)` off the registry instead folds every retired
 # generation of all three back into the grid, and a superseded result is not a candidate: the
 # final set frozen below would then carry results no live comparison produced.
-in_play = list(
-    {result.hash for result in chosen_by_label.values()}
-    | set(allocation_pool_hashes)
-    | set(overlays)
-)
+in_play = list(set(chosen_hashes) | set(allocation_pool_hashes) | set(overlays))
 results = study.backtests.table(include_preview=not CANONICAL_RUN).filter(
     pl.col("backtest_hash").is_in(in_play)
 )
@@ -408,9 +438,7 @@ def baseline_key(spec_json: str) -> str:
 keyed = keyed.with_columns(
     pl.col("spec_json").map_elements(baseline_key, return_dtype=pl.String).alias("baseline_key")
 )
-no_overlay = keyed.filter(
-    pl.col("backtest_hash").is_in([result.hash for result in chosen_by_label.values()])
-).select(
+no_overlay = keyed.filter(pl.col("backtest_hash").is_in(chosen_hashes)).select(
     "baseline_key",
     pl.col("sharpe").alias("baseline_sharpe"),
     pl.col("max_drawdown").alias("baseline_drawdown"),

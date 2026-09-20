@@ -122,6 +122,12 @@ WORKSPACE = ""
 PREVIEW_LABELS = []
 PREVIEW_MAX_SOURCE_ROWS = 0
 PREVIEW_MAX_RISK_CONTROLS = 0
+# How many parents per label the overlay grid sits on. `None` reads
+# `backtest.sweep.top_n_predictions.risk_overlay`, which this case study declares as 1. The
+# declaration was read unconditionally until 2026-09-20 and no parameter was bound, so a
+# launcher could not move the width and only an edit to the private config copy reached it,
+# which is the shape the four notebooks that do bind it were built to avoid.
+TOP_N_COMBOS = None
 MAX_SYMBOLS = 0
 
 # %% [markdown]
@@ -241,7 +247,13 @@ def prices_for(label, warmup_periods):
     return _price_cache[key]
 
 
-top_n = get_top_n_predictions(CASE_STUDY_ID, "risk_overlay")
+top_n = (
+    TOP_N_COMBOS
+    if TOP_N_COMBOS is not None
+    else get_top_n_predictions(CASE_STUDY_ID, "risk_overlay")
+)
+if top_n < 1:
+    raise ValueError("the risk overlay needs at least one parent per label")
 selected_parts = []
 for label in eligible.get_column("label").unique().sort().to_list():
     selected_parts.append(

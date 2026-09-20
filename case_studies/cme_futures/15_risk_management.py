@@ -98,7 +98,7 @@ from case_studies.cme_futures.research_workflow import (
     strategy_request_frame,
 )
 from case_studies.research.population import supersedes_for_run
-from case_studies.utils.sweep_config import get_position_risk_controls
+from case_studies.utils.sweep_config import get_position_risk_controls, get_top_n_predictions
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
@@ -113,6 +113,17 @@ PREVIEW_LABELS: list[str] = []
 # the population on record. Empty for a first snapshot.
 RISK_POPULATION = "cme_futures-risk-validation-v1"
 SUPERSEDES_RISK_POPULATION: str = ""
+
+# How many parents per label the overlay grid sits on. `None` reads
+# `backtest.sweep.top_n_predictions.risk_overlay`, which every case study declares as 1, and one
+# is narrow on purpose: an overlay is a second search over the same validation folds, so the
+# question the book asks is whether a control improves the configuration the funnel already
+# chose. Until 2026-09-20 that 1 was a literal `[0]` below rather than a number read from the
+# declaration, which left this case study unable to answer at any other width while four others
+# could. A run at a wider width changes the member list of every name this notebook publishes,
+# so it needs its own `RISK_POPULATION` and `SUPERSEDES_CANDIDATE_SETS` the same way a narrowed
+# run does.
+TOP_N_COMBOS = None
 
 # The per-label candidate sets this notebook freezes are immutable under their names too, and
 # for the same reason as the population above: `CandidateSet.create` refuses a changed member
@@ -170,6 +181,10 @@ elif EXECUTION_TIER == "preview":
     labels = tuple(PREVIEW_LABELS)
 else:
     raise ValueError(f"unsupported execution tier: {EXECUTION_TIER!r}")
+if TOP_N_COMBOS is None:
+    TOP_N_COMBOS = get_top_n_predictions("cme_futures", "risk_overlay")
+if TOP_N_COMBOS < 1:
+    raise ValueError("the risk overlay needs at least one parent per label")
 universe = product_universe_table()
 universe
 
@@ -180,7 +195,7 @@ if not risk_controls:
 
 request_rows = []
 for label in labels:
-    selected = rank_by_validation_sharpe(
+    ranked = rank_by_validation_sharpe(
         study,
         pre_overlay_results(
             study,
@@ -188,23 +203,24 @@ for label in labels:
             execution_tier=EXECUTION_TIER,
             supersedes_by_set=SUPERSEDES_CANDIDATE_SETS,
         ),
-    )[0]
-    strategy = selected.spec()["strategy"]
-    prediction_hash = selected.registry_record()["prediction_hash"]
-    for control in risk_controls:
-        rule = {key: value for key, value in control.items() if key != "name"}
-        request_rows.append(
-            {
-                "request_name": f"{selected.hash}-risk-{control['name']}",
-                "prediction_hash": prediction_hash,
-                "label": label,
-                "signal": strategy["signal"],
-                "allocation": strategy.get("allocation"),
-                "risk": {"position_rules": [rule]},
-                "costs": None,
-                "chapter": "ch19",
-            }
-        )
+    )
+    for selected in ranked[:TOP_N_COMBOS]:
+        strategy = selected.spec()["strategy"]
+        prediction_hash = selected.registry_record()["prediction_hash"]
+        for control in risk_controls:
+            rule = {key: value for key, value in control.items() if key != "name"}
+            request_rows.append(
+                {
+                    "request_name": f"{selected.hash}-risk-{control['name']}",
+                    "prediction_hash": prediction_hash,
+                    "label": label,
+                    "signal": strategy["signal"],
+                    "allocation": strategy.get("allocation"),
+                    "risk": {"position_rules": [rule]},
+                    "costs": None,
+                    "chapter": "ch19",
+                }
+            )
 requests = strategy_request_frame(request_rows)
 requests.select("request_name", "prediction_hash", "label", "risk")
 
