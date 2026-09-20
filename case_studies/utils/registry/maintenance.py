@@ -638,11 +638,20 @@ def find_semantic_backtest_duplicates(db_path: Path) -> list[DuplicateBacktest]:
         groups.setdefault((prediction_hash, stage, semantic_hash), []).append(stored_hash)
 
     duplicates = []
-    for hashes in groups.values():
+    for (_prediction_hash, _stage, semantic_hash), hashes in groups.items():
         if len(hashes) < 2:
             continue
         ordered = sorted(hashes)
-        duplicates.append(DuplicateBacktest(ordered[0], tuple(ordered[1:])))
+        # Keep the row the current code can still address. A group holds one row
+        # per spelling the spec has had, and only one of them is what
+        # ``backtest_hash_from_parts`` returns today: drop that one and the next
+        # sweep finds nothing at the address it computes, re-runs the
+        # configuration and registers it again, while the surviving row answers
+        # to an address nothing asks for. Hex order decides nothing here - it is
+        # only the tie-break for a group in which no stored hash is the current
+        # one, which is every group whose spelling has moved twice.
+        keep = semantic_hash if semantic_hash in hashes else ordered[0]
+        duplicates.append(DuplicateBacktest(keep, tuple(h for h in ordered if h != keep)))
     return sorted(duplicates, key=lambda item: item.keep_hash)
 
 

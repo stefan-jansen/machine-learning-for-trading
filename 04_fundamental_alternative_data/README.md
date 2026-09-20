@@ -85,3 +85,27 @@ identification headers:
 
 Every Chapter 4 notebook completes in well under a minute with peak
 memory under 3 GB; none needs a long-running or high-memory callout.
+
+## References
+
+- **Carol Alexander and Michael Dakos** (2019). [A Critical Investigation of Cryptocurrency Data and Analysis](https://doi.org/10.2139/ssrn.3382828).
+- **Dirk G. Baur and Lee A. Smales** (2022). [Trading behavior in bitcoin futures: Following the “smart money”](https://doi.org/10.1002/fut.22332). *Journal of Futures Markets*.
+- **Florian Berg et al.** (2022). [Aggregate Confusion: The Divergence of ESG Ratings*](https://doi.org/10.1093/rof/rfac033). *Review of Finance*.
+- **Luyang Chen et al.** (2021). [Deep Learning in Asset Pricing](https://doi.org/10.48550/arXiv.1904.00745).
+- **Si-An Chen et al.** (2023). [TSMixer: An All-MLP Architecture for Time Series Forecasting](https://arxiv.org/abs/2303.06053v5).
+- **Feng Chi et al.** (2024). [The Use and Usefulness of Big Data in Finance: Evidence from Financial Analysts](https://doi.org/10.2139/ssrn.4035037).
+- **Dean Croushore** (2008). [Frontiers of Real-Time Data Analysis](https://doi.org/10.2139/ssrn.1118356).
+- **Kent Daniel and Sheridan Titman** (2006). [Market Reactions to Tangible and Intangible Information](https://doi.org/10.1111/j.1540-6261.2006.00884.x). *The Journal of Finance*.
+- **Gene Ekster and Petter N. Kolm** (2020). [Alternative Data in Investment Management: Usage, Challenges and Valuation](https://doi.org/10.2139/ssrn.3715828).
+- **T. Clifton Green and Shaojun Zhang** (2024). [Alternative Data in Active Asset Management](https://doi.org/10.3905/jpm.2024.1.638). *The Journal of Portfolio Management*.
+- **Campbell R. Harvey et al.** (2022). [An Investor’s Guide to Crypto](https://doi.org/10.2139/ssrn.4124576).
+- **Harrison Hong et al.** (2000). [Bad News Travels Slowly: Size, Analyst Coverage, and the Profitability of Momentum Strategies](https://doi.org/10.1111/0022-1082.00206). *The Journal of Finance*.
+- **Jacques Joubert et al.** (2024). [Enhanced Backtesting for Practitioners](https://doi.org/10.3905/jpm.2024.1.637). *The Journal of Portfolio Management*.
+- **Natthawut Kertkeidkachorn et al.** (2023). [FinKG: A Core Financial Knowledge Graph for Financial Analysis](https://doi.org/10.1109/ICSC56153.2023.00020).
+- **Alfred Lehar and Christine A. Parlour** (2021). [Decentralized Exchange: The Uniswap Automated Market Maker](https://doi.org/10.2139/ssrn.3905316).
+- **Yin Luo et al.** (2014). Seven Sins of Quantitative Investing.
+- **R. David McLean and Jeffrey Pontiff** (2016). [Does Academic Research Destroy Stock Return Predictability?](https://doi.org/10.1111/jofi.12365). *Journal of Finance*.
+- **Hunter Ng et al.** (2025). [Price Discovery and Trading in Prediction Markets](https://doi.org/10.2139/ssrn.5331995).
+- **Tobias Preis et al.** (2013). [Quantifying Trading Behavior in Financial Markets Using Google Trends](https://doi.org/10.1038/srep01684). *Scientific Reports*.
+- **Paul C. Tetlock** (2005). [Giving Content to Investor Sentiment: The Role of Media in the Stock Market](https://doi.org/10.2139/ssrn.685145).
+- **Paul C. Tetlock** (2014). [Information Transmission in Finance](https://doi.org/10.1146/annurev-financial-110613-034449). *Annual Review of Financial Economics*.

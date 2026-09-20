@@ -89,6 +89,10 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 POPULATION_SUFFIX = "v1"
+# None means the width `setup.yaml` declares; an int overrides it. Declared here because
+# papermill only binds a name the parameters cell already holds - a run that passes
+# TOP_N_PREDICTIONS to a notebook without it sweeps the declared width and exits 0.
+TOP_N_PREDICTIONS = None
 # Left empty, and it stays empty. The registry was reset for the stage-04 holdout rebuild, so
 # every name below is published at generation one and there is nothing to supersede. A
 # declaration is only needed when a re-run changes an existing name's membership: the refusal
@@ -148,7 +152,16 @@ CANONICAL_RUN = EXECUTION_TIER == "canonical"
 # baseline, since the checkpoint is part of the configuration rather than a knob to be re-tuned
 # here.
 #
-# `resolve_best_predictions` is the one implementation of that rule, shared by every case study.
+# `resolve_best_predictions` is the implementation this case study uses, and it is not the only
+# one: five of the nine case studies call it, and the other four restate the same rule
+# separately - `cme_futures` in `research_workflow.shortlist_signal_configurations`, `fx_pairs`
+# in a function defined inside its own allocation notebook, `sp500_options` and
+# `us_equities_panel` inline over a ranked frame. They agree on what the rule is - rank on
+# validation Sharpe, keep the best row per `(family, config_name)`, take the declared width -
+# and differ in the pool they rank and in what they do when the pool is short of that width.
+# Nothing compares the four, so anything reasoning about which configurations advance without
+# running the notebook has to pick one and is wrong about the others
+# (ml4t/agent-workspace#1204).
 #
 # **It is asked about one population, not about the registry.** `13_backtest` froze the baselines
 # each label hands on as `crypto-signal-{label}`, and that set is the whole of what may advance.
@@ -185,7 +198,9 @@ else:
         for label in labels
     }
 
-top_n = get_top_n_predictions("crypto_perps_funding", "allocation")
+if TOP_N_PREDICTIONS is None:
+    TOP_N_PREDICTIONS = get_top_n_predictions("crypto_perps_funding", "allocation")
+top_n = TOP_N_PREDICTIONS
 # `vertical_relaxed`, because `checkpoint_value` is Null-typed for a label whose survivors
 # are all final-checkpoint models and Int64 for one that advanced a boosted model on a
 # numbered checkpoint. Both are the same column meaning the same thing; a strict concat

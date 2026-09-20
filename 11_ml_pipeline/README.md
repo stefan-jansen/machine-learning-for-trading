@@ -113,27 +113,29 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "11_ml_pipeline"
 
 ## References
 
-- **Anastasios N. Angelopoulos and Stephen Bates** (
-  2022). [A Gentle Introduction to Conformal Prediction and Distribution-Free Uncertainty Quantification](http://arxiv.org/abs/2107.07511).
-- **Rina Foygel Barber et al.** (
-  2023). [Conformal prediction beyond exchangeability](https://doi.org/10.1214/23-AOS2276). *The Annals of Statistics*.
+- **Alexandru Niculescu-Mizil and Rich Caruana** (2005). [Predicting good probabilities with supervised learning](https://doi.org/10.1145/1102351.1102430). *Association for Computing Machinery*.
+- **Anastasios N. Angelopoulos and Stephen Bates** ( 2022). [A Gentle Introduction to Conformal Prediction and Distribution-Free Uncertainty Quantification](http://arxiv.org/abs/2107.07511).
+- **Gavin C Cawley and Nicola L C Talbot** (2010). On Over-ﬁtting in Model Selection and Subsequent Selection Bias in Performance Evaluation.
+- **Harold William Kuhn et al.** (1953). [17. A Value for n-Person Games](https://doi.org/10.1515/9781400881970-018). *Princeton University Press*.
+- **Harris Papadopoulos et al.** (2002). [Inductive confidence machines for regression](https://doi.org/10.1007/3-540-36755-1_29). *Springer-Verlag*.
+- **Hui Zou and Trevor Hastie** ( 2005). [Regularization and Variable Selection Via the Elastic Net](https://doi.org/10.1111/j.1467-9868.2005.00503.x). *Journal of the Royal Statistical Society Series B: Statistical Methodology*.
+- **I. Elizabeth Kumar et al.** ( 2020). [Problems with Shapley-value-based explanations as feature importance measures](https://doi.org/10.48550/arXiv.2002.11097).
+- **Isaac Gibbs and Emmanuel Candès** (2023). [Conformal Inference for Online Prediction with Arbitrary Distribution Shifts](https://doi.org/10.48550/arXiv.2208.08401).
+- **Isaac Gibbs and Emmanuel Candès** (2021). [Adaptive Conformal Inference Under Distribution Shift](https://doi.org/10.48550/arXiv.2106.00170).
+- **James O'Donovan and Gloria Yang Yu** (2024). [A Transaction Cost Perspective on Option Anomalies](https://doi.org/10.2139/ssrn.4806038).
+- **Jing Lei et al.** (2017). [Distribution-Free Predictive Inference For Regression](https://doi.org/10.48550/arXiv.1604.04173).
+- **Joseph Simonian** ( 2024). [Using Econometrics vs. Machine Learning: What, When, and How](https://doi.org/10.3905/jpm.2024.1.623). *The Journal of Portfolio Management*.
+- **Kjersti Aas et al.** (2021). [Explaining individual predictions when features are dependent: More accurate approximations to Shapley values](https://doi.org/10.1016/j.artint.2021.103502). *Artificial Intelligence*.
 - **Leo Breiman** (2001). Statistical Modeling: The Two Cultures.
-- **Gavin C Cawley and Nicola L C Talbot** (2010). On Over-ﬁtting in Model Selection and Subsequent Selection Bias in
-  Performance Evaluation.
-- **Peter J. Huber** (1964). [Robust Estimation of a Location Parameter](https://doi.org/10.1214/aoms/1177703732). *The
-  Annals of Mathematical Statistics*.
-- **I. Elizabeth Kumar et al.** (
-  2020). [Problems with Shapley-value-based explanations as feature importance measures](https://doi.org/10.48550/arXiv.2002.11097).
-- **Scott M Lundberg et al.** (
-  2017). [A Unified Approach to Interpreting Model Predictions](http://papers.nips.cc/paper/7062-a-unified-approach-to-interpreting-model-predictions.pdf).
-  *Curran Associates, Inc.*.
-- **Joseph Simonian** (
-  2024). [Using Econometrics vs. Machine Learning: What, When, and How](https://doi.org/10.3905/jpm.2024.1.623). *The
-  Journal of Portfolio Management*.
-- **Sophia Sun and Rose Yu** (
-  2025). [Conformal Prediction for Time-series Forecasting with Change Points](https://doi.org/10.48550/arXiv.2509.02844).
-- **Ryan J. Tibshirani et al.** (
-  2020). [Conformal Prediction Under Covariate Shift](https://doi.org/10.48550/arXiv.1904.06019).
-- **Hui Zou and Trevor Hastie** (
-  2005). [Regularization and Variable Selection Via the Elastic Net](https://doi.org/10.1111/j.1467-9868.2005.00503.x).
-  *Journal of the Royal Statistical Society Series B: Statistical Methodology*.
+- **Peter J. Huber** (1964). [Robust Estimation of a Location Parameter](https://doi.org/10.1214/aoms/1177703732). *The Annals of Mathematical Statistics*.
+- [Regression Shrinkage and Selection via the Lasso on JSTOR](https://www.jstor.org/stable/2346178?if_data=e30%3D&seq=1).
+- **Rina Foygel Barber et al.** ( 2023). [Conformal prediction beyond exchangeability](https://doi.org/10.1214/23-AOS2276). *The Annals of Statistics*.
+- **Robert Tibshirani** (1996). [Regression Shrinkage and Selection Via the Lasso](https://doi.org/10.1111/j.2517-6161.1996.tb02080.x). *Journal of the Royal Statistical Society: Series B (Methodological)*.
+- **Ryan J. Tibshirani et al.** ( 2020). [Conformal Prediction Under Covariate Shift](https://doi.org/10.48550/arXiv.1904.06019).
+- **Scott M Lundberg et al.** ( 2017). [A Unified Approach to Interpreting Model Predictions](http://papers.nips.cc/paper/7062-a-unified-approach-to-interpreting-model-predictions.pdf). *Curran Associates, Inc.*.
+- **Shihao Gu et al.** (2020). [Empirical Asset Pricing via Machine Learning](https://doi.org/10.1093/rfs/hhaa009). *The Review of Financial Studies*.
+- **Sophia Sun and Rose Yu** ( 2025). [Conformal Prediction for Time-series Forecasting with Change Points](https://doi.org/10.48550/arXiv.2509.02844).
+- **Sophia Sun and Rose Yu** (2024). [Copula Conformal Prediction for Multi-step Time Series Forecasting](https://doi.org/10.48550/arXiv.2212.03281).
+- **Takuya Akiba et al.** (2019). [Optuna: A Next-generation Hyperparameter Optimization Framework](https://doi.org/10.48550/arXiv.1907.10902).
+- **Trevor Hastie et al.** (2009). [The Elements of Statistical Learning: Data Mining, Inference, and Prediction, Second Edition](https://doi.org/10.1007/978-0-387-84858-7). *Springer-Verlag*.
+- **Yaniv Romano et al.** (2019). [Conformalized Quantile Regression](https://doi.org/10.48550/arXiv.1905.03222).

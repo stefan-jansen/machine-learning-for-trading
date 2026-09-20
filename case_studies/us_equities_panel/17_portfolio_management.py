@@ -115,11 +115,19 @@ EXECUTION_TIER = "canonical"
 POPULATION_NAME = ""
 SUPERSEDES_POPULATION = ""
 SUPERSEDES_SETS: dict = {}
-WORKSPACE = "experiments"
+# Empty means this run writes to the case study's own store, which is what canonical
+# production execution wants. Any other value routes the run's writes there instead, at
+# either tier, and is how a rehearsal at full scale is compared against the published
+# result without being able to damage it.
+WORKSPACE = ""
 PREVIEW_LABELS = []
 PREVIEW_MAX_BASELINE_ROWS = 0
 PREVIEW_MAX_ALLOCATORS = 0
 MAX_SYMBOLS = 0
+# None means the width `setup.yaml` declares; an int overrides it. Declared here because
+# papermill only binds a name the parameters cell already holds - a run that passes
+# TOP_N_PREDICTIONS to a notebook without it sweeps the declared width and exits 0.
+TOP_N_PREDICTIONS = None
 
 # %% [markdown]
 # ## 2. The baseline this notebook varies
@@ -133,12 +141,17 @@ MAX_SYMBOLS = 0
 # publish over it.
 
 # %%
+workspace_override = os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE
 if EXECUTION_TIER == "canonical":
     if PREVIEW_LABELS or PREVIEW_MAX_BASELINE_ROWS or PREVIEW_MAX_ALLOCATORS or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
     if not BASELINE_SET_NAMES or len(BASELINE_SET_NAMES) != len(set(BASELINE_SET_NAMES)):
         raise ValueError("Canonical execution requires unique named baseline sets")
-    study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER)
+    study = open_study(
+        CASE_STUDY_ID,
+        execution_tier=EXECUTION_TIER,
+        workspace=Path(workspace_override) if workspace_override else None,
+    )
 elif EXECUTION_TIER == "preview":
     if (
         not PREVIEW_LABELS
@@ -152,7 +165,7 @@ elif EXECUTION_TIER == "preview":
     study = open_study(
         CASE_STUDY_ID,
         execution_tier=EXECUTION_TIER,
-        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
+        workspace=Path(workspace_override or "experiments"),
     )
 else:
     raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
@@ -241,7 +254,9 @@ excluded.select("label", "family", "config_name", "prediction_hash", "sharpe", "
 # below is evidence against one existing.
 
 # %% tags=["results"]
-top_n = get_top_n_predictions(CASE_STUDY_ID, "allocation")
+if TOP_N_PREDICTIONS is None:
+    TOP_N_PREDICTIONS = get_top_n_predictions(CASE_STUDY_ID, "allocation")
+top_n = TOP_N_PREDICTIONS
 checkpoints_per_config = get_checkpoints_per_config(CASE_STUDY_ID)
 if checkpoints_per_config != 1:
     raise ValueError(

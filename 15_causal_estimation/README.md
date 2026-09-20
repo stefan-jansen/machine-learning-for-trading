@@ -94,15 +94,17 @@ MPLBACKEND=Agg PLOTLY_RENDERER=json uv run python 15_causal_estimation/<notebook
 
 ## References
 
-- **David H. Bailey and Marcos Lopez de Prado** (2014). [The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality](https://doi.org/10.2139/ssrn.2460551).
-- **Kay H. Brodersen et al.** (2015). [Inferring causal impact using Bayesian structural time-series models](https://doi.org/10.1214/14-AOAS788). *The Annals of Applied Statistics*.
-- **Victor Chernozhukov et al.** (2018). [Double/debiased machine learning for treatment and structural parameters](https://doi.org/10.1111/ectj.12097). *The Econometrics Journal*.
 - **Aapo Hyvärinen et al.** (2010). [Estimation of a Structural Vector Autoregression Model Using Non-Gaussianity](https://www.jmlr.org/papers/v11/hyvarinen10a.html). *Journal of Machine Learning Research*.
-- **Guido W. Imbens and Joshua D. Angrist** (1994). [Identification and Estimation of Local Average Treatment Effects](https://doi.org/10.2307/2951620). *Econometrica*.
-- **Emanuele Olivetti et al.** (2026). [Can AI Learn Causal Structure? Evidence from ADIA Lab's Causal Discovery Challenge](https://doi.org/10.2139/ssrn.6125566).
-- **Marcos Lopez de Prado** (2022). [Causal Factor Investing: Can Factor Investing Become Scientific?](https://doi.org/10.2139/ssrn.4205613).
 - **Alexander Reisach et al.** (2021). [Beware of the Simulated DAG! Causal Discovery Benchmarks May Be Easy to Game](https://proceedings.neurips.cc/paper_files/paper/2021/hash/e987eff4a7c7b7e580d659feb6f60c1a-Abstract.html). *Curran Associates, Inc.*.
-- **Jakob Runge et al.** (2019). [Inferring causation from time series in Earth system sciences](https://doi.org/10.1038/s41467-019-10105-3). *Nature Communications*.
+- **Alexandre Belloni et al.** (2012). [Inference on Treatment Effects After Selection Amongst High-Dimensional Controls](https://doi.org/10.48550/arXiv.1201.0224).
 - **Ali Shojaie and Emily B. Fox** (2022). [Granger Causality: A Review and Recent Advances](https://doi.org/10.1146/annurev-statistics-040120-010930). *Annual Review of Statistics and Its Application*.
+- **David H. Bailey and Marcos Lopez de Prado** (2014). [The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality](https://doi.org/10.2139/ssrn.2460551).
+- **Emanuele Olivetti et al.** (2026). [Can AI Learn Causal Structure? Evidence from ADIA Lab's Causal Discovery Challenge](https://doi.org/10.2139/ssrn.6125566).
+- **Guanhao Feng et al.** (2020). [Taming the Factor Zoo: A Test of New Factors](https://doi.org/10.1111/jofi.12883). *The Journal of Finance*.
+- **Guido W. Imbens and Joshua D. Angrist** (1994). [Identification and Estimation of Local Average Treatment Effects](https://doi.org/10.2307/2951620). *Econometrica*.
+- **Jakob Runge et al.** (2019). [Inferring causation from time series in Earth system sciences](https://doi.org/10.1038/s41467-019-10105-3). *Nature Communications*.
+- **Kay H. Brodersen et al.** (2015). [Inferring causal impact using Bayesian structural time-series models](https://doi.org/10.1214/14-AOAS788). *The Annals of Applied Statistics*.
+- **Marcos Lopez de Prado** (2022). [Causal Factor Investing: Can Factor Investing Become Scientific?](https://doi.org/10.2139/ssrn.4205613).
 - **Peter Spirtes et al.** (2000). Causation, Prediction, and Search.
+- **Victor Chernozhukov et al.** (2018). [Double/debiased machine learning for treatment and structural parameters](https://doi.org/10.1111/ectj.12097). *The Econometrics Journal*.
 - **Xun Zheng et al.** (2018). [DAGs with NO TEARS: Continuous Optimization for Structure Learning](https://doi.org/10.48550/arXiv.1803.01422).

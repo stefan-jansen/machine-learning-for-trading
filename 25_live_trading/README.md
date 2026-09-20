@@ -126,3 +126,13 @@ Key libraries:
 - `alpaca-py`: Alpaca broker integration
 - `ib_async`: Interactive Brokers connection
 - `python-okx`: OKX exchange SDK (used by notebook 09)
+
+## References
+
+- **Robert Almgren and Neil Chriss** (2001). [Optimal execution of portfolio transactions](https://doi.org/10.21314/jor.2001.041). *The Journal of Risk*.
+- **David H. Bailey and Marcos Lopez de Prado** (2014). [The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality](https://doi.org/10.2139/ssrn.2460551).
+- **David H. Bailey et al.** (2015). [The Probability of Backtest Overfitting](https://doi.org/10.2139/ssrn.2326253).
+- **Larry Harris** (2003). Trading and Exchanges: Market Microstructure for Practitioners. *Oxford University Press*.
+- **Ananth Madhavan** (2002). [Market Microstructure: A Practitioner's Guide](https://www.jstor.org/stable/4480415). *Financial Analysts Journal*.
+- **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.
+- **Christopher Schwarz et al.** (2022). [The 'Actual Retail Price' of Equity Trades](https://doi.org/10.2139/ssrn.4189239).

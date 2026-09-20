@@ -137,32 +137,41 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "14_latent_factors"
 
 ## References
 
-- **Marco Avellaneda and Jeong-Hyun Lee** (2010). [Statistical arbitrage in the US equities market](https://doi.org/10.1080/14697680903124632). *Quantitative Finance*.
-- **Marco Avellaneda** (2019). [Hierarchical PCA and Applications to Portfolio Management](https://doi.org/10.48550/arXiv.1910.02310).
-- **Matteo Bagnara** (2024). [Asset Pricing and Machine Learning: A critical review](https://doi.org/10.1111/joes.12532). *Journal of Economic Surveys*.
-- **Francisco Barillas and Jay Shanken** (2018). [Comparing Asset Pricing Models](https://www.jstor.org/stable/26654648). *The Journal of Finance*.
-- **Svetlana Bryzgalova et al.** (2025). [Forest through the Trees: Building Cross-Sections of Stock Returns](https://doi.org/10.1111/jofi.13477). *The Journal of Finance*.
-- **Luyang Chen et al.** (2021). [Deep Learning in Asset Pricing](https://doi.org/10.48550/arXiv.1904.00745).
-- **Andrew Y. Chen** (2024). [Most claimed statistical findings in cross-sectional return predictability are likely true](http://arxiv.org/abs/2206.15365).
-- **John H. Cochrane** (2011). [Presidential Address: Discount Rates](https://doi.org/10.1111/j.1540-6261.2011.01671.x). *The Journal of Finance*.
-- **Gregory Connor and Robert Korajczyk** (2009). Factor Models of Asset Returns.
-- **Antoine Didisheim et al.** (2023). [Complexity in Factor Pricing Models](https://doi.org/10.3386/w31689).
-- **Eugene F. Fama and Kenneth R. French** (1993). [Common risk factors in the returns on stocks and bonds](https://doi.org/10.1016/0304-405X(93)90023-5). *Journal of Financial Economics*.
-- **Guanhao Feng et al.** (2020). [Taming the Factor Zoo: A Test of New Factors](https://doi.org/10.1111/jofi.12883). *The Journal of Finance*.
+- **Alexander Swade et al.** (2023). [Factor Zoo (.zip)](https://doi.org/10.2139/ssrn.4605976).
 - **Amit Goyal** (2012). [Empirical cross-sectional asset pricing: a survey](https://doi.org/10.1007/s11408-011-0177-7). *Financial Markets and Portfolio Management*.
-- **Shihao Gu et al.** (2019). [Autoencoder Asset Pricing Models](https://doi.org/10.2139/ssrn.3335536).
-- **Campbell R. Harvey et al.** (2016). [...and the Cross-Section of Expected Returns](https://doi.org/10.1093/rfs/hhv059). *Review of Financial Studies*.
-- **Campbell R. Harvey and Yan Liu** (2019). [A Census of the Factor Zoo](https://doi.org/10.2139/ssrn.3341728).
-- **Kewei Hou et al.** (2015). [Digesting Anomalies: An Investment Approach](https://doi.org/10.1093/rfs/hhu068). *The Review of Financial Studies*.
-- **Kewei Hou et al.** (2020). [Replicating Anomalies](https://doi.org/10.1093/rfs/hhy131). *The Review of Financial Studies*.
-- **Yoontae Hwang et al.** (2025). [Deep Learning in Asset Management: Architectures, Applications, and Challenges](https://doi.org/10.3905/jpm.2025.1.780). *The Journal of Portfolio Management*.
-- **Thomas M. Idzorek et al.** (2024). [Domesticating the Factor Zoo with Economic Theory](https://doi.org/10.3905/jpm.2024.51.1.097). *The Journal of Portfolio Management*.
-- **Theis Ingerslev Jensen et al.** (2022). Is There a Replication Crisis in Finance?.
+- **Andrew Y. Chen** (2024). [Most claimed statistical findings in cross-sectional return predictability are likely true](http://arxiv.org/abs/2206.15365).
+- **Antoine Didisheim et al.** (2023). [Complexity in Factor Pricing Models](https://doi.org/10.3386/w31689).
 - **Bryan T. Kelly et al.** (2019). [Characteristics are covariances: A unified model of risk and return](https://doi.org/10.1016/j.jfineco.2019.05.001). *Journal of Financial Economics*.
 - **Bryan T. Kelly et al.** (2025). [Artificial Intelligence Asset Pricing Models](https://doi.org/10.3386/w33351).
+- **Campbell R. Harvey** (2017). [Presidential Address: The Scientific Outlook in Financial Economics](https://doi.org/10.1111/jofi.12530). *The Journal of Finance*.
+- **Campbell R. Harvey and Yan Liu** (2019). [A Census of the Factor Zoo](https://doi.org/10.2139/ssrn.3341728).
+- **Campbell R. Harvey et al.** (2016). [...and the Cross-Section of Expected Returns](https://doi.org/10.1093/rfs/hhv059). *Review of Financial Studies*.
 - **Damian Kisiel et al.** (2023). [Portfolio Transformer for Attention-Based Asset Allocation](https://doi.org/10.1007/978-3-031-23492-7_6). *Springer International Publishing*.
-- **Martin Lettau and Markus Pelger** (2020). [Estimating latent asset-pricing factors](https://doi.org/10.1016/j.jeconom.2019.08.012). *Journal of Econometrics*.
-- **Robert B. Litterman and Josè Scheinkman** (1991). [Common Factors Affecting Bond Returns](https://doi.org/10.3905/jfi.1991.692347). *The Journal of Fixed Income*.
-- **R. David McLean and Jeffrey Pontiff** (2016). [Does Academic Research Destroy Stock Return Predictability?](https://doi.org/10.1111/jofi.12365). *Journal of Finance*.
+- **Eugene F. Fama and Kenneth R. French** (1993). [Common risk factors in the returns on stocks and bonds](https://doi.org/10.1016/0304-405X(93)90023-5). *Journal of Financial Economics*.
+- **Eugene F. Fama and Kenneth R. French** (2015). [A five-factor asset pricing model](https://doi.org/10.1016/j.jfineco.2014.10.010). *Journal of Financial Economics*.
+- **Francisco Barillas and Jay Shanken** (2018). [Comparing Asset Pricing Models](https://www.jstor.org/stable/26654648). *The Journal of Finance*.
 - **Giuseppe A. Paleologo** (2025). The Elements of Quantitative Investing. *John Wiley & Sons*.
-- **Alexander Swade et al.** (2023). [Factor Zoo (.zip)](https://doi.org/10.2139/ssrn.4605976).
+- **Gregory Connor and Robert Korajczyk** (2009). Factor Models of Asset Returns.
+- **Guanhao Feng et al.** (2020). [Taming the Factor Zoo: A Test of New Factors](https://doi.org/10.1111/jofi.12883). *The Journal of Finance*.
+- **Jinho Baik et al.** (2005). [Phase transition of the largest eigenvalue for nonnull complex sample covariance matrices](https://doi.org/10.1214/009117905000000233). *The Annals of Probability*.
+- **John H. Cochrane** (2011). [Presidential Address: Discount Rates](https://doi.org/10.1111/j.1540-6261.2011.01671.x). *The Journal of Finance*.
+- **Kewei Hou et al.** (2015). [Digesting Anomalies: An Investment Approach](https://doi.org/10.1093/rfs/hhu068). *The Review of Financial Studies*.
+- **Kewei Hou et al.** (2020). [Replicating Anomalies](https://doi.org/10.1093/rfs/hhy131). *The Review of Financial Studies*.
+- **Kewei Hou et al.** (2021). [An Augmented q-Factor Model with Expected Growth*](https://doi.org/10.1093/rof/rfaa004). *Review of Finance*.
+- **Luyang Chen et al.** (2021). [Deep Learning in Asset Pricing](https://doi.org/10.48550/arXiv.1904.00745).
+- **Marco Avellaneda** (2019). [Hierarchical PCA and Applications to Portfolio Management](https://doi.org/10.48550/arXiv.1910.02310).
+- **Marco Avellaneda and Jeong-Hyun Lee** (2010). [Statistical arbitrage in the US equities market](https://doi.org/10.1080/14697680903124632). *Quantitative Finance*.
+- **Martin Lettau and Markus Pelger** (2020). [Estimating latent asset-pricing factors](https://doi.org/10.1016/j.jeconom.2019.08.012). *Journal of Econometrics*.
+- **Matteo Bagnara** (2024). [Asset Pricing and Machine Learning: A critical review](https://doi.org/10.1111/joes.12532). *Journal of Economic Surveys*.
+- **Nikolay Gospodinov et al.** (2014). [Misspecification-Robust Inference in Linear Asset-Pricing Models with Irrelevant Risk Factors](https://doi.org/10.1093/rfs/hht135). *The Review of Financial Studies*.
+- **Nikolay Gospodinov et al.** (2017). [Spurious Inference in Reduced‐Rank Asset‐Pricing Models](https://ideas.repec.org//a/wly/emetrp/v85y2017ip1613-1628.html). *Econometrica*.
+- **R. David McLean and Jeffrey Pontiff** (2016). [Does Academic Research Destroy Stock Return Predictability?](https://doi.org/10.1111/jofi.12365). *Journal of Finance*.
+- **Robert B. Litterman and Josè Scheinkman** (1991). [Common Factors Affecting Bond Returns](https://doi.org/10.3905/jfi.1991.692347). *The Journal of Fixed Income*.
+- **Ryan Engel et al.** (2025). [Scaling Conditional Autoencoders for Portfolio Optimization via Uncertainty-Aware Factor Selection](https://doi.org/10.1145/3768292.3770415). *ACM*.
+- **Shihao Gu et al.** (2019). [Autoencoder Asset Pricing Models](https://doi.org/10.2139/ssrn.3335536).
+- **Shihao Gu et al.** (2020). [Empirical Asset Pricing via Machine Learning](https://doi.org/10.1093/rfs/hhaa009). *The Review of Financial Studies*.
+- **Stefano Giglio et al.** (2021). [Test Assets and Weak Factors](https://papers.ssrn.com/abstract=3884696).
+- **Svetlana Bryzgalova et al.** (2025). [Forest through the Trees: Building Cross-Sections of Stock Returns](https://doi.org/10.1111/jofi.13477). *The Journal of Finance*.
+- **Theis Ingerslev Jensen et al.** (2022). Is There a Replication Crisis in Finance?.
+- **Thomas M. Idzorek et al.** (2024). [Domesticating the Factor Zoo with Economic Theory](https://doi.org/10.3905/jpm.2024.51.1.097). *The Journal of Portfolio Management*.
+- **Yoontae Hwang et al.** (2025). [Deep Learning in Asset Management: Architectures, Applications, and Challenges](https://doi.org/10.3905/jpm.2025.1.780). *The Journal of Portfolio Management*.

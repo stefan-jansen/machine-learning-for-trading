@@ -86,9 +86,14 @@ labels = list(LABELS) if LABELS else list(ALL_LABELS)
 # canonical run, the isolated preview directory otherwise. `study.root` is the released one in
 # both tiers, so a preview that reads it is reading somebody else's registry.
 STORAGE_ROOT = study.storage_root(study.execution_tier)
-# A canonical run reads the funnel's frozen sets and publishes its own; a preview run against a
-# private workspace reads and writes only what it produced there.
-CANONICAL_RUN = EXECUTION_TIER == "canonical" and not WORKSPACE
+# A canonical run reads the funnel's frozen sets and publishes its own; a preview run reads and
+# writes only what it produced. The tier decides that and a workspace does not: a canonical run
+# given a workspace is the whole computation writing somewhere else, so it reads canonical-tier
+# rows and publishes into the registry it was pointed at. Testing WORKSPACE here made such a run
+# a preview of itself - it could not see the canonical allocation rows its own 14 had just
+# written, and stopped with 'no preview baseline or allocation backtest ... traded in this
+# workspace'.
+CANONICAL_RUN = EXECUTION_TIER == "canonical"
 case_config = get_backtest_config("crypto_perps_funding")
 
 # %% [markdown]

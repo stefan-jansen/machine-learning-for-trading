@@ -79,3 +79,27 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "05_synthetic_data"
 > ```bash
 > docker compose --profile py312 run --rm py312 python 05_synthetic_data/03_sigcwgan_signatures.py
 > ```
+
+## References
+
+- **Martín Abadi et al.** (2016). [Deep Learning with Differential Privacy](https://doi.org/10.1145/2976749.2978318).
+- **David H. Bailey and Marcos Lopez de Prado** (2014). [The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality](https://doi.org/10.2139/ssrn.2460551).
+- **David H. Bailey et al.** (2015). [The Probability of Backtest Overfitting](https://doi.org/10.2139/ssrn.2326253).
+- **Tim Bollerslev** (1986). [Generalized autoregressive conditional heteroskedasticity](https://doi.org/10.1016/0304-4076(86)90063-1). *Journal of Econometrics*.
+- **Vadim Borisov et al.** (2023). [Language Models are Realistic Tabular Data Generators](https://doi.org/10.48550/arXiv.2210.06280).
+- **Adil Rengim Cetingoz and Charles-Albert Lehalle** (2025). [Synthetic Data for Portfolios: A Throw of the Dice Will Never Abolish Chance](https://arxiv.org/abs/2501.03993v5).
+- **R. Cont** (2001). [Empirical properties of asset returns: stylized facts and statistical issues](https://doi.org/10.1080/713665670). *Quantitative Finance*.
+- **Rama Cont et al.** (2025). [Tail-GAN: Learning to Simulate Tail Risk Scenarios](https://doi.org/10.48550/arXiv.2203.01664).
+- **Prafulla Dhariwal and Alex Nichol** (2021). [Diffusion Models Beat GANs on Image Synthesis](https://arxiv.org/abs/2105.05233v4).
+- **Florian Eckerli and Joerg Osterrieder** (2021). [Generative Adversarial Networks in finance: an overview](https://doi.org/10.48550/arXiv.2106.06364).
+- **Xuefeng Gao et al.** (2025). [Factor-Based Conditional Diffusion Model for Portfolio Optimization](https://doi.org/10.48550/arXiv.2509.22088).
+- **Jonathan Ho and Tim Salimans** (2022). [Classifier-Free Diffusion Guidance](https://doi.org/10.48550/arXiv.2207.12598).
+- **Jonathan Ho et al.** (2020). [Denoising Diffusion Probabilistic Models](http://arxiv.org/abs/2006.11239). *arXiv:2006.11239 [cs, stat]*.
+- **Jinsung Jeon et al.** (2022). [GT-GAN: General Purpose Time Series Synthesis with Generative Adversarial Networks](https://proceedings.neurips.cc/paper_files/paper/2022/hash/f03ce573aa8bce26f77b76f1cb9ee979-Abstract-Conference.html). *Advances in Neural Information Processing Systems*.
+- **Sohyeon Kwon and Yongjae Lee** (2024). [Can GANs Learn the Stylized Facts of Financial Time Series?](https://doi.org/10.48550/arXiv.2410.09850).
+- **Hao Ni et al.** (2020). [Conditional Sig-Wasserstein GANs for Time Series Generation](http://arxiv.org/abs/2006.05421). *arXiv:2006.05421 [cs, stat]*.
+- **Dimitris N. Politis and Joseph P. Romano** (1994). [The Stationary Bootstrap](https://doi.org/10.2307/2290993). *Journal of the American Statistical Association*.
+- **Marcos López de Prado** (2022). [Type I and Type II Errors of the Sharpe Ratio under Multiple Testing](https://doi.org/10.3905/jpm.2022.1.403). *The Journal of Portfolio Management*.
+- **Tomonori Takahashi and Takayuki Mizuno** (2024). [Generation of synthetic financial time series by diffusion models](https://doi.org/10.48550/arXiv.2410.18897).
+- **Jinsung Yoon et al.** (2019). [Time-series Generative Adversarial Networks](http://papers.nips.cc/paper/8789-time-series-generative-adversarial-networks.pdf). *Curran Associates, Inc.*.
+- **Xinyu Yuan and Yan Qiao** (2024). [Diffusion-TS: Interpretable Diffusion for General Time Series Generation](https://arxiv.org/abs/2403.01742v3).

@@ -75,27 +75,28 @@ Without these services, NB21 silently falls back to the 2-engine subset (DuckDB 
 
 ## References
 
-- **William Beaver et al.** (2007). [Delisting returns and their effect on accounting-based market anomalies](https://doi.org/10.1016/j.jacceco.2006.12.002). *Journal of Accounting and Economics*.
-- **Florian Berg et al.** (2022). [Aggregate Confusion: The Divergence of ESG Ratings*](https://doi.org/10.1093/rof/rfac033). *Review of Finance*.
-- **Mark M. Carhart et al.** (2002). [Mutual Fund Survivorship](https://doi.org/10.1093/rfs/15.5.1439). *The Review of Financial Studies*.
-- **Lin William Cong et al.** (2023). [Crypto Wash Trading](https://doi.org/10.1287/mnsc.2021.02709). *Management Science*.
-- **David Easley et al.** (2021). [Microstructure in the Machine Age](https://doi.org/10.1093/rfs/hhaa078). *The Review of Financial Studies*.
-- **B. Espen Eckbo and Markus Lithell** (2025). [Merger-Driven Listing Dynamics](https://doi.org/10.1017/S0022109023001394). *Journal of Financial and Quantitative Analysis*.
-- **Gene Ekster and Petter N. Kolm** (2020). [Alternative Data in Investment Management: Usage, Challenges and Valuation](https://doi.org/10.2139/ssrn.3715828).
-- **Edwin J. Elton et al.** (1996). [Survivor Bias and Mutual Fund Performance](https://doi.org/10.1093/rfs/9.4.1097). *The Review of Financial Studies*.
-- **Kingsley Y L Fong et al.** (2017). [What Are the Best Liquidity Proxies for Global Research?*](https://doi.org/10.1093/rof/rfx003). *Review of Finance*.
-- **Songrun He et al.** (2024). [Fundamentals of Perpetual Futures](https://doi.org/10.48550/arXiv.2212.06888).
-- **Jacques Joubert et al.** (2024). [The Three Types of Backtests](https://doi.org/10.2139/ssrn.4897573).
-- **Nina Karnaukh et al.** (2015). [Understanding FX Liquidity](https://doi.org/10.2139/ssrn.2329738).
-- **Gueorgui S. Konstantinov** (2025). [On Systematic Currency Management](https://doi.org/10.3905/jpm.2025.1.724). *The Journal of Portfolio Management*.
-- **John Lehoczky and Mark Schervish** (2018). [Overview and History of Statistics for Equity Markets](https://doi.org/10.1146/annurev-statistics-031017-100518). *Annual Review of Statistics and Its Application*.
 - **Alex Lipton and Marcos Lopez de Prado** (2020). [Three Quant Lessons from COVID-19](https://doi.org/10.2139/ssrn.3580185).
-- **Tim Loughran and Bill McDonald** (2020). [Textual Analysis in Finance](https://doi.org/10.1146/annurev-financial-012820-032249). *Annual Review of Financial Economics*.
-- **Yin Luo et al.** (2014). Seven Sins of Quantitative Investing.
-- **Igor Makarov and Antoinette Schoar** (2020). [Trading and arbitrage in cryptocurrency markets](https://doi.org/10.1016/j.jfineco.2019.07.001). *Journal of Financial Economics*.
-- **Hunter Ng et al.** (2025). [Price Discovery and Trading in Prediction Markets](https://doi.org/10.2139/ssrn.5331995).
-- **Maureen O’Hara** (2015). [High frequency market microstructure](https://doi.org/10.1016/j.jfineco.2015.01.003). *Journal of Financial Economics*.
-- **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.
-- **SEC** (2020). [Staff Report on Algorithmic Trading in U.S. Capital Markets](https://www.sec.gov/file/staff-report-algorithmic-trading-us-capital-markets).
-- **Tyler Shumway** (1997). [The Delisting Bias in CRSP Data](https://doi.org/10.1111/j.1540-6261.1997.tb03818.x). *The Journal of Finance*.
+- **B. Espen Eckbo and Markus Lithell** (2025). [Merger-Driven Listing Dynamics](https://doi.org/10.1017/S0022109023001394). *Journal of Financial and Quantitative Analysis*.
+- **Charles M Jones** Understanding the Market for U.S. Equity Market Data.
+- **David Easley et al.** (2021). [Microstructure in the Machine Age](https://doi.org/10.1093/rfs/hhaa078). *The Review of Financial Studies*.
 - **David Vidal-Tomás** (2022). [Which cryptocurrency data sources should scholars use?](https://doi.org/10.1016/j.irfa.2022.102061). *International Review of Financial Analysis*.
+- **Edwin J. Elton et al.** (1996). [Survivor Bias and Mutual Fund Performance](https://doi.org/10.1093/rfs/9.4.1097). *The Review of Financial Studies*.
+- **Florian Berg et al.** (2022). [Aggregate Confusion: The Divergence of ESG Ratings*](https://doi.org/10.1093/rof/rfac033). *Review of Finance*.
+- **Gene Ekster and Petter N. Kolm** (2020). [Alternative Data in Investment Management: Usage, Challenges and Valuation](https://doi.org/10.2139/ssrn.3715828).
+- **Gueorgui S. Konstantinov** (2025). [On Systematic Currency Management](https://doi.org/10.3905/jpm.2025.1.724). *The Journal of Portfolio Management*.
+- **Hunter Ng et al.** (2025). [Price Discovery and Trading in Prediction Markets](https://doi.org/10.2139/ssrn.5331995).
+- **Igor Makarov and Antoinette Schoar** (2020). [Trading and arbitrage in cryptocurrency markets](https://doi.org/10.1016/j.jfineco.2019.07.001). *Journal of Financial Economics*.
+- **Jacques Joubert et al.** (2024). [The Three Types of Backtests](https://doi.org/10.2139/ssrn.4897573).
+- **John Lehoczky and Mark Schervish** (2018). [Overview and History of Statistics for Equity Markets](https://doi.org/10.1146/annurev-statistics-031017-100518). *Annual Review of Statistics and Its Application*.
+- **Kingsley Y L Fong et al.** (2017). [What Are the Best Liquidity Proxies for Global Research?*](https://doi.org/10.1093/rof/rfx003). *Review of Finance*.
+- **Lin William Cong et al.** (2023). [Crypto Wash Trading](https://doi.org/10.1287/mnsc.2021.02709). *Management Science*.
+- **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.
+- **Mark M. Carhart et al.** (2002). [Mutual Fund Survivorship](https://doi.org/10.1093/rfs/15.5.1439). *The Review of Financial Studies*.
+- **Maureen O’Hara** (2015). [High frequency market microstructure](https://doi.org/10.1016/j.jfineco.2015.01.003). *Journal of Financial Economics*.
+- **Nina Karnaukh et al.** (2015). [Understanding FX Liquidity](https://doi.org/10.2139/ssrn.2329738).
+- **SEC** (2020). [Staff Report on Algorithmic Trading in U.S. Capital Markets](https://www.sec.gov/file/staff-report-algorithmic-trading-us-capital-markets).
+- **Songrun He et al.** (2024). [Fundamentals of Perpetual Futures](https://doi.org/10.48550/arXiv.2212.06888).
+- **Tim Loughran and Bill McDonald** (2020). [Textual Analysis in Finance](https://doi.org/10.1146/annurev-financial-012820-032249). *Annual Review of Financial Economics*.
+- **Tyler Shumway** (1997). [The Delisting Bias in CRSP Data](https://doi.org/10.1111/j.1540-6261.1997.tb03818.x). *The Journal of Finance*.
+- **William Beaver et al.** (2007). [Delisting returns and their effect on accounting-based market anomalies](https://doi.org/10.1016/j.jacceco.2006.12.002). *Journal of Accounting and Economics*.
+- **Yin Luo et al.** (2014). Seven Sins of Quantitative Investing.

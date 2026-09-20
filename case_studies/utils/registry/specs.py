@@ -201,6 +201,51 @@ def prediction_hash_from_parts(
 # separately) fully intact for provenance while making the hash path-independent.
 _HASH_EXCLUDED_METADATA = ("preset_path",)
 
+# ``backtest_config`` keys the engine's serializer began writing down after the
+# corpus was registered, with the value that means "the engine's own default".
+#
+# ``ml4t-backtest`` 0.1.6 ``to_dict`` emits all three unconditionally from their
+# dataclass defaults (``config.py`` ``lock_notional_update_mode`` :920 declared
+# :544, ``share_rounding`` :937 declared :738; ``FeedSpec.vwap_col`` is
+# ``str | None = None`` at ``ml4t/specs/market_data.py:71``) and ``from_dict``
+# reads them back with those same defaults (:1164, :1186, and ``optional_str``
+# at :298). An omitted key and the key carrying the value below therefore build
+# the same engine config, so hashing them apart registered a second identity for
+# work the registry already held: 2,491 twin groups in
+# ``sp500_equity_option_analytics`` alone, byte-identical artifacts on both
+# sides. Dropping the key only when it holds this default keeps every non-default
+# value hashed, so a configuration that really differs still gets its own
+# identity.
+#
+# This enumerates what is elided, never what is hashed. A key that is not named
+# here is hashed, so omitting one registers a separate identity - visible and
+# recoverable - rather than merging two configurations, which nothing downstream
+# can see. Adding an entry is a deliberate, reviewable edit and must be backed by
+# the same evidence: the engine reads the key back with this default, so absence
+# and this value are the same run. ``strategy.rebalance.step`` fails that test
+# and is deliberately NOT here - see ``tests/test_rebalance_step_identity.py``,
+# where a legacy spec without the key may have executed at any step.
+_DEFAULT_ELIDED_CONFIG_KEYS: tuple[tuple[tuple[str, str], Any], ...] = (
+    (("account", "lock_notional_update_mode"), "position_legs"),
+    (("feed", "vwap_col"), None),
+    (("position_sizing", "share_rounding"), "nearest"),
+)
+
+
+def _is_engine_default(value: Any, default: Any) -> bool:
+    """True when *value* is the engine default, with no cross-type coercion.
+
+    ``False == 0`` and ``True == 1`` in Python, so a boolean default compares by
+    identity and every other default by exact type as well as value: a spec
+    carrying ``0`` where the default is ``False`` describes a different value and
+    must keep its own identity.
+    """
+    if default is None:
+        return value is None
+    if isinstance(default, bool):
+        return value is default
+    return type(value) is type(default) and value == default
+
 
 def _hashable_strategy_spec(strategy_spec: dict) -> dict:
     """Copy of *strategy_spec* with non-portable provenance stripped for hashing."""
@@ -222,6 +267,10 @@ def _hashable_strategy_spec(strategy_spec: dict) -> dict:
         if isinstance(metadata, dict):
             for key in _HASH_EXCLUDED_METADATA:
                 metadata.pop(key, None)
+        for (section, key), default in _DEFAULT_ELIDED_CONFIG_KEYS:
+            block = backtest_config.get(section)
+            if isinstance(block, dict) and key in block and _is_engine_default(block[key], default):
+                block.pop(key)
     return spec
 
 
@@ -234,7 +283,10 @@ def backtest_hash_from_parts(
     """Compute backtest_hash from prediction_hash + strategy spec.
 
     Non-portable provenance (see ``_HASH_EXCLUDED_METADATA``) is stripped before
-    hashing so the same strategy hashes identically regardless of where it runs.
+    hashing so the same strategy hashes identically regardless of where it runs,
+    and config keys the engine writes at their own default (see
+    ``_DEFAULT_ELIDED_CONFIG_KEYS``) are elided so a serializer that starts
+    writing an implicit default down does not re-key the corpus.
     """
     hashable = _hashable_strategy_spec(strategy_spec)
     resolved_version = identity_version or strategy_spec.get("identity_version")

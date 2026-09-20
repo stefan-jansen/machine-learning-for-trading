@@ -86,27 +86,28 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "19_risk_management"
 
 ## References
 
-- **Ashwin Alankar et al.** (2023). [Fairy Tails: Lessons from 150 Years of Drawdowns](https://doi.org/10.3905/jpm.2023.1.503). *The Journal of Portfolio Management*.
-- **Andrew Ang and Allan Timmermann** (2011). [Regime Changes and Financial Markets](https://doi.org/10.2139/ssrn.1919497).
-- **Michele Leonardo Bianchi et al.** (2023). [Fat and Heavy Tails in Asset Management](https://doi.org/10.3905/jpm.2023.1.501). *The Journal of Portfolio Management*.
-- **Tim Bollerslev** (1986). [Generalized autoregressive conditional heteroskedasticity](https://doi.org/10.1016/0304-4076(86)90063-1). *Journal of Econometrics*.
 - **Aaron Brixton et al.** (2022). [A Changing Stock-Bond Correlation](https://www.aqr.com/Insights/Research/Journal-Article/A-Changing-Stock-Bond-Correlation). *AQR Alternative Thinking*.
-- **Sid Browne et al.** (2023). [Timing and Sizing Skills of Systematic Strategies across Time and Economic Regimes](https://doi.org/10.3905/jpm.2023.1.505). *The Journal of Portfolio Management*.
-- **H. Buehler et al.** (2019). [Deep hedging](https://doi.org/10.1080/14697688.2019.1571683). *Quantitative Finance*.
-- **R. Cont** (2001). [Empirical properties of asset returns: stylized facts and statistical issues](https://doi.org/10.1080/713665670). *Quantitative Finance*.
-- **Kent Daniel and Tobias J. Moskowitz** (2016). [Momentum crashes](https://doi.org/10.1016/j.jfineco.2015.12.002). *Journal of Financial Economics*.
-- **Peter Reinhard Hansen and Asger Lunde** (2006). [Consistent ranking of volatility models](https://doi.org/10.1016/j.jeconom.2005.01.005). *Journal of Econometrics*.
-- **Campbell R. Harvey et al.** (2022). [An Investor’s Guide to Crypto](https://doi.org/10.2139/ssrn.4124576).
-- **Brian Hurst** (2010). Understanding Risk Parity.
-- **Kevin Khang** (2022). [Toward Regime-Aware Risk Forecasts](https://doi.org/10.3905/jpm.2022.48.5.049). *The Journal of Portfolio Management*.
-- **R. Douglas Martin et al.** (2024). [Minimum Downside Risk Portfolios](https://doi.org/10.3905/jpm.2024.1.642). *The Journal of Portfolio Management*.
+- **A. E. Whalley and P. Wilmott** (1997). [An Asymptotic Analysis of an Optimal Hedging Model for Option Pricing with Transaction Costs](https://doi.org/10.1111/1467-9965.00034). *Mathematical Finance*.
 - **Alan Moreira and Tyler Muir** (2017). [Volatility-Managed Portfolios](https://doi.org/10.1111/jofi.12513). *The Journal of Finance*.
-- **Giuseppe A. Paleologo** (2025). The Elements of Quantitative Investing. *John Wiley & Sons*.
+- **Andrew Ang and Allan Timmermann** (2011). [Regime Changes and Financial Markets](https://doi.org/10.2139/ssrn.1919497).
 - **Andrew J. Patton** (2011). [Volatility forecast comparison using imperfect volatility proxies](https://doi.org/10.1016/j.jeconom.2010.03.034). *Journal of Econometrics*.
-- **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.
-- **R. Tyrrell Rockafellar and Stanislav Uryasev** (2000). [Optimization of conditional value-at-risk](https://doi.org/10.21314/JOR.2000.038). *The Journal of Risk*.
-- **G. William Schwert** (1989). [Why Does Stock Market Volatility Change Over Time?](https://doi.org/10.1111/j.1540-6261.1989.tb02647.x). *The Journal of Finance*.
-- **Yizhan Shu and John M. Mulvey** (2025). [Dynamic Factor Allocation Leveraging Regime-Switching Signals](https://doi.org/10.3905/jpm.2024.1.649). *The Journal of Portfolio Management*.
+- **Ashwin Alankar et al.** (2023). [Fairy Tails: Lessons from 150 Years of Drawdowns](https://doi.org/10.3905/jpm.2023.1.503). *The Journal of Portfolio Management*.
 - **{Board of Governors of the Federal Reserve System** (2011). [Supervisory Guidance on Model Risk Management - SR Letter 11-7](https://www.federalreserve.gov/supervisionreg/srletters/sr1107.htm).
-- **Samir Varma** (2025). [The False Promise of Drawdown Rules: New Evidence and a Better Framework](https://doi.org/10.3905/jpm.2025.1.765). *The Journal of Portfolio Management*.
+- **Brian Hurst** (2010). Understanding Risk Parity.
+- **Campbell R. Harvey et al.** (2022). [An Investor’s Guide to Crypto](https://doi.org/10.2139/ssrn.4124576).
+- **Giuseppe A. Paleologo** (2025). The Elements of Quantitative Investing. *John Wiley & Sons*.
+- **G. William Schwert** (1989). [Why Does Stock Market Volatility Change Over Time?](https://doi.org/10.1111/j.1540-6261.1989.tb02647.x). *The Journal of Finance*.
+- **H. Buehler et al.** (2019). [Deep hedging](https://doi.org/10.1080/14697688.2019.1571683). *Quantitative Finance*.
 - **Hervé Zumbach and Gilles Zumbach** (2025). [A Quantitative Approach to Historical Stress Tests](https://doi.org/10.3905/jpm.2025.1.742). *The Journal of Portfolio Management*.
+- **Kent Daniel and Tobias J. Moskowitz** (2016). [Momentum crashes](https://doi.org/10.1016/j.jfineco.2015.12.002). *Journal of Financial Economics*.
+- **Kevin Khang** (2022). [Toward Regime-Aware Risk Forecasts](https://doi.org/10.3905/jpm.2022.48.5.049). *The Journal of Portfolio Management*.
+- **Marcos Lopez de Prado** (2018). Advances in Financial Machine Learning. *John Wiley & Sons*.
+- **Michele Leonardo Bianchi et al.** (2023). [Fat and Heavy Tails in Asset Management](https://doi.org/10.3905/jpm.2023.1.501). *The Journal of Portfolio Management*.
+- **Peter Reinhard Hansen and Asger Lunde** (2006). [Consistent ranking of volatility models](https://doi.org/10.1016/j.jeconom.2005.01.005). *Journal of Econometrics*.
+- **R. Cont** (2001). [Empirical properties of asset returns: stylized facts and statistical issues](https://doi.org/10.1080/713665670). *Quantitative Finance*.
+- **R. Douglas Martin et al.** (2024). [Minimum Downside Risk Portfolios](https://doi.org/10.3905/jpm.2024.1.642). *The Journal of Portfolio Management*.
+- **R. Tyrrell Rockafellar and Stanislav Uryasev** (2000). [Optimization of conditional value-at-risk](https://doi.org/10.21314/JOR.2000.038). *The Journal of Risk*.
+- **Samir Varma** (2025). [The False Promise of Drawdown Rules: New Evidence and a Better Framework](https://doi.org/10.3905/jpm.2025.1.765). *The Journal of Portfolio Management*.
+- **Sid Browne et al.** (2023). [Timing and Sizing Skills of Systematic Strategies across Time and Economic Regimes](https://doi.org/10.3905/jpm.2023.1.505). *The Journal of Portfolio Management*.
+- **Tim Bollerslev** (1986). [Generalized autoregressive conditional heteroskedasticity](https://doi.org/10.1016/0304-4076(86)90063-1). *Journal of Econometrics*.
+- **Yizhan Shu and John M. Mulvey** (2025). [Dynamic Factor Allocation Leveraging Regime-Switching Signals](https://doi.org/10.3905/jpm.2024.1.649). *The Journal of Portfolio Management*.

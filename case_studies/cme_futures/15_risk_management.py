@@ -181,7 +181,13 @@ if not risk_controls:
 request_rows = []
 for label in labels:
     selected = rank_by_validation_sharpe(
-        study, pre_overlay_results(study, label=label, execution_tier=EXECUTION_TIER)
+        study,
+        pre_overlay_results(
+            study,
+            label=label,
+            execution_tier=EXECUTION_TIER,
+            supersedes_by_set=SUPERSEDES_CANDIDATE_SETS,
+        ),
     )[0]
     strategy = selected.spec()["strategy"]
     prediction_hash = selected.registry_record()["prediction_hash"]

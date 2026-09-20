@@ -120,7 +120,11 @@ EXECUTION_TIER = "canonical"
 POPULATION_NAME = ""
 SUPERSEDES_POPULATION = ""
 SUPERSEDES_SETS: dict = {}
-WORKSPACE = "experiments"
+# Empty means this run writes to the case study's own store, which is what canonical
+# production execution wants. Any other value routes the run's writes there instead, at
+# either tier, and is how a rehearsal at full scale is compared against the published
+# result without being able to damage it.
+WORKSPACE = ""
 PREVIEW_LABELS = []
 PREVIEW_FAMILIES = []
 PREVIEW_CONFIG_NAMES = []
@@ -142,12 +146,17 @@ MAX_SYMBOLS = 0
 
 # %%
 preview_filters = bool(PREVIEW_LABELS or PREVIEW_FAMILIES or PREVIEW_CONFIG_NAMES)
+workspace_override = os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE
 if EXECUTION_TIER == "canonical":
     if preview_filters or PREVIEW_MAX_PREDICTIONS or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
     if not PREDICTION_SET_NAMES or len(PREDICTION_SET_NAMES) != len(set(PREDICTION_SET_NAMES)):
         raise ValueError("Canonical execution requires unique named prediction sets")
-    study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER)
+    study = open_study(
+        CASE_STUDY_ID,
+        execution_tier=EXECUTION_TIER,
+        workspace=Path(workspace_override) if workspace_override else None,
+    )
 elif EXECUTION_TIER == "preview":
     if not preview_filters or PREVIEW_MAX_PREDICTIONS < 1 or MAX_SYMBOLS < 1:
         raise ValueError(
@@ -156,7 +165,7 @@ elif EXECUTION_TIER == "preview":
     study = open_study(
         CASE_STUDY_ID,
         execution_tier=EXECUTION_TIER,
-        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
+        workspace=Path(workspace_override or "experiments"),
     )
 else:
     raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
