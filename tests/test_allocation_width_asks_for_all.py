@@ -35,6 +35,7 @@ import pytest
 
 from case_studies.cme_futures import research_workflow
 from case_studies.research import BacktestResult
+from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.registry import resolve_best_backtest_runs, resolve_best_predictions
 from case_studies.utils.sweep_config import top_n_cap
 
@@ -271,3 +272,20 @@ def test_the_shortlist_refuses_an_empty_population_at_zero(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="no distinct configurations"):
         _shortlist(0)
+
+
+def test_the_explorer_returns_every_backtest_at_zero(case_dir) -> None:
+    """`BacktestExplorer.best` carried a sentinel built around this defect.
+
+    Counting a whole cohort meant asking for a million rows, "more rows than any cohort
+    holds rather than for no limit at all", because 0 truncated to nothing. `deflated_sharpe`
+    takes its scoped cohort that way, and a cohort larger than the sentinel would have been
+    silently miscounted rather than refused.
+    """
+    explorer = BacktestExplorer("test", case_dir=case_dir)
+
+    assert explorer.best(stage="signal", top_n=2)["prediction_hash"].to_list() == [
+        "best",
+        "second",
+    ]
+    assert explorer.best(stage="signal", top_n=0)["prediction_hash"].to_list() == EVERY_CONFIG
