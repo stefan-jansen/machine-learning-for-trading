@@ -410,27 +410,28 @@ def selected_final_result(study: Study, *, label: str, canonical: bool):
     return Result.open(study, rows.item(0, "backtest_hash"), include_preview=True)
 
 
-def selected_allocation_result(study: Study, *, label: str, canonical: bool):
-    """The configuration `15_risk_management` puts its overlays on, for one label.
+def selected_allocation_results(
+    study: Study, *, label: str, canonical: bool, top_n: int = 1
+) -> tuple:
+    """The configurations `15_risk_management` puts its overlays on, for one label.
 
-    On a canonical run it is the highest validation Sharpe in `crypto-signal-allocation-{label}`,
-    read back through the frozen set rather than re-queried. The set is immutable and a query is
-    not: a registry grows, so a later run that adds one result changes what a fresh "best
-    allocation result" query returns, and the two stages would then develop different
-    configurations from the one `14_portfolio_management` chose.
+    ``top_n`` is `backtest.sweep.top_n_predictions.risk_overlay`, which this case study declares
+    as 1. It was not a parameter until 2026-09-20: the single best was a literal here, so the
+    declared width could not be read and a wider sweep was unreachable from a launch even though
+    four other case studies took one. At ``top_n=1`` this returns what the singular
+    ``selected_allocation_result`` it replaced returned, from the same ranking.
 
-    A preview run has no frozen set, because a candidate set is canonical - `CandidateSet.create`
-    refuses a preview member outright. Its equivalent is the results its own 13 and 14 wrote into
-    this workspace, ranked the same way and tie-broken on the same identity. That is not the same
-    guarantee and does not pretend to be one: nothing is published, so nothing downstream can
-    resolve it by name, and the preview chain proves only that the stages run.
+    Ordering is the frozen set's own validation-Sharpe ranking, ties broken by identity, so a
+    wider slice extends the narrow one rather than reordering it.
     """
     from case_studies.research import CandidateSet, Result
 
+    if top_n < 1:
+        raise ValueError("the risk overlay needs at least one parent per label")
     if canonical:
         return CandidateSet.one(
             study, name=f"crypto-signal-allocation-{label}"
-        ).best_validation_sharpe()
+        ).ranked_validation_sharpe(limit=top_n)
     rows = _preview_traded_backtests(study, label).sort(
         "sharpe", "backtest_hash", descending=[True, False]
     )
@@ -440,7 +441,10 @@ def selected_allocation_result(study: Study, *, label: str, canonical: bool):
             "workspace; 13_backtest and 14_portfolio_management have to run in it first, "
             "and at least one of their results has to open a position"
         )
-    return Result.open(study, rows.item(0, "backtest_hash"), include_preview=True)
+    return tuple(
+        Result.open(study, value, include_preview=True)
+        for value in rows.get_column("backtest_hash").to_list()[:top_n]
+    )
 
 
 def run_model_plan(
