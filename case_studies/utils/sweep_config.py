@@ -252,6 +252,26 @@ def get_top_n_predictions(case_study: str, stage: str) -> int:
     return int(block.get(stage, _STAGE_DEFAULTS[stage]))
 
 
+def top_n_cap(top_n: int) -> int | None:
+    """Return the cap ``top_n`` asks for, or ``None`` when it asks for every candidate.
+
+    ``0`` is how ``top_n_predictions`` spells "all of them". ``_STAGE_DEFAULTS["signal"]``
+    is 0, every shipped ``setup.yaml`` declares ``signal: 0`` under the comment "all signal
+    predictions", and the four signal-stage notebooks read it that way, each guarding its
+    truncation with ``if TOP_N_PREDICTIONS > 0``.
+
+    The allocation stage had no such reading, so the same number meant the opposite one stage
+    later: ``0`` reached a SQL ``LIMIT 0`` and a ``.head(0)`` and selected nothing. Taking the
+    cap from here keeps one number meaning one thing at every stage. A negative width is a
+    caller error rather than a second spelling of "all", because SQLite's ``LIMIT -1`` means
+    no limit and a width arithmetic produced would otherwise pass through as one.
+    """
+    width = int(top_n)
+    if width < 0:
+        raise ValueError(f"top_n must be 0 (every candidate) or positive, got {top_n!r}")
+    return width or None
+
+
 def get_checkpoints_per_config(case_study: str) -> int:
     """Return how many checkpoints each advancing model config contributes.
 

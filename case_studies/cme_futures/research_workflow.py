@@ -36,6 +36,7 @@ from case_studies.utils.backtest_loaders import get_backtest_config, load_backte
 from case_studies.utils.backtest_runner import precompute_weights
 from case_studies.utils.registry import prediction_hash_from_parts
 from case_studies.utils.runtime import source_commit
+from case_studies.utils.sweep_config import top_n_cap
 from data import load_cme_futures
 from utils.modeling import load_configs
 from utils.paths import REPO_ROOT
@@ -1223,7 +1224,17 @@ def shortlist_signal_configurations(
     limit: int,
     execution_tier: str = "canonical",
 ) -> tuple[BacktestResult, ...]:
-    """Select the strongest signal result for each distinct model configuration."""
+    """Select the strongest signal result for each distinct model configuration.
+
+    ``limit`` is a promise, not a cap: a positive one that the population cannot fill raises,
+    because a caller that asked for 20 and got 8 is looking at a degenerate population and
+    silently ranking the 8 would hide it. ``limit=0`` asks for every distinct configuration,
+    the spelling ``top_n_predictions.signal`` already uses in every ``setup.yaml``, and is the
+    only way to ask for all of them without first knowing how many there are - which is the
+    one thing this function exists to compute. Asking with a number large enough to be sure,
+    999 against a population of 50, is indistinguishable from the degenerate case and raises.
+    """
+    cap = top_n_cap(limit)
     pool = stage_backtest_results(study, stage="signal", label=label, execution_tier=execution_tier)
     selected = []
     configurations = set()
@@ -1235,9 +1246,12 @@ def shortlist_signal_configurations(
             continue
         configurations.add(key)
         selected.append(result)
-        if len(selected) == limit:
+        if len(selected) == cap:
             break
-    if len(selected) != limit:
+    if cap is None:
+        if not selected:
+            raise ValueError("signal population holds no distinct configurations")
+    elif len(selected) != cap:
         raise ValueError(
             f"signal population has {len(selected)} distinct configurations, expected {limit}"
         )
