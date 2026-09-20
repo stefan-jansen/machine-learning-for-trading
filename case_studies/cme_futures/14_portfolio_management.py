@@ -188,7 +188,10 @@ universe
 #
 # `TOP_N_PREDICTIONS` overrides both, which is how a sweep runs wider than the shipped
 # declaration. It is held to its width the same way: a number the pool cannot fill raises here
-# rather than quietly shrinking.
+# rather than quietly shrinking. A sweep that wants every configuration passes `0`, the
+# spelling `top_n_predictions.signal` uses one line above the declaration this overrides. That
+# is not the same request as a number large enough to be sure: 999 against a population of 50
+# is indistinguishable from a population that shrank to 50, and stays a refusal.
 
 # %%
 if TOP_N_PREDICTIONS is None:
