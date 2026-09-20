@@ -68,6 +68,7 @@ from case_studies.research import (
     run_backtests,
     superseded_members,
 )
+from case_studies.utils.backtest_presets import EngineBacktestConfig
 from case_studies.utils.strategy_analysis import selectable_validation_candidates
 from case_studies.utils.sweep_config import (
     get_portfolio_risk_controls,
@@ -89,6 +90,13 @@ SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
+# `POPULATION_NAME` scopes what this notebook *writes*. The equal-weight baselines it reads are
+# written by `13_backtest` and carry the canonical name, so a scoped run that inherits the scope
+# on that lookup asks for a population no run ever wrote and stops with "resolved to 0 current
+# identities among 0 snapshots". Empty string reads the canonical baselines while the outputs
+# stay scoped, which is the shape a partial re-run needs; None means "same scope as the outputs".
+# `14_portfolio_management` gained the same parameter in #1109 and this is its sibling.
+BASELINE_POPULATION_NAME: str | None = None
 # `df20d72ab319` was the tip of `fx_pairs:risk-overlay-backtests` when it was written, and
 # `create` accepts the tip and nothing else, so the literal was correct exactly until this
 # notebook next published. `"live"` names the lineage and is resolved against it at run time.
@@ -158,6 +166,13 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 # predictions - and a reduced run over a canonical upstream, which is what the
 # test suite exercises, then resolved no rows at all.
 include_preview = EXECUTION_TIER == "preview"
+
+
+def _resolve_baseline_scope(output_scope: str, input_scope: str | None) -> str:
+    return output_scope if input_scope is None else input_scope
+
+
+baseline_population_name = _resolve_baseline_scope(POPULATION_NAME, BASELINE_POPULATION_NAME)
 
 # The tier decides the namespace, so a canonical run may legitimately be narrowed -
 # but a narrowed run declares a different set of members than the canonical
@@ -283,7 +298,9 @@ else:
     baselines = _open_backtests(
         OfficialPopulation.one(
             study,
-            name=research_name(CASE_STUDY_ID, "equal-weight-baselines", scope=POPULATION_NAME),
+            name=research_name(
+                CASE_STUDY_ID, "equal-weight-baselines", scope=baseline_population_name
+            ),
         )
     )
     allocations = _open_backtests(
@@ -428,6 +445,31 @@ def _non_risk_projection(spec: dict[str, Any]) -> dict[str, Any]:
         # `_HASH_EXCLUDED_METADATA` for that reason. Comparing it here makes the notebook
         # refuse its own siblings from any checkout but the one that registered the parents.
         metadata.pop("preset_path", None)
+    # The parent allocation row was serialized by whatever engine version registered it and the
+    # risk result by the installed one, so a field `BacktestConfig` has since gained is absent on
+    # one side and present on the other while both describe the same strategy. `ml4t-backtest`
+    # 0.1.3 to 0.1.6 added `account.lock_notional_update_mode` and
+    # `position_sizing.share_rounding`, both previously implicit defaults the schema made
+    # explicit: `NEAREST` is the rounding the engine already did, and `POSITION_LEGS` only bites
+    # under a `lock_notional` short cash policy. Every fx_pairs parent predates them, so this
+    # comparison reported a moved strategy field on two names for one behaviour.
+    #
+    # Round-tripping both sides through the installed schema states the comparison in one
+    # vocabulary, so it answers what this notebook built rather than which engine wrote the row it
+    # is compared against, and it covers the next added field without naming it.
+    # `14_portfolio_management.py`, `16_costs.py` and `19_strategy_analysis.py` already do this;
+    # this projection is the one that was missed. `ensure_backtest_spec` deliberately does NOT
+    # round-trip, because there the result is hashed and a dropped unknown key would move an
+    # identity; here it is compared and discarded. Metadata is merged back over the serialized
+    # view because the dataclass pins a schema and drops keys it does not know.
+    config = projected.get("backtest_config", {})
+    if EngineBacktestConfig is not None and config:
+        original_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        rebuilt = EngineBacktestConfig.from_dict(config).to_dict()
+        rebuilt_metadata = dict(rebuilt.get("metadata") or {})
+        rebuilt_metadata.update(original_metadata)
+        rebuilt["metadata"] = rebuilt_metadata
+        projected["backtest_config"] = rebuilt
     return projected
 
 
