@@ -38,13 +38,11 @@ GITHUB_REPO = "stefan-jansen/machine-learning-for-trading"
 RELEASE_TAG = "v3.1.0-artifacts"
 BASE_URL = f"https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}"
 
-# Case studies that still ship from an earlier release. A re-sweep registered a second
-# backtest identity for work these two registries already held, so they were left out of
-# the v3.1 rebuild; their v3.0 bundles stay downloadable until the duplicates are retired.
-ARTIFACT_RELEASE = {
-    "crypto_perps_funding": "v3.0.0-artifacts",
-    "sp500_equity_option_analytics": "v3.0.0-artifacts",
-}
+# Case studies served from a release other than RELEASE_TAG. v3.1 rebuilt all nine, so this
+# is empty; it earns its place because a later release need not rebuild every bundle, and the
+# download URL, the gh fallback and the failure hint all have to follow the bundle rather than
+# the newest tag. The tests drive it with an injected entry.
+ARTIFACT_RELEASE: dict[str, str] = {}
 
 CASE_STUDIES = [
     "etfs",
@@ -69,17 +67,16 @@ ARTIFACT_PARTS: dict[str, int] = {
 
 ARTIFACT_SHA256 = {
     "cme_futures": "d0d0d762ba10272a2cab45a04d96573cdd0e2d82f03108743e361f75be81517a",
-    "etfs": "a3736d2c03d5fa7e268605fb7c34089abc15a6a2f0ec5bc2a378609122f41411",
+    "crypto_perps_funding": "9b5d5eedfce4dd2a2385c713f47cc5e1fa2e8c89b8145bd83ae956269ae08058",
+    "etfs": "46693e83409c15f533fc3b0986eb9cf006426ff06f6d7dea0732ed6a65104ceb",
     "fx_pairs": "132503d469fea1efb1d717f21227694ce4257557d6562d4a8b73a653f870e1c2",
-    "nasdaq100_microstructure": "c9876aed63b2048416a4b807ef9cf4acf2ee29efbbebe7c5a2c4562a71784fc0",
-    "sp500_options": "816b3810ae65422e49ca9b11eb840d31efde2d274991bcf41fc4454036b73464",
-    "us_equities_panel": "762ddc705ae1ef6aa21df30899fa2c4d8508d79daac9cf2b2727c2f8a40722e5",
-    "us_firm_characteristics": "ebb2f9f458724be7589fe4de722950e450dcf340561b6a8f3beba6ddab54c887",
-    # Served from v3.0.0-artifacts, see ARTIFACT_RELEASE above.
-    "crypto_perps_funding": "517030f3def6d0264984c2b545032741100df4ee3d159e44ef4c348a314c4c7f",
+    "nasdaq100_microstructure": "c29f964b6b03b81185ca038f09f679a1138370c2c4ae1b680e83beafdc95fb00",
     "sp500_equity_option_analytics": (
-        "4eba2aadcc1fc5af322f0cfb0a8d4dcfb036391141adff59a0358c2a8401ca49"
+        "af621fa9c5e6f76dd1d74b6290c8d0a949bfb1bfcea98efcca6c158bcac44c40"
     ),
+    "sp500_options": "816b3810ae65422e49ca9b11eb840d31efde2d274991bcf41fc4454036b73464",
+    "us_equities_panel": "39e83df556edd920a3b9b692e443b27f250eff7ff20b6ca34fda3ee3db4e696f",
+    "us_firm_characteristics": "9eb5602da0828c71dfeb4a3bda6ac92a4664caebb01a21158916aef74bd99d1e",
 }
 
 

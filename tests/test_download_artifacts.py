@@ -241,6 +241,9 @@ def test_a_held_back_case_study_is_fetched_from_the_release_that_still_has_it(
         seen.append(url)
         return False
 
+    held = "v3.0.0-artifacts"
+    assert held != download_artifacts.RELEASE_TAG
+    monkeypatch.setitem(download_artifacts.ARTIFACT_RELEASE, "crypto_perps_funding", held)
     monkeypatch.setattr(download_artifacts, "download_file", record)
     monkeypatch.setattr(download_artifacts, "REPO_ROOT", tmp_path)
 
@@ -248,8 +251,6 @@ def test_a_held_back_case_study_is_fetched_from_the_release_that_still_has_it(
     assert not download_artifacts.download_case_study("crypto_perps_funding")
 
     assert seen[0].endswith(f"/{download_artifacts.RELEASE_TAG}/etfs.tar.gz")
-    held = download_artifacts.ARTIFACT_RELEASE["crypto_perps_funding"]
-    assert held != download_artifacts.RELEASE_TAG
     assert seen[1].endswith(f"/{held}/crypto_perps_funding.tar.gz")
 
 
@@ -261,6 +262,10 @@ def test_every_published_checksum_names_a_release_that_serves_it(tmp_path: Path)
         assert cs_id in download_artifacts.ARTIFACT_SHA256
     for cs_id in download_artifacts.ARTIFACT_SHA256:
         assert cs_id in download_artifacts.CASE_STUDIES
+    # v3.1 serves every case study the script offers. Iterating ARTIFACT_RELEASE above proves
+    # nothing while it is empty, so state the condition that makes it empty: a case study the
+    # script lists with no checksum is one --cs would accept and then refuse to download.
+    assert set(download_artifacts.ARTIFACT_SHA256) == set(download_artifacts.CASE_STUDIES)
 
 
 def test_a_refused_fetch_falls_back_to_gh_against_the_release_that_holds_the_asset(
@@ -268,6 +273,9 @@ def test_a_refused_fetch_falls_back_to_gh_against_the_release_that_holds_the_ass
 ) -> None:
     """An anonymous fetch of a private asset is refused, and the retry must not switch release."""
     cs_id = "crypto_perps_funding"
+    held = "v3.0.0-artifacts"
+    assert held != download_artifacts.RELEASE_TAG
+    monkeypatch.setitem(download_artifacts.ARTIFACT_RELEASE, cs_id, held)
     dest = tmp_path / f"{cs_id}.tar.gz"
     calls: list[list[str]] = []
 
@@ -289,12 +297,12 @@ def test_a_refused_fetch_falls_back_to_gh_against_the_release_that_holds_the_ass
 
     argv = calls[0]
     assert argv[:3] == ["gh", "release", "download"]
-    assert argv[3] == download_artifacts.ARTIFACT_RELEASE[cs_id]
-    assert argv[3] != download_artifacts.RELEASE_TAG
+    assert argv[3] == held
 
 
 def test_the_failure_hint_names_the_releases_that_were_read() -> None:
-    held = download_artifacts.ARTIFACT_RELEASE["crypto_perps_funding"]
+    held = "v3.0.0-artifacts"
+    assert held != download_artifacts.RELEASE_TAG
     one = download_artifacts.release_hint(download_artifacts.RELEASE_TAG)
     both = download_artifacts.release_hint(download_artifacts.RELEASE_TAG, held)
     assert download_artifacts.RELEASE_TAG in both and held in both
