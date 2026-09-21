@@ -540,23 +540,45 @@ def test_the_digest_maps_are_compared_whole_rather_than_counted() -> None:
     """``us_firm_characteristics`` records two artifact digests where the others record six."""
     two = {"daily_returns.parquet": "a1" * 8, "weights.parquet": "b2" * 8}
     rows = [
-        Row(ALPHA, GAMMA, _PREDICTION, "2026-09-01T00:00:00+00:00", "signal", two),
-        Row(BETA, GAMMA, _PREDICTION, "2026-09-02T00:00:00+00:00", "signal", dict(two)),
+        Row(
+            ALPHA,
+            GAMMA,
+            _PREDICTION,
+            "2026-09-01T00:00:00+00:00",
+            "signal",
+            two,
+            _spec(0, elided=ALL_ELIDED),
+        ),
+        Row(BETA, GAMMA, _PREDICTION, "2026-09-02T00:00:00+00:00", "signal", dict(two), _spec(0)),
     ]
-    specs = {ALPHA: _spec(0, elided=ALL_ELIDED), BETA: _spec(0)}
-    assert prove_merge(rows, specs) == (True, "")
+    assert prove_merge(rows) == (True, "")
     rows[1].digests["weights.parquet"] = "ff" * 8
-    assert prove_merge(rows, specs)[0] is False
+    assert prove_merge(rows)[0] is False
 
 
 def test_rows_that_differ_after_the_elided_keys_are_stripped_refuse() -> None:
     """The branch a real collision cannot reach without a hash collision."""
     rows = [
-        Row(ALPHA, GAMMA, _PREDICTION, "2026-09-01T00:00:00+00:00", "signal", dict(DIGESTS)),
-        Row(BETA, GAMMA, _PREDICTION, "2026-09-02T00:00:00+00:00", "signal", dict(DIGESTS)),
+        Row(
+            ALPHA,
+            GAMMA,
+            _PREDICTION,
+            "2026-09-01T00:00:00+00:00",
+            "signal",
+            dict(DIGESTS),
+            _spec(0, elided=ALL_ELIDED),
+        ),
+        Row(
+            BETA,
+            GAMMA,
+            _PREDICTION,
+            "2026-09-02T00:00:00+00:00",
+            "signal",
+            dict(DIGESTS),
+            _spec(1, elided=ALL_ELIDED),
+        ),
     ]
-    specs = {ALPHA: _spec(0, elided=ALL_ELIDED), BETA: _spec(1, elided=ALL_ELIDED)}
-    proved, reason = prove_merge(rows, specs)
+    proved, reason = prove_merge(rows)
     assert not proved
     assert reason == "the colliding rows hold different specs after the elided keys are stripped"
 

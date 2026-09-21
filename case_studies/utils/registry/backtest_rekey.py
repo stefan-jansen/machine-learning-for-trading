@@ -312,6 +312,7 @@ class Row:
     created_at: str
     stage: str | None
     digests: dict[str, str]
+    spec: dict
 
     @property
     def moved(self) -> bool:
@@ -428,12 +429,13 @@ def read_rows(db: sqlite3.Connection) -> list[Row]:
                 created_at=record["created_at"],
                 stage=record["stage"],
                 digests=digests,
+                spec=spec,
             )
         )
     return rows
 
 
-def prove_merge(members: list[Row], specs: dict[str, dict]) -> tuple[bool, str]:
+def prove_merge(members: list[Row]) -> tuple[bool, str]:
     """Whether these rows are the same result under two addresses.
 
     Two independent equalities, both required, and both compared whole rather than by a
@@ -445,8 +447,8 @@ def prove_merge(members: list[Row], specs: dict[str, dict]) -> tuple[bool, str]:
         return False, "a row in the collision records no artifact digests"
     if any(member.digests != first.digests for member in members):
         return False, "the colliding rows hold different artifacts"
-    reference = _hashable_strategy_spec(specs[first.address])
-    if any(_hashable_strategy_spec(specs[member.address]) != reference for member in members[1:]):
+    reference = _hashable_strategy_spec(first.spec)
+    if any(_hashable_strategy_spec(member.spec) != reference for member in members[1:]):
         return False, "the colliding rows hold different specs after the elided keys are stripped"
     return True, ""
 
@@ -495,7 +497,7 @@ def plan_backtest_rekey(case_dir: Path | str, *, registry: Path | str | None = N
             continue
         ordered = sorted(members, key=lambda member: (member.created_at, member.address))
         survivor, retired = ordered[0], ordered[1:]
-        proved, reason = prove_merge(ordered, specs)
+        proved, reason = prove_merge(ordered)
         merges.append(
             Merge(
                 target=target,
