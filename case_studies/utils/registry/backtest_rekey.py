@@ -204,10 +204,13 @@ def dangling_references(db: sqlite3.Connection) -> dict[tuple[str, str], int]:
     By value rather than by schema, because two of the ten sites a backtest address reaches
     are JSON documents and none of the four the 2026-09-14 run missed carries a foreign key.
 
-    **Tokens, not rows.** A document contributes one count per broken address inside it. Per
-    row it would contribute one whether one member dangled or forty, so a migration that
-    broke thirty-nine more references inside a snapshot that already dangled would move no
-    count at all - in the two columns this check exists to cover, and nowhere else.
+    **Tokens, not rows.** A document contributes one count per broken *occurrence* inside
+    it, so an address named twice counts twice. Per row it would contribute one whether one
+    member dangled or forty, so a migration that broke thirty-nine more references inside a
+    snapshot that already dangled would move no count at all - in the two columns this check
+    exists to cover, and nowhere else. Occurrences rather than distinct addresses because
+    both sides of the delta are counted the same way, and a repeated member in a snapshot is
+    itself a reference that has to keep resolving.
 
     **The number is only meaningful as a delta.** A healthy registry dangles by design: a
     superseded population generation keeps its old member list as history, and a population
@@ -480,18 +483,12 @@ def plan_backtest_rekey(case_dir: Path | str, *, registry: Path | str | None = N
     db_path = Path(registry) if registry is not None else root / "run_log" / "registry.db"
     with open_readonly(db_path) as db:
         rows = read_rows(db)
-        db.row_factory = sqlite3.Row
-        specs = {
-            record["backtest_hash"]: json.loads(record["spec_json"] or "{}")
-            for record in db.execute("SELECT backtest_hash, spec_json FROM backtest_runs")
-        }
 
     unexplained = tuple(
         sorted(
             row.address
             for row in rows
-            if row.moved
-            and pre_elision_hash(row.prediction_hash, specs[row.address]) != row.address
+            if row.moved and pre_elision_hash(row.prediction_hash, row.spec) != row.address
         )
     )
 

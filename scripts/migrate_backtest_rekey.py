@@ -84,6 +84,13 @@ def _report(case_dir: Path, baseline: Path | None) -> int:
 
 def _plan(case_dir: Path) -> int:
     """Report what a re-key would do to one registry. Writes nothing."""
+    registry = case_dir / "run_log" / "registry.db"
+    if not registry.exists():
+        # A worktree built without `--case-study` carries no `run_log` symlink at all. One
+        # absent registry must not abort the pass over the other eight.
+        print(f"{case_dir.name}: no registry.db")
+        return 0
+
     plan = plan_backtest_rekey(case_dir)
     verdict = "SKIP" if plan.skipped else "migrate"
     print(
