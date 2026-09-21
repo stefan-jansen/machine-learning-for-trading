@@ -474,6 +474,25 @@ def test_an_address_neither_hasher_computes_refuses_the_whole_registry(empty_cas
     assert "neither today's hasher nor the pre-elision one" in plan.refusals[0]
 
 
+def test_a_target_that_is_another_kind_of_identity_refuses_the_registry(empty_case: Path) -> None:
+    """``official_population_members.member_hash`` holds whichever kind the population was
+    cut over - prediction hashes in four of the nine registries and backtest addresses in
+    ``crypto_perps_funding`` - so a mapping keyed on backtest addresses alone would rewrite
+    a prediction reference the moment the two namespaces meet. They do not meet in any of
+    the nine today; this is what says so rather than assuming it.
+    """
+    stored, computed, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-01T00:00:00+00:00")
+    _add_candidate_set(_registry_path(empty_case), computed, [stored])
+
+    plan = plan_backtest_rekey(empty_case)
+    assert plan.namespace_clashes == (computed,)
+    assert plan.skipped
+    assert "already a training, prediction, candidate-set or population identity" in "".join(
+        plan.refusals
+    )
+
+
 def test_a_collision_keeps_the_earlier_row_when_it_is_the_mover(empty_case: Path) -> None:
     """nasdaq's shape: the row already at the target address is the later of the two."""
     stored, computed, spec = _moved_pair(0)

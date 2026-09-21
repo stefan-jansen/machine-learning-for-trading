@@ -364,6 +364,8 @@ class RekeyPlan:
     merges: tuple[Merge, ...]
     #: addresses neither today's hasher nor the pre-elision one explains
     unexplained: tuple[str, ...]
+    #: targets that are already an identity of some other kind in this registry
+    namespace_clashes: tuple[str, ...] = ()
 
     @property
     def moved(self) -> int:
@@ -394,6 +396,12 @@ class RekeyPlan:
             reasons.append(
                 f"{len(self.unexplained)} rows are stored at an address neither today's hasher "
                 f"nor the pre-elision one computes, first {self.unexplained[0]}"
+            )
+        if self.namespace_clashes:
+            reasons.append(
+                f"{len(self.namespace_clashes)} targets are already a training, prediction, "
+                f"candidate-set or population identity here, first "
+                f"{self.namespace_clashes[0]}"
             )
         return tuple(reasons)
 
@@ -478,11 +486,24 @@ def plan_backtest_rekey(case_dir: Path | str, *, registry: Path | str | None = N
     ``nasdaq100_microstructure`` the row already at the target address is the later one in
     106 of 106 pairs, and in the two registries this refuses it is the earlier one - so the
     rule is stated over ``created_at`` and never over which address a row happens to hold.
+
+    A target that is already an identity of some other kind refuses the registry.
+    ``official_population_members.member_hash`` is polymorphic - it holds prediction hashes
+    in ``etfs``, ``nasdaq100_microstructure`` and ``us_firm_characteristics``, and 4,882
+    backtest addresses beside 777 prediction hashes in ``crypto_perps_funding`` - so a
+    mapping keyed on backtest addresses alone would silently rewrite a prediction reference
+    the moment a computed target landed on a prediction hash. The four namespaces are
+    disjoint in all nine registries today and no target clashes; this measures it rather
+    than assuming it, because the re-key is what mints the new addresses.
     """
     root = Path(case_dir)
     db_path = Path(registry) if registry is not None else root / "run_log" / "registry.db"
     with open_readonly(db_path) as db:
         rows = read_rows(db)
+        owned = declared_identities(db)
+    foreign = set().union(
+        *(taken for table, taken in owned.items() if table != "backtest_runs"), set()
+    )
 
     unexplained = tuple(
         sorted(
@@ -526,4 +547,5 @@ def plan_backtest_rekey(case_dir: Path | str, *, registry: Path | str | None = N
         mapping=mapping,
         merges=tuple(merges),
         unexplained=unexplained,
+        namespace_clashes=tuple(sorted(set(mapping.values()) & foreign)),
     )
