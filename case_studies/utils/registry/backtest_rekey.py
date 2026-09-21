@@ -470,6 +470,8 @@ def read_rows(db: sqlite3.Connection) -> list[Row]:
 def _frames_agree(left: Path, right: Path) -> bool | None:
     """Whether two artifact files hold the same numbers. ``None`` when they cannot be read.
 
+    Not by value alone: a null is compared as a null and never as a number.
+
     Bytes are the wrong unit here. In ``us_firm_characteristics`` 47 of the 81 colliding
     pairs differ only in the last bit of a float - 0.05365977120707852 against ...854, on 4
     of 110 values - because a float sum lands differently depending on the order it is
@@ -488,9 +490,17 @@ def _frames_agree(left: Path, right: Path) -> bool | None:
     for column, dtype in first.schema.items():
         a, b = first[column], second[column]
         if dtype.is_float():
+            # Nulls first, and on their own. `null - 0.49` is null, `null > tolerance` is
+            # null, and `.any()` skips nulls, so a tolerance test alone reads a missing
+            # value and a present one as agreement - the loudest difference there is.
+            missing = a.is_null()
+            if not missing.equals(b.is_null()):
+                return False
             gap = (a - b).abs()
             tolerance = _ARTIFACT_ATOL + _ARTIFACT_RTOL * b.abs()
-            if bool((gap > tolerance).any()):
+            # The comparison is null exactly where both sides are null, which the line above
+            # has already established is agreement. Everywhere else it is a real verdict.
+            if bool((gap > tolerance).fill_null(False).any()):
                 return False
         elif not a.equals(b):
             return False

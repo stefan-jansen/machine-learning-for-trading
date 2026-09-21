@@ -374,14 +374,14 @@ DIGESTS = {"daily_returns.parquet": "a1" * 8, "weights.parquet": "b2" * 8}
 OTHER_DIGESTS = {"daily_returns.parquet": "c3" * 8, "weights.parquet": "d4" * 8}
 
 
-def _write_artifacts(case_dir: Path, address: str, returns: list[float]) -> None:
+def _write_artifacts(case_dir: Path, address: str, returns: list[float | None]) -> None:
     """The two artifacts `DIGESTS` names, so a digest mismatch can be read past."""
     directory = case_dir / "run_log" / "backtest" / address
     directory.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(
         {
             "timestamp": [datetime(2026, 1, day + 1) for day in range(len(returns))],
-            "daily_return": returns,
+            "daily_return": pl.Series(returns, dtype=pl.Float64),
         }
     ).write_parquet(directory / "daily_returns.parquet")
     pl.DataFrame({"symbol": ["AAA", "BBB"], "weight": [0.5, 0.5]}).write_parquet(
@@ -635,6 +635,52 @@ def test_the_artifact_tolerance_window(
 
     plan = plan_backtest_rekey(empty_case)
     assert plan.merges[0].proved is proved, f"{pins}: {plan.merges[0].reason}"
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [(None, 0.49), (0.49, None)],
+)
+def test_a_missing_value_against_a_present_one_refuses(
+    empty_case: Path, left: float | None, right: float | None
+) -> None:
+    """The loudest difference there is, and the one a tolerance test cannot see: `null - x`
+    is null, `null > tolerance` is null, and polars' `.any()` skips nulls.
+    """
+    stored, computed, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-06T00:00:00+00:00")
+    _insert_run(
+        _registry_path(empty_case),
+        computed,
+        _spec(0),
+        created_at="2026-09-18T00:00:00+00:00",
+        digests=OTHER_DIGESTS,
+    )
+    _write_artifacts(empty_case, stored, [left, 0.02, 0.03])
+    _write_artifacts(empty_case, computed, [right, 0.02, 0.03])
+
+    plan = plan_backtest_rekey(empty_case)
+    assert not plan.merges[0].proved
+    assert plan.merges[0].reason == (
+        "the colliding rows hold different numbers in daily_returns.parquet"
+    )
+
+
+def test_two_nulls_in_the_same_place_are_agreement(empty_case: Path) -> None:
+    stored, computed, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-06T00:00:00+00:00")
+    _insert_run(
+        _registry_path(empty_case),
+        computed,
+        _spec(0),
+        created_at="2026-09-18T00:00:00+00:00",
+        digests=OTHER_DIGESTS,
+    )
+    _write_artifacts(empty_case, stored, [None, 0.05365977120707852, 0.03])
+    _write_artifacts(empty_case, computed, [None, 0.05365977120707854, 0.03])
+
+    plan = plan_backtest_rekey(empty_case)
+    assert plan.merges[0].proved, plan.merges[0].reason
 
 
 def test_a_digest_mismatch_with_no_artifact_to_read_refuses(empty_case: Path) -> None:
