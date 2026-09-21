@@ -26,6 +26,7 @@ them while this runs.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from collections.abc import Iterable
@@ -35,16 +36,30 @@ from pathlib import Path
 # Schema readers, imported rather than copied so the two cannot drift. `fold_renumbering`
 # is the migration of this shape the package already carries.
 from .fold_renumbering import _table_columns, _tables
+from .specs import (
+    _DEFAULT_ELIDED_CONFIG_KEYS,
+    _hashable_strategy_spec,
+    _is_engine_default,
+    backtest_hash_from_hashable,
+    backtest_hash_from_parts,
+)
 
 __all__ = [
     "Bijection",
     "DanglingCount",
     "HashSite",
+    "Merge",
+    "RekeyPlan",
+    "Row",
     "dangling_references",
     "declared_identities",
     "directory_bijection",
     "hash_bearing_sites",
     "open_readonly",
+    "plan_backtest_rekey",
+    "prove_merge",
+    "pre_elision_hash",
+    "read_rows",
     "referential_regressions",
     "registered_addresses",
 ]
@@ -177,6 +192,11 @@ def dangling_references(db: sqlite3.Connection) -> dict[tuple[str, str], int]:
     By value rather than by schema, because two of the ten sites a backtest address reaches
     are JSON documents and none of the four the 2026-09-14 run missed carries a foreign key.
 
+    **Tokens, not rows.** A document contributes one count per broken address inside it. Per
+    row it would contribute one whether one member dangled or forty, so a migration that
+    broke thirty-nine more references inside a snapshot that already dangled would move no
+    count at all - in the two columns this check exists to cover, and nowhere else.
+
     **The number is only meaningful as a delta.** A healthy registry dangles by design: a
     superseded population generation keeps its old member list as history, and a population
     published before its sweep finishes names members that do not exist yet. So the question
@@ -198,9 +218,9 @@ def dangling_references(db: sqlite3.Connection) -> dict[tuple[str, str], int]:
                     if _IDENTITY_TOKEN.fullmatch(value) and value not in known:
                         dangling += 1
                 else:
-                    tokens = set(_IDENTITY_TOKEN.findall(value))
-                    if tokens and not tokens <= known:
-                        dangling += 1
+                    dangling += sum(
+                        1 for token in _IDENTITY_TOKEN.findall(value) if token not in known
+                    )
             if dangling:
                 counts[(table, column)] = dangling
     return counts
@@ -275,3 +295,224 @@ def _text_values(db: sqlite3.Connection, table: str, column: str) -> list[tuple[
         ]
     except sqlite3.Error:
         return []
+
+
+# --------------------------------------------------------------------------------------
+# Planning a re-key
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Row:
+    """One ``backtest_runs`` row, with the address it is stored under and the one it computes."""
+
+    address: str
+    computed: str
+    prediction_hash: str
+    created_at: str
+    stage: str | None
+    digests: dict[str, str]
+
+    @property
+    def moved(self) -> bool:
+        return self.computed != self.address
+
+
+@dataclass(frozen=True)
+class Merge:
+    """Two or more rows computing one address, and whether they may be merged.
+
+    ``proved`` is the whole gate. A target is occupied only when two rows carry the same
+    spec under today's hasher, and the elision proof says the spec did not move and the
+    hasher did, so an occupied target should mean the incumbent is a byte-identical twin.
+    Where that is not true, two genuinely different results are claiming one address, which
+    is a question about the hasher and not a case this migration decides.
+    """
+
+    target: str
+    survivor: str
+    retired: tuple[str, ...]
+    proved: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class RekeyPlan:
+    """What a re-key would do to one registry, and whether it may run at all."""
+
+    case_study: str
+    rows: int
+    reachable: int
+    #: survivor address -> the address it computes, for every row that moves and stays
+    mapping: dict[str, str]
+    merges: tuple[Merge, ...]
+    #: addresses neither today's hasher nor the pre-elision one explains
+    unexplained: tuple[str, ...]
+
+    @property
+    def moved(self) -> int:
+        return self.rows - self.reachable
+
+    @property
+    def occupied(self) -> int:
+        return len(self.merges)
+
+    @property
+    def refusals(self) -> tuple[str, ...]:
+        """Why this registry cannot be migrated, one line per distinct reason.
+
+        Grouped rather than listed per collision: ``sp500_equity_option_analytics`` refuses
+        134 times for one reason and ``us_firm_characteristics`` 81 times, and 215 identical
+        lines bury the one registry whose refusal might be different.
+        """
+        by_reason: dict[str, list[str]] = {}
+        for merge in self.merges:
+            if not merge.proved:
+                by_reason.setdefault(merge.reason, []).append(merge.target)
+        reasons = [
+            f"{len(targets)} collisions refused, {reason}, first at "
+            f"{', '.join(sorted(targets)[:2])}"
+            for reason, targets in sorted(by_reason.items())
+        ]
+        if self.unexplained:
+            reasons.append(
+                f"{len(self.unexplained)} rows are stored at an address neither today's hasher "
+                f"nor the pre-elision one computes, first {self.unexplained[0]}"
+            )
+        return tuple(reasons)
+
+    @property
+    def skipped(self) -> bool:
+        """A registry with any refusal is skipped whole, not migrated in part."""
+        return bool(self.refusals)
+
+
+def pre_elision_hash(prediction_hash: str, spec: dict) -> str:
+    """The address *spec* computed before the engine-default keys stopped being hashed.
+
+    ``_DEFAULT_ELIDED_CONFIG_KEYS`` only ever removes keys whose value equals the engine
+    default, so the pre-fix view is today's view with exactly those keys put back. Re-hashing
+    the 6,841 moved rows this way reproduces the stored address for 6,841 of them, which is
+    what says the spec did not move and the hasher did.
+    """
+    hashable = _hashable_strategy_spec(spec)
+    stored_config = spec.get("backtest_config")
+    hashable_config = hashable.get("backtest_config")
+    if isinstance(stored_config, dict) and isinstance(hashable_config, dict):
+        for (section, key), default in _DEFAULT_ELIDED_CONFIG_KEYS:
+            block = stored_config.get(section)
+            if isinstance(block, dict) and key in block and _is_engine_default(block[key], default):
+                hashable_config.setdefault(section, {})[key] = block[key]
+    return backtest_hash_from_hashable(
+        prediction_hash, hashable, identity_version=spec.get("identity_version")
+    )
+
+
+def read_rows(db: sqlite3.Connection) -> list[Row]:
+    """Every ``backtest_runs`` row, with the address its own stored spec computes today."""
+    db.row_factory = sqlite3.Row
+    rows: list[Row] = []
+    for record in db.execute(
+        "SELECT backtest_hash, prediction_hash, spec_json, stage, created_at, "
+        "artifact_digests_json FROM backtest_runs"
+    ):
+        spec = json.loads(record["spec_json"]) if record["spec_json"] else {}
+        digests = (
+            json.loads(record["artifact_digests_json"]) if record["artifact_digests_json"] else {}
+        )
+        rows.append(
+            Row(
+                address=record["backtest_hash"],
+                computed=backtest_hash_from_parts(record["prediction_hash"], spec),
+                prediction_hash=record["prediction_hash"],
+                created_at=record["created_at"],
+                stage=record["stage"],
+                digests=digests,
+            )
+        )
+    return rows
+
+
+def prove_merge(members: list[Row], specs: dict[str, dict]) -> tuple[bool, str]:
+    """Whether these rows are the same result under two addresses.
+
+    Two independent equalities, both required, and both compared whole rather than by a
+    count of keys: ``us_firm_characteristics`` records two artifact digests where the other
+    registries record six, so a check that asserted six would pass it vacuously.
+    """
+    first = members[0]
+    if not first.digests or any(not member.digests for member in members):
+        return False, "a row in the collision records no artifact digests"
+    if any(member.digests != first.digests for member in members):
+        return False, "the colliding rows hold different artifacts"
+    reference = _hashable_strategy_spec(specs[first.address])
+    if any(_hashable_strategy_spec(specs[member.address]) != reference for member in members[1:]):
+        return False, "the colliding rows hold different specs after the elided keys are stripped"
+    return True, ""
+
+
+def plan_backtest_rekey(case_dir: Path | str, *, registry: Path | str | None = None) -> RekeyPlan:
+    """Classify every row, and prove or refuse every collision. Writes nothing.
+
+    The survivor of a collision is the earliest ``created_at`` row: it is the one
+    ``candidate_set_members``, ``official_population_members`` and the reference tables
+    already point at, and the one whose ``notebook`` and ``git_commit`` the published
+    results trace to. Which side of the collision it sits on is not fixed - in
+    ``nasdaq100_microstructure`` the row already at the target address is the later one in
+    106 of 106 pairs, and in the two registries this refuses it is the earlier one - so the
+    rule is stated over ``created_at`` and never over which address a row happens to hold.
+    """
+    root = Path(case_dir)
+    db_path = Path(registry) if registry is not None else root / "run_log" / "registry.db"
+    with open_readonly(db_path) as db:
+        rows = read_rows(db)
+        db.row_factory = sqlite3.Row
+        specs = {
+            record["backtest_hash"]: json.loads(record["spec_json"] or "{}")
+            for record in db.execute("SELECT backtest_hash, spec_json FROM backtest_runs")
+        }
+
+    unexplained = tuple(
+        sorted(
+            row.address
+            for row in rows
+            if row.moved
+            and pre_elision_hash(row.prediction_hash, specs[row.address]) != row.address
+        )
+    )
+
+    by_target: dict[str, list[Row]] = {}
+    for row in rows:
+        by_target.setdefault(row.computed, []).append(row)
+
+    mapping: dict[str, str] = {}
+    merges: list[Merge] = []
+    for target, members in sorted(by_target.items()):
+        if len(members) == 1:
+            row = members[0]
+            if row.moved:
+                mapping[row.address] = target
+            continue
+        ordered = sorted(members, key=lambda member: (member.created_at, member.address))
+        survivor, retired = ordered[0], ordered[1:]
+        proved, reason = prove_merge(ordered, specs)
+        merges.append(
+            Merge(
+                target=target,
+                survivor=survivor.address,
+                retired=tuple(member.address for member in retired),
+                proved=proved,
+                reason=reason,
+            )
+        )
+        if proved and survivor.address != target:
+            mapping[survivor.address] = target
+
+    return RekeyPlan(
+        case_study=root.name,
+        rows=len(rows),
+        reachable=sum(1 for row in rows if not row.moved),
+        mapping=mapping,
+        merges=tuple(merges),
+        unexplained=unexplained,
+    )

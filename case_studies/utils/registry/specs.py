@@ -290,11 +290,26 @@ def backtest_hash_from_parts(
     """
     hashable = _hashable_strategy_spec(strategy_spec)
     resolved_version = identity_version or strategy_spec.get("identity_version")
-    if resolved_version in SUPPORTED_IDENTITY_VERSIONS:
+    return backtest_hash_from_hashable(prediction_hash, hashable, identity_version=resolved_version)
+
+
+def backtest_hash_from_hashable(
+    prediction_hash: str,
+    hashable: dict,
+    *,
+    identity_version: int | None = None,
+) -> str:
+    """Hash a strategy spec already reduced to its hashable view.
+
+    The seam exists for readers that have to compute an address under a *different*
+    reduction than today's - a migration asking what a stored row hashed to before a key
+    started being elided, say. Reimplementing this tail beside them is how the two drift.
+    """
+    if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         return compute_hash(
             canonical_json(
                 {
-                    "identity_version": resolved_version,
+                    "identity_version": identity_version,
                     "prediction_hash": prediction_hash,
                     "strategy": hashable,
                 }

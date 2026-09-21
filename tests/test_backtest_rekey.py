@@ -11,14 +11,19 @@ import pytest
 
 from case_studies.utils.registry.backtest_rekey import (
     QUARANTINE_DIRNAME,
+    Row,
     dangling_references,
     declared_identities,
     directory_bijection,
     hash_bearing_sites,
     open_readonly,
+    plan_backtest_rekey,
+    pre_elision_hash,
+    prove_merge,
     referential_regressions,
     registered_addresses,
 )
+from case_studies.utils.registry.specs import backtest_hash_from_parts
 from case_studies.utils.registry.store import REGISTRY_SCHEMA_SQL
 
 #: Addresses are twelve hex characters, so the fixtures spell real ones rather than labels.
@@ -234,6 +239,27 @@ def test_a_document_dangles_when_any_one_of_its_tokens_does(case_dir: Path) -> N
         assert dangling_references(db)[("official_populations", "snapshot_json")] == 1
 
 
+def test_a_document_dangles_once_per_broken_token_and_not_once_per_row(case_dir: Path) -> None:
+    """Counting rows would let a snapshot that already dangles absorb any number of breaks.
+
+    A snapshot naming one live member and one retired one counts 1. Retiring a second member
+    has to make it 2, or the delta that gates the migration cannot see the breakage in the
+    two columns it exists for.
+    """
+    _add_population(_registry_path(case_dir), "fffffffffff6", [ALPHA, BETA, ABSENT])
+    site = ("official_populations", "snapshot_json")
+    with open_readonly(_registry_path(case_dir)) as db:
+        before = dangling_references(db)
+    assert before[site] == 1
+    with sqlite3.connect(_registry_path(case_dir)) as db:
+        db.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (BETA,))
+        db.execute("DELETE FROM backtest_runs WHERE backtest_hash = ?", (BETA,))
+    with open_readonly(_registry_path(case_dir)) as db:
+        after = dangling_references(db)
+    assert after[site] == 2
+    assert referential_regressions(before, after)[site] == (1, 2)
+
+
 def test_an_identity_of_another_kind_is_a_declaration_and_does_not_dangle(
     case_dir: Path,
 ) -> None:
@@ -326,3 +352,233 @@ def test_a_rename_shows_up_as_a_symmetric_pair_of_counts(case_dir: Path) -> None
 def test_the_bijection_ignores_a_quarantined_directory(case_dir: Path) -> None:
     (case_dir / "run_log" / "backtest" / QUARANTINE_DIRNAME).mkdir()
     assert directory_bijection(case_dir).exact
+
+
+# --------------------------------------------------------------------------------------
+# Planning a re-key
+# --------------------------------------------------------------------------------------
+
+ALL_ELIDED = ("account", "position_sizing", "feed")
+DIGESTS = {"daily_returns.parquet": "a1" * 8, "weights.parquet": "b2" * 8}
+OTHER_DIGESTS = {"daily_returns.parquet": "c3" * 8, "weights.parquet": "d4" * 8}
+
+
+def _spec(rank: int, *, elided: tuple[str, ...] = ()) -> dict:
+    """A stored spec, written with *elided* naming which engine-default keys it spells out.
+
+    A row that spells any of them out is what a pre-fix engine registered, and it is exactly
+    the row whose stored address today's hasher no longer computes. Every variant reduces to
+    one hashable view, so they all compute one address and differ only in the pre-fix one -
+    which is the shape of a real collision.
+    """
+    config: dict = {
+        "account": {"initial_cash": 100_000},
+        "position_sizing": {"max_weight": 0.1},
+        "feed": {"price_col": "close"},
+    }
+    if "account" in elided:
+        config["account"]["lock_notional_update_mode"] = "position_legs"
+    if "position_sizing" in elided:
+        config["position_sizing"]["share_rounding"] = "nearest"
+    if "feed" in elided:
+        config["feed"]["vwap_col"] = None
+    return {
+        "strategy": {"signal": {"method": "slot_persistent", "rank": rank}},
+        "backtest_config": config,
+    }
+
+
+def _insert_run(
+    path: Path,
+    address: str,
+    spec: dict,
+    *,
+    created_at: str,
+    digests: dict[str, str] | None = DIGESTS,
+) -> None:
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "INSERT INTO backtest_runs (backtest_hash, prediction_hash, spec_json, stage, "
+            "created_at, artifact_digests_json) VALUES (?,?,?,?,?,?)",
+            (
+                address,
+                _PREDICTION,
+                json.dumps(spec),
+                "signal",
+                created_at,
+                json.dumps(digests) if digests is not None else None,
+            ),
+        )
+
+
+@pytest.fixture
+def empty_case(tmp_path: Path) -> Path:
+    _registry(tmp_path, [])
+    return tmp_path
+
+
+def _moved_pair(rank: int) -> tuple[str, str, dict]:
+    """``(stored address, address it computes today, spec)`` for a pre-fix row."""
+    spec = _spec(rank, elided=ALL_ELIDED)
+    return (
+        pre_elision_hash(_PREDICTION, spec),
+        backtest_hash_from_parts(_PREDICTION, spec),
+        spec,
+    )
+
+
+def test_the_elided_keys_are_what_move_a_row(empty_case: Path) -> None:
+    stored, computed, _ = _moved_pair(0)
+    assert stored != computed
+    unmoved = _spec(0)
+    assert pre_elision_hash(_PREDICTION, unmoved) == backtest_hash_from_parts(_PREDICTION, unmoved)
+
+
+def test_a_row_that_computes_its_own_address_is_reachable(empty_case: Path) -> None:
+    spec = _spec(0)
+    _insert_run(
+        _registry_path(empty_case),
+        backtest_hash_from_parts(_PREDICTION, spec),
+        spec,
+        created_at="2026-09-01T00:00:00+00:00",
+    )
+    plan = plan_backtest_rekey(empty_case)
+    assert (plan.rows, plan.reachable, plan.moved) == (1, 1, 0)
+    assert plan.mapping == {} and not plan.skipped
+
+
+def test_a_row_written_with_the_elided_keys_moves_and_is_explained(empty_case: Path) -> None:
+    stored, computed, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-01T00:00:00+00:00")
+    plan = plan_backtest_rekey(empty_case)
+    assert (plan.rows, plan.reachable, plan.moved) == (1, 0, 1)
+    assert plan.mapping == {stored: computed}
+    assert plan.unexplained == () and not plan.skipped
+
+
+def test_an_address_neither_hasher_computes_refuses_the_whole_registry(empty_case: Path) -> None:
+    _, _, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), ABSENT, spec, created_at="2026-09-01T00:00:00+00:00")
+    plan = plan_backtest_rekey(empty_case)
+    assert plan.unexplained == (ABSENT,)
+    assert plan.skipped
+    assert "neither today's hasher nor the pre-elision one" in plan.refusals[0]
+
+
+def test_a_collision_keeps_the_earlier_row_when_it_is_the_mover(empty_case: Path) -> None:
+    """nasdaq's shape: the row already at the target address is the later of the two."""
+    stored, computed, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-12T00:00:00+00:00")
+    _insert_run(
+        _registry_path(empty_case),
+        computed,
+        _spec(0),
+        created_at="2026-09-19T00:00:00+00:00",
+    )
+    plan = plan_backtest_rekey(empty_case)
+    assert plan.occupied == 1
+    merge = plan.merges[0]
+    assert (merge.target, merge.survivor, merge.retired) == (computed, stored, (computed,))
+    assert merge.proved and not plan.skipped
+    assert plan.mapping == {stored: computed}
+
+
+def test_a_collision_keeps_the_earlier_row_when_it_is_already_at_the_target(
+    empty_case: Path,
+) -> None:
+    """The other registries' shape, and the same rule: the survivor is chosen on created_at."""
+    stored, computed, spec = _moved_pair(0)
+    _insert_run(
+        _registry_path(empty_case),
+        computed,
+        _spec(0),
+        created_at="2026-09-06T00:00:00+00:00",
+    )
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-18T00:00:00+00:00")
+    plan = plan_backtest_rekey(empty_case)
+    merge = plan.merges[0]
+    assert (merge.survivor, merge.retired) == (computed, (stored,))
+    assert merge.proved
+    assert plan.mapping == {}
+
+
+def test_a_collision_whose_rows_hold_different_artifacts_refuses(empty_case: Path) -> None:
+    stored, computed, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-06T00:00:00+00:00")
+    _insert_run(
+        _registry_path(empty_case),
+        computed,
+        _spec(0),
+        created_at="2026-09-18T00:00:00+00:00",
+        digests=OTHER_DIGESTS,
+    )
+    plan = plan_backtest_rekey(empty_case)
+    assert not plan.merges[0].proved
+    assert plan.merges[0].reason == "the colliding rows hold different artifacts"
+    assert plan.refusals == (
+        "1 collisions refused, the colliding rows hold different artifacts, "
+        f"first at {plan.merges[0].target}",
+    )
+    assert plan.skipped
+    assert plan.mapping == {}
+
+
+def test_a_collision_whose_rows_record_no_digests_refuses(empty_case: Path) -> None:
+    stored, computed, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-06T00:00:00+00:00")
+    _insert_run(
+        _registry_path(empty_case),
+        computed,
+        _spec(0),
+        created_at="2026-09-18T00:00:00+00:00",
+        digests=None,
+    )
+    assert plan_backtest_rekey(empty_case).merges[0].reason.startswith("a row in the collision")
+
+
+def test_the_digest_maps_are_compared_whole_rather_than_counted() -> None:
+    """``us_firm_characteristics`` records two artifact digests where the others record six."""
+    two = {"daily_returns.parquet": "a1" * 8, "weights.parquet": "b2" * 8}
+    rows = [
+        Row(ALPHA, GAMMA, _PREDICTION, "2026-09-01T00:00:00+00:00", "signal", two),
+        Row(BETA, GAMMA, _PREDICTION, "2026-09-02T00:00:00+00:00", "signal", dict(two)),
+    ]
+    specs = {ALPHA: _spec(0, elided=ALL_ELIDED), BETA: _spec(0)}
+    assert prove_merge(rows, specs) == (True, "")
+    rows[1].digests["weights.parquet"] = "ff" * 8
+    assert prove_merge(rows, specs)[0] is False
+
+
+def test_rows_that_differ_after_the_elided_keys_are_stripped_refuse() -> None:
+    """The branch a real collision cannot reach without a hash collision."""
+    rows = [
+        Row(ALPHA, GAMMA, _PREDICTION, "2026-09-01T00:00:00+00:00", "signal", dict(DIGESTS)),
+        Row(BETA, GAMMA, _PREDICTION, "2026-09-02T00:00:00+00:00", "signal", dict(DIGESTS)),
+    ]
+    specs = {ALPHA: _spec(0, elided=ALL_ELIDED), BETA: _spec(1, elided=ALL_ELIDED)}
+    proved, reason = prove_merge(rows, specs)
+    assert not proved
+    assert reason == "the colliding rows hold different specs after the elided keys are stripped"
+
+
+def test_three_rows_at_one_address_keep_only_the_earliest(empty_case: Path) -> None:
+    stored, computed, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-02T00:00:00+00:00")
+    _insert_run(
+        _registry_path(empty_case),
+        computed,
+        _spec(0),
+        created_at="2026-09-03T00:00:00+00:00",
+    )
+    third = _spec(0, elided=("account",))
+    _insert_run(
+        _registry_path(empty_case),
+        pre_elision_hash(_PREDICTION, third),
+        third,
+        created_at="2026-09-01T00:00:00+00:00",
+    )
+    plan = plan_backtest_rekey(empty_case)
+    merge = plan.merges[0]
+    assert merge.survivor == pre_elision_hash(_PREDICTION, third)
+    assert sorted(merge.retired) == sorted([stored, computed])
+    assert merge.proved and plan.unexplained == ()
