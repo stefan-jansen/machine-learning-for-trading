@@ -147,11 +147,15 @@ def _best_for_rung(
 ) -> pl.DataFrame:
     """``explorer.best`` for a stage, fetching enough rows that the pin survives.
 
-    ``best()`` reads ``universe_filter`` out of ``spec_json`` in Python, *after* the SQL
-    ``LIMIT top_n``, and ``_apply_rung_restriction`` runs after that. For nasdaq the pinned
+    ``best()`` reads ``universe_filter`` out of ``spec_json`` in Python, and truncates to
+    ``top_n`` after that; ``_apply_rung_restriction`` runs later still. For nasdaq the pinned
     cost-feasible carrier sits below the full-universe in-sample maxima, so a small ``top_n``
     truncates it before the predicate is ever applied and the pin silently selects nothing -
     or, worse, the best surviving row that was never the carrier.
+
+    A pinned case study therefore asks for every row, which ``best`` now spells ``top_n=0``.
+    It was a literal million until ``sweep_config.top_n_cap`` gave 0 that meaning, and a cohort
+    past a million would have been truncated rather than refused.
 
     Ch20 solves this with the same widening (`_best_pinned`); the extraction into this module
     dropped it, which is why every pinned selection here has to go through this helper rather
@@ -159,7 +163,7 @@ def _best_for_rung(
     """
     return explorer.best(
         stage=stage,
-        top_n=1_000_000 if rung is not None else top_n,
+        top_n=0 if rung is not None else top_n,
         prediction_hashes=prediction_hashes,
     )
 

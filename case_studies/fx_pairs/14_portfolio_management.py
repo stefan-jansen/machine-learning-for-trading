@@ -76,6 +76,7 @@ from case_studies.utils.backtest_presets import EngineBacktestConfig
 from case_studies.utils.sweep_config import (
     get_allocators,
     get_top_n_predictions,
+    top_n_cap,
 )
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
@@ -252,9 +253,13 @@ def _result_config(result: BacktestResult) -> tuple[str, str, str]:
 
 
 def _select_configuration_survivors(
-    ranked_results: Iterable[BacktestResult], limit: int
+    ranked_results: Iterable[BacktestResult], limit: int | None
 ) -> list[BacktestResult]:
-    """Keep the best baseline result for each distinct model configuration."""
+    """Keep the best baseline result for each distinct model configuration.
+
+    ``limit`` is the cap ``sweep_config.top_n_cap`` returns, so ``None`` keeps every distinct
+    configuration.
+    """
     survivors = []
     seen: set[tuple[str, str]] = set()
     for result in ranked_results:
@@ -367,6 +372,11 @@ if TOP_N_CONFIGS and TOP_N_PREDICTIONS is not None and TOP_N_CONFIGS != TOP_N_PR
 if TOP_N_PREDICTIONS is None:
     TOP_N_PREDICTIONS = TOP_N_CONFIGS or get_top_n_predictions(CASE_STUDY_ID, "allocation")
 top_n = TOP_N_PREDICTIONS
+# 0 asks for every configuration, the spelling `top_n_predictions.signal` uses in this
+# setup.yaml. `_select_configuration_survivors` already takes everything at 0, because its
+# `len(survivors) == limit` cannot hold after an append; the count check below compared that
+# against `min(0, ...)` and reported the selection incomplete.
+config_cap = top_n_cap(top_n)
 selected_baselines: dict[str, list[BacktestResult]] = {}
 candidate_sets: dict[str, CandidateSet] = {}
 
@@ -410,9 +420,12 @@ for label in baseline_labels:
         ranked_results = list(candidates.ranked_validation_sharpe())
         if any(not isinstance(result, BacktestResult) for result in ranked_results):
             raise TypeError("validation-Sharpe ranking returned a non-backtest result")
-    selected_baselines[label] = _select_configuration_survivors(ranked_results, top_n)
+    selected_baselines[label] = _select_configuration_survivors(ranked_results, config_cap)
     available_configs = {_result_config(result)[1:] for result in label_results}
-    if len(selected_baselines[label]) != min(top_n, len(available_configs)):
+    expected_configs = (
+        len(available_configs) if config_cap is None else min(config_cap, len(available_configs))
+    )
+    if len(selected_baselines[label]) != expected_configs:
         raise RuntimeError(f"configuration selection for {label} is incomplete")
 
 baseline_predictions = {result.registry_record()["prediction_hash"] for result in baseline_results}

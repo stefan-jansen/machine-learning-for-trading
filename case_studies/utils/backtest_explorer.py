@@ -30,14 +30,11 @@ from case_studies.utils.notebook_contracts import (
     filter_active_model_rows,
     full_coverage_prediction_sql,
 )
+from case_studies.utils.sweep_config import top_n_cap
 from case_studies.utils.uncertainty import STAGE_SEQUENCE, cohort_member_digest
 
 # Sentinel distinguishing "no filter" from "match exit_at_max_days IS NULL".
 _UNSET = object()
-
-# `best` bounds its read with a SQL LIMIT, so counting a whole cohort means asking for
-# more rows than any cohort holds rather than for no limit at all.
-_UNBOUNDED_COHORT = 1_000_000
 
 # Canonical schema for BacktestExplorer.best() output. Used to construct
 # schema-stable empty DataFrames so downstream `.select("source", ...)`
@@ -376,6 +373,11 @@ class BacktestExplorer:
     ) -> pl.DataFrame:
         """Top-N backtests at a given stage, ranked by ``metric``.
 
+        ``top_n=0`` returns every matching backtest, the reading
+        ``sweep_config.top_n_cap`` gives the number everywhere else. Counting a whole
+        cohort used to mean asking for more rows than any cohort could hold, through a
+        ``_UNBOUNDED_COHORT`` sentinel of a million, because 0 truncated to nothing.
+
         Returns
         -------
         pl.DataFrame
@@ -385,6 +387,7 @@ class BacktestExplorer:
             cagr, max_drawdown, total_return, volatility, ic_mean,
             ic_mean_daily, ic_ci_lo, ic_ci_hi, ic_n_days
         """
+        cap = top_n_cap(top_n)
         filter_sql = ""
         filter_params: list[str] = []
         coverage_params: list[str] = []
@@ -492,7 +495,7 @@ class BacktestExplorer:
             pl.Series("exit_at_max_days", exit_at_max_days, dtype=pl.Int64),
         )
 
-        return _drop_rows_a_reader_cannot_tell_apart(
+        ranked = _drop_rows_a_reader_cannot_tell_apart(
             df.select(
                 "backtest_hash",
                 "prediction_hash",
@@ -517,7 +520,8 @@ class BacktestExplorer:
                 "ic_ci_hi",
                 "ic_n_days",
             )
-        ).head(top_n)
+        )
+        return ranked if cap is None else ranked.head(cap)
 
     # -----------------------------------------------------------------
     # compare_families: model family comparison at a stage
@@ -1045,9 +1049,7 @@ class BacktestExplorer:
         scoped_k: dict[tuple[str, str], int] = {}
         scoped_digest: dict[tuple[str, str], str] = {}
         if prediction_hashes:
-            cohort = self.best(
-                stage=stage, top_n=_UNBOUNDED_COHORT, prediction_hashes=prediction_hashes
-            )
+            cohort = self.best(stage=stage, top_n=0, prediction_hashes=prediction_hashes)
             if not cohort.is_empty():
                 grouped = cohort.group_by("family", "label").agg(
                     n=pl.len(), members=pl.col("backtest_hash")

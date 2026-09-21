@@ -16,6 +16,7 @@ from ..notebook_contracts import (
     filter_active_model_rows,
     full_coverage_prediction_sql,
 )
+from ..sweep_config import top_n_cap
 from .specs import IDENTITY_VERSION
 from .store import (
     _backtest_dir,
@@ -31,6 +32,10 @@ from .store import (
 )
 
 logger = logging.getLogger(__name__)
+
+# SQLite reads a negative LIMIT as no limit, which is how a ``top_n`` of 0 - every candidate,
+# per ``sweep_config.top_n_cap`` - reaches a query that must still bind one parameter there.
+_SQL_NO_LIMIT = -1
 
 # SQLite's SQLITE_MAX_VARIABLE_NUMBER defaults to 999 on builds prior to 3.32
 # (still common on system pythons and some CI images). Chunk IN-clause
@@ -977,13 +982,15 @@ def _resolve_best_predictions_canonical(
         "_in_window_days", "_family_bar"
     )
 
+    cap = top_n_cap(top_n)
     top_cfgs = (
         per_prediction.group_by(["family", "config_name"])
         .agg(pl.col("sharpe").max().alias("_best"))
         .sort("_best", descending=True)
-        .head(top_n)
-        .select(["family", "config_name"])
     )
+    if cap is not None:
+        top_cfgs = top_cfgs.head(cap)
+    top_cfgs = top_cfgs.select(["family", "config_name"])
     ranked = (
         # `nulls_equal` mirrors the raw path's `pp.config_name IS tc.config_name`
         # (see `_resolve_best_predictions`). `config_name` is nullable, group_by
@@ -1183,7 +1190,8 @@ def resolve_best_predictions(
         params.append(split)
     universe_clause, universe_params = _universe_filter_clause(universe_filter)
     params.extend(universe_params)
-    params.append(str(top_n))
+    cap = top_n_cap(top_n)
+    params.append(str(_SQL_NO_LIMIT if cap is None else cap))
     params.append(str(max(1, int(checkpoints_per_config))))
 
     query = f"""
@@ -1358,7 +1366,10 @@ def _resolve_best_backtest_runs_canonical(
     if existing is not None:
         df = df.filter(pl.col("prediction_hash").is_in(list(existing)))
 
-    df = df.sort("sharpe", descending=True).head(top_n)
+    df = df.sort("sharpe", descending=True)
+    cap = top_n_cap(top_n)
+    if cap is not None:
+        df = df.head(cap)
     return df.select("backtest_hash", "prediction_hash", "spec_json", "sharpe")
 
 
@@ -1473,7 +1484,16 @@ def resolve_best_backtest_runs(
             population_subquery="SELECT prediction_hash FROM population_members",
         )
         params.append(json.dumps(sorted(prediction_hashes)))
-    params.extend([label, *exclude_params, *stage_params, *split_params, str(top_n)])
+    cap = top_n_cap(top_n)
+    params.extend(
+        [
+            label,
+            *exclude_params,
+            *stage_params,
+            *split_params,
+            str(_SQL_NO_LIMIT if cap is None else cap),
+        ]
+    )
 
     query = f"""
         {population_cte}

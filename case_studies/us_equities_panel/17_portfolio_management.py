@@ -103,6 +103,7 @@ from case_studies.utils.sweep_config import (
     get_allocators,
     get_checkpoints_per_config,
     get_top_n_predictions,
+    top_n_cap,
 )
 from utils.style import add_message_title, ml4t_palette, show_with_alt, zero_line
 
@@ -257,6 +258,7 @@ excluded.select("label", "family", "config_name", "prediction_hash", "sharpe", "
 if TOP_N_PREDICTIONS is None:
     TOP_N_PREDICTIONS = get_top_n_predictions(CASE_STUDY_ID, "allocation")
 top_n = TOP_N_PREDICTIONS
+label_cap = top_n_cap(top_n)
 checkpoints_per_config = get_checkpoints_per_config(CASE_STUDY_ID)
 if checkpoints_per_config != 1:
     raise ValueError(
@@ -269,13 +271,18 @@ for label in baseline.get_column("label").unique().sort().to_list():
     ranked = baseline.filter(pl.col("label") == label).sort(
         "sharpe", "backtest_hash", descending=[True, False]
     )
-    shortlist_parts.append(
-        ranked.unique(
-            subset=["family", "config_name"],
-            keep="first",
-            maintain_order=True,
-        ).head(top_n)
+    per_label = ranked.unique(
+        subset=["family", "config_name"],
+        keep="first",
+        maintain_order=True,
     )
+    # `top_n` of 0 asks for every configuration, as `top_n_predictions.signal` does in this
+    # setup.yaml. Passed straight to `.head` it means the opposite, and the empty shortlist
+    # then failed below as "the equal-weight baseline produced no allocation survivors",
+    # blaming the baseline for a width the caller declared.
+    if label_cap is not None:
+        per_label = per_label.head(label_cap)
+    shortlist_parts.append(per_label)
 shortlist = pl.concat(shortlist_parts).sort("label", "sharpe", descending=[False, True])
 if shortlist.is_empty():
     raise RuntimeError("The equal-weight baseline produced no allocation survivors")

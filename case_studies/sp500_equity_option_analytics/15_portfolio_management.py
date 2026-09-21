@@ -81,6 +81,7 @@ from case_studies.utils.sweep_config import (
     get_checkpoints_per_config,
     get_top_k_values_for,
     get_top_n_predictions,
+    top_n_cap,
 )
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
@@ -133,6 +134,7 @@ TOP_N = (
     if TOP_N_PREDICTIONS is not None
     else get_top_n_predictions(CASE_STUDY_ID, "allocation")
 )
+TOP_N_CAP = top_n_cap(TOP_N)
 CHECKPOINTS_PER_CONFIG = get_checkpoints_per_config(CASE_STUDY_ID)
 ALLOCATION_LABEL = LABEL or bt_config.primary_label
 
@@ -202,8 +204,16 @@ top_preds = resolve_best_predictions(
     prediction_hashes=CURRENT_MEMBERS,
     backtest_hashes=BASELINE_GRID,
 )
-if len(top_preds) != TOP_N:
-    raise RuntimeError(f"Expected {TOP_N} advancing configurations, found {len(top_preds)}")
+# The unit here is a configuration, not a row: `resolve_best_predictions` returns
+# `checkpoints_per_config` rows per advancing config, so `len(top_preds)` counts configurations
+# only while that is 1. A width of 0 asks for every configuration, as `top_n_predictions.signal`
+# does in this setup.yaml, and then there is no count to promise - only that something advanced.
+advancing_configs = top_preds.select("family", "config_name").n_unique()
+if TOP_N_CAP is None:
+    if not advancing_configs:
+        raise RuntimeError("No configuration advanced to the allocation stage")
+elif advancing_configs != TOP_N_CAP:
+    raise RuntimeError(f"Expected {TOP_N} advancing configurations, found {advancing_configs}")
 
 selected_hashes = top_preds["prediction_hash"].to_list()
 top_preds.select("source", "prediction_hash", "sharpe")

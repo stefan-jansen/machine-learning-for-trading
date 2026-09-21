@@ -68,6 +68,7 @@ from case_studies.utils.sweep_config import (
     get_allocators,
     get_checkpoints_per_config,
     get_top_n_predictions,
+    top_n_cap,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -168,19 +169,25 @@ if baseline_table.get_column("sharpe").null_count():
 if TOP_N_PREDICTIONS is None:
     TOP_N_PREDICTIONS = get_top_n_predictions(CASE_STUDY, "allocation")
 top_n_configs = TOP_N_PREDICTIONS
+# A width of 0 asks for every configuration, the spelling `top_n_predictions.signal` uses in
+# this setup.yaml. Read as a row count it is `.head(0)`, which selects nothing and leaves the
+# count check below comparing 0 against `min(0, available)` - a sweep that registers no
+# allocation at all and exits 0.
+config_cap = top_n_cap(top_n_configs)
 checkpoints_per_config = get_checkpoints_per_config(CASE_STUDY)
 ranked = baseline_table.sort("sharpe", "backtest_hash", descending=[True, False])
-shortlist = (
-    ranked.group_by("family", "config_name", maintain_order=True)
-    .head(checkpoints_per_config)
-    .head(top_n_configs * checkpoints_per_config)
+shortlist = ranked.group_by("family", "config_name", maintain_order=True).head(
+    checkpoints_per_config
 )
+if config_cap is not None:
+    shortlist = shortlist.head(config_cap * checkpoints_per_config)
 if baseline_candidates is not None:
     best = baseline_candidates.best_validation_sharpe()
     if shortlist.item(0, "backtest_hash") != best.hash:
         raise RuntimeError("the displayed shortlist disagrees with the candidate-set ranking rule")
 available_configs = ranked.select("family", "config_name").n_unique()
-if shortlist.select("family", "config_name").n_unique() != min(top_n_configs, available_configs):
+expected_configs = available_configs if config_cap is None else min(config_cap, available_configs)
+if shortlist.select("family", "config_name").n_unique() != expected_configs:
     raise RuntimeError("the allocation shortlist does not hold the declared configuration count")
 
 # %% tags=["results"]
