@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -364,7 +364,8 @@ class RekeyPlan:
     merges: tuple[Merge, ...]
     #: addresses neither today's hasher nor the pre-elision one explains
     unexplained: tuple[str, ...]
-    #: targets that are already an identity of some other kind in this registry
+    #: addresses the re-key would read or write that are already an identity of some other
+    #: kind in this registry - the vacated side as well as the minted one
     namespace_clashes: tuple[str, ...] = ()
 
     @property
@@ -399,8 +400,8 @@ class RekeyPlan:
             )
         if self.namespace_clashes:
             reasons.append(
-                f"{len(self.namespace_clashes)} targets are already a training, prediction, "
-                f"candidate-set or population identity here, first "
+                f"{len(self.namespace_clashes)} addresses the re-key would move from or onto "
+                f"are already an identity of another kind here, first "
                 f"{self.namespace_clashes[0]}"
             )
         return tuple(reasons)
@@ -476,6 +477,16 @@ def prove_merge(members: list[Row]) -> tuple[bool, str]:
     return True, ""
 
 
+def _touched_addresses(mapping: Mapping[str, str], merges: Iterable[Merge]) -> set[str]:
+    """Every address the re-key reads from or writes to, both sides of the rewrite."""
+    touched = set(mapping) | set(mapping.values())
+    for merge in merges:
+        if merge.proved:
+            touched.add(merge.target)
+            touched.update(merge.retired)
+    return touched
+
+
 def plan_backtest_rekey(case_dir: Path | str, *, registry: Path | str | None = None) -> RekeyPlan:
     """Classify every row, and prove or refuse every collision. Writes nothing.
 
@@ -487,14 +498,23 @@ def plan_backtest_rekey(case_dir: Path | str, *, registry: Path | str | None = N
     106 of 106 pairs, and in the two registries this refuses it is the earlier one - so the
     rule is stated over ``created_at`` and never over which address a row happens to hold.
 
-    A target that is already an identity of some other kind refuses the registry.
-    ``official_population_members.member_hash`` is polymorphic - it holds prediction hashes
-    in ``etfs``, ``nasdaq100_microstructure`` and ``us_firm_characteristics``, and 4,882
-    backtest addresses beside 777 prediction hashes in ``crypto_perps_funding`` - so a
-    mapping keyed on backtest addresses alone would silently rewrite a prediction reference
-    the moment a computed target landed on a prediction hash. The four namespaces are
-    disjoint in all nine registries today and no target clashes; this measures it rather
-    than assuming it, because the re-key is what mints the new addresses.
+    An address the re-key would move *from* or *onto* that is already an identity of some
+    other kind refuses the registry. ``official_population_members.member_hash`` is
+    polymorphic - it holds prediction hashes in ``etfs``, ``nasdaq100_microstructure`` and
+    ``us_firm_characteristics``, and 4,882 backtest addresses beside 777 prediction hashes
+    in ``crypto_perps_funding`` - and a re-key rewrites a reference site by matching the
+    stored value, ``SET col = new WHERE col = old``.
+
+    Both sides are checked, and they fail differently. A *vacated* address that is also a
+    prediction hash is the silent one: the rewrite converts a prediction reference into a
+    backtest reference and nothing downstream can tell. A *minted* address that is also a
+    prediction hash leaves two kinds of identity sharing one value, so the next migration
+    reads an alias rather than a reference.
+
+    All six declaring namespaces are disjoint from backtest addresses in the nine registries
+    today and neither side clashes. This measures it per run rather than carrying that
+    forward: the re-key mints addresses that did not exist when the scan ran, and two lanes
+    write these registries live.
     """
     root = Path(case_dir)
     db_path = Path(registry) if registry is not None else root / "run_log" / "registry.db"
@@ -547,5 +567,5 @@ def plan_backtest_rekey(case_dir: Path | str, *, registry: Path | str | None = N
         mapping=mapping,
         merges=tuple(merges),
         unexplained=unexplained,
-        namespace_clashes=tuple(sorted(set(mapping.values()) & foreign)),
+        namespace_clashes=tuple(sorted(_touched_addresses(mapping, merges) & foreign)),
     )

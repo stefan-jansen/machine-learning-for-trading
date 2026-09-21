@@ -488,9 +488,22 @@ def test_a_target_that_is_another_kind_of_identity_refuses_the_registry(empty_ca
     plan = plan_backtest_rekey(empty_case)
     assert plan.namespace_clashes == (computed,)
     assert plan.skipped
-    assert "already a training, prediction, candidate-set or population identity" in "".join(
-        plan.refusals
-    )
+    assert "already an identity of another kind" in "".join(plan.refusals)
+
+
+def test_an_address_being_vacated_that_is_another_identity_refuses_too(empty_case: Path) -> None:
+    """The silent side. A re-key rewrites a reference site by matching the stored value, so
+    an old address that is also a prediction hash turns a prediction reference into a
+    backtest one and nothing downstream can tell. A minted address that clashes only leaves
+    two kinds sharing a value.
+    """
+    stored, _computed, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-01T00:00:00+00:00")
+    _add_candidate_set(_registry_path(empty_case), stored, [stored])
+
+    plan = plan_backtest_rekey(empty_case)
+    assert plan.namespace_clashes == (stored,)
+    assert plan.skipped
 
 
 def test_a_collision_keeps_the_earlier_row_when_it_is_the_mover(empty_case: Path) -> None:
