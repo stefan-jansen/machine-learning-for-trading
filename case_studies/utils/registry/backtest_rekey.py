@@ -98,6 +98,14 @@ _DECLARING_COLUMNS: tuple[tuple[str, str], ...] = (
 #: counting it would report the merge as a broken migration.
 QUARANTINE_DIRNAME = ".quarantine"
 
+#: How far two artifacts may drift and still be the same result. A float sum is not
+#: associative, so the same computation reduced in a different order lands within an ulp or
+#: two; the observed gap in the nine is 5.6e-17 on values of order 0.05. These are wide
+#: enough to absorb that and far too tight to absorb a different run: the smallest real
+#: disagreement measured is 0.4 on a return.
+_ARTIFACT_ATOL = 1e-12
+_ARTIFACT_RTOL = 1e-9
+
 
 @contextmanager
 def open_readonly(registry: Path | str) -> Iterator[sqlite3.Connection]:
@@ -459,21 +467,76 @@ def read_rows(db: sqlite3.Connection) -> list[Row]:
     return rows
 
 
-def prove_merge(members: list[Row]) -> tuple[bool, str]:
+def _frames_agree(left: Path, right: Path) -> bool | None:
+    """Whether two artifact files hold the same numbers. ``None`` when they cannot be read.
+
+    Bytes are the wrong unit here. In ``us_firm_characteristics`` 47 of the 81 colliding
+    pairs differ only in the last bit of a float - 0.05365977120707852 against ...854, on 4
+    of 110 values - because a float sum lands differently depending on the order it is
+    reduced in. That is the same result written twice, and a digest comparison calls it two
+    results. Non-numeric columns still have to match exactly: a different symbol or a
+    different timestamp is a different run, however close the weights are.
+    """
+    try:
+        import polars as pl
+
+        first, second = pl.read_parquet(left), pl.read_parquet(right)
+    except Exception:
+        return None
+    if first.schema != second.schema or first.height != second.height:
+        return False
+    for column, dtype in first.schema.items():
+        a, b = first[column], second[column]
+        if dtype.is_float():
+            gap = (a - b).abs()
+            tolerance = _ARTIFACT_ATOL + _ARTIFACT_RTOL * b.abs()
+            if bool((gap > tolerance).any()):
+                return False
+        elif not a.equals(b):
+            return False
+    return True
+
+
+def _artifacts_agree(members: list[Row], artifact_root: Path) -> tuple[bool, str]:
+    """Compare every recorded artifact of every member by value, not by digest."""
+    first = members[0]
+    for name in sorted(first.digests):
+        reference = artifact_root / first.address / name
+        for member in members[1:]:
+            verdict = _frames_agree(reference, artifact_root / member.address / name)
+            if verdict is None:
+                return False, f"the colliding rows hold different artifacts ({name} unreadable)"
+            if not verdict:
+                return False, f"the colliding rows hold different numbers in {name}"
+    return True, ""
+
+
+def prove_merge(members: list[Row], *, artifact_root: Path | None = None) -> tuple[bool, str]:
     """Whether these rows are the same result under two addresses.
 
     Two independent equalities, both required, and both compared whole rather than by a
     count of keys: ``us_firm_characteristics`` records two artifact digests where the other
     registries record six, so a check that asserted six would pass it vacuously.
+
+    Identical digests settle it. When they differ and *artifact_root* is given, the files are
+    compared by value, because a digest cannot tell one-bit float noise from a different
+    result and both appear in the nine. Without *artifact_root* a digest difference refuses,
+    which is the conservative reading and what a caller with no artifact tree gets.
     """
     first = members[0]
     if not first.digests or any(not member.digests for member in members):
         return False, "a row in the collision records no artifact digests"
-    if any(member.digests != first.digests for member in members):
-        return False, "the colliding rows hold different artifacts"
+    if any(set(member.digests) != set(first.digests) for member in members):
+        return False, "the colliding rows record different artifact names"
     reference = _hashable_strategy_spec(first.spec)
     if any(_hashable_strategy_spec(member.spec) != reference for member in members[1:]):
         return False, "the colliding rows hold different specs after the elided keys are stripped"
+    if any(member.digests != first.digests for member in members):
+        if artifact_root is None:
+            return False, "the colliding rows hold different artifacts"
+        agree, reason = _artifacts_agree(members, artifact_root)
+        if not agree:
+            return False, reason
     return True, ""
 
 
@@ -547,7 +610,7 @@ def plan_backtest_rekey(case_dir: Path | str, *, registry: Path | str | None = N
             continue
         ordered = sorted(members, key=lambda member: (member.created_at, member.address))
         survivor, retired = ordered[0], ordered[1:]
-        proved, reason = prove_merge(ordered)
+        proved, reason = prove_merge(ordered, artifact_root=root / "run_log" / "backtest")
         merges.append(
             Merge(
                 target=target,

@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 from case_studies.utils.registry.backtest_rekey import (
@@ -372,6 +374,21 @@ DIGESTS = {"daily_returns.parquet": "a1" * 8, "weights.parquet": "b2" * 8}
 OTHER_DIGESTS = {"daily_returns.parquet": "c3" * 8, "weights.parquet": "d4" * 8}
 
 
+def _write_artifacts(case_dir: Path, address: str, returns: list[float]) -> None:
+    """The two artifacts `DIGESTS` names, so a digest mismatch can be read past."""
+    directory = case_dir / "run_log" / "backtest" / address
+    directory.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "timestamp": [datetime(2026, 1, day + 1) for day in range(len(returns))],
+            "daily_return": returns,
+        }
+    ).write_parquet(directory / "daily_returns.parquet")
+    pl.DataFrame({"symbol": ["AAA", "BBB"], "weight": [0.5, 0.5]}).write_parquet(
+        directory / "weights.parquet"
+    )
+
+
 def _spec(rank: int, *, elided: tuple[str, ...] = ()) -> dict:
     """A stored spec, written with *elided* naming which engine-default keys it spells out.
 
@@ -553,15 +570,88 @@ def test_a_collision_whose_rows_hold_different_artifacts_refuses(empty_case: Pat
         created_at="2026-09-18T00:00:00+00:00",
         digests=OTHER_DIGESTS,
     )
+    _write_artifacts(empty_case, stored, [0.01, 0.02, 0.03])
+    _write_artifacts(empty_case, computed, [0.01, 0.02, 0.49])
+
     plan = plan_backtest_rekey(empty_case)
     assert not plan.merges[0].proved
-    assert plan.merges[0].reason == "the colliding rows hold different artifacts"
-    assert plan.refusals == (
-        "1 collisions refused, the colliding rows hold different artifacts, "
-        f"first at {plan.merges[0].target}",
+    assert plan.merges[0].reason == (
+        "the colliding rows hold different numbers in daily_returns.parquet"
     )
     assert plan.skipped
     assert plan.mapping == {}
+
+
+def test_a_collision_differing_only_in_the_last_bit_of_a_float_is_proved(
+    empty_case: Path,
+) -> None:
+    """us_firm_characteristics' shape: 47 of its 81 pairs differ by 5.6e-17 on 4 of 110
+    values, because a float sum is not associative. A digest reads that as two results.
+    """
+    stored, computed, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-06T00:00:00+00:00")
+    _insert_run(
+        _registry_path(empty_case),
+        computed,
+        _spec(0),
+        created_at="2026-09-18T00:00:00+00:00",
+        digests=OTHER_DIGESTS,
+    )
+    _write_artifacts(empty_case, stored, [0.05365977120707852, 0.02, 0.03])
+    _write_artifacts(empty_case, computed, [0.05365977120707854, 0.02, 0.03])
+
+    plan = plan_backtest_rekey(empty_case)
+    assert plan.merges[0].proved, plan.merges[0].reason
+    assert not plan.skipped
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "proved", "pins"),
+    [
+        # Only the absolute tolerance can carry this: the relative one is a multiple of a
+        # value that is zero.
+        (0.0, 1e-17, True, "atol"),
+        # Only the relative one can carry this: the gap is a thousand times the absolute
+        # tolerance, and a millionth of the value.
+        (1.0, 1.0 + 1e-10, True, "rtol"),
+        # And neither carries a gap this wide, which is what keeps the window honest.
+        (1.0, 1.0 + 1e-7, False, "the upper bound"),
+    ],
+)
+def test_the_artifact_tolerance_window(
+    empty_case: Path, left: float, right: float, proved: bool, pins: str
+) -> None:
+    stored, computed, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-06T00:00:00+00:00")
+    _insert_run(
+        _registry_path(empty_case),
+        computed,
+        _spec(0),
+        created_at="2026-09-18T00:00:00+00:00",
+        digests=OTHER_DIGESTS,
+    )
+    _write_artifacts(empty_case, stored, [left, 0.02, 0.03])
+    _write_artifacts(empty_case, computed, [right, 0.02, 0.03])
+
+    plan = plan_backtest_rekey(empty_case)
+    assert plan.merges[0].proved is proved, f"{pins}: {plan.merges[0].reason}"
+
+
+def test_a_digest_mismatch_with_no_artifact_to_read_refuses(empty_case: Path) -> None:
+    """Conservative when the tree is not there: an unreadable artifact is not a proof."""
+    stored, computed, spec = _moved_pair(0)
+    _insert_run(_registry_path(empty_case), stored, spec, created_at="2026-09-06T00:00:00+00:00")
+    _insert_run(
+        _registry_path(empty_case),
+        computed,
+        _spec(0),
+        created_at="2026-09-18T00:00:00+00:00",
+        digests=OTHER_DIGESTS,
+    )
+    plan = plan_backtest_rekey(empty_case)
+    assert not plan.merges[0].proved
+    assert "unreadable" in plan.merges[0].reason
+    assert plan.skipped
 
 
 def test_a_collision_whose_rows_record_no_digests_refuses(empty_case: Path) -> None:
