@@ -144,6 +144,15 @@ def _site(sites, table: str, column: str):
 # --------------------------------------------------------------------------------------
 
 
+def test_the_reader_closes_the_registry_it_opened(case_dir: Path) -> None:
+    # `sqlite3.Connection.__exit__` ends the transaction and leaves the handle open, so a
+    # scan over the nine shared registries would hold every descriptor until collection.
+    with open_readonly(_registry_path(case_dir)) as db:
+        assert registered_addresses(db) == {ALPHA, BETA, GAMMA}
+    with pytest.raises(sqlite3.ProgrammingError):
+        db.execute("SELECT 1")
+
+
 def test_registered_addresses_are_what_backtest_runs_declares(case_dir: Path) -> None:
     with open_readonly(_registry_path(case_dir)) as db:
         assert registered_addresses(db) == {ALPHA, BETA, GAMMA}

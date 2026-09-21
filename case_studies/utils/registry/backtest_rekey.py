@@ -29,7 +29,8 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -98,9 +99,20 @@ _DECLARING_COLUMNS: tuple[tuple[str, str], ...] = (
 QUARANTINE_DIRNAME = ".quarantine"
 
 
-def open_readonly(registry: Path | str) -> sqlite3.Connection:
-    """Open a registry for reading and nothing else."""
-    return sqlite3.connect(f"file:{Path(registry)}?mode=ro", uri=True)
+@contextmanager
+def open_readonly(registry: Path | str) -> Iterator[sqlite3.Connection]:
+    """Open a registry for reading and nothing else, and close it on the way out.
+
+    A context manager rather than a bare connection because ``sqlite3.Connection.__exit__``
+    ends the transaction and leaves the handle open. These registries are shared and two of
+    them are under live writes, so a scan over the nine must not leave eighteen descriptors
+    and their WAL mappings open until the garbage collector gets to them.
+    """
+    db = sqlite3.connect(f"file:{Path(registry)}?mode=ro", uri=True)
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def declared_identities(db: sqlite3.Connection) -> dict[str, set[str]]:
