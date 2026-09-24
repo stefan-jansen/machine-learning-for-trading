@@ -418,6 +418,13 @@ def compute_mvo_weights(
 
     selected = _select_top_bottom(predictions, top_k, long_short, time_col)
 
+    # Every path out of the loop below that is not an optimized weight vector is an equal
+    # weight one, and the row it lands in is labelled `mvo_ledoit_wolf` either way. Counted
+    # here and reported once at the end, because an allocator that silently became its own
+    # fallback reads exactly like one that ran.
+    degenerate = 0
+    rebalances = 0
+
     # Pre-filter prices to prediction assets (performance: avoids pct_change on full universe)
     _prices = _filter_prices_to_prediction_assets(prices_df, predictions)
 
@@ -437,11 +444,13 @@ def compute_mvo_weights(
         side_map = dict(
             zip(ts_selected["symbol"].to_list(), ts_selected["side"].to_list(), strict=False)
         )
+        rebalances += 1
         if len(assets) < 2:
             # One selected asset has exactly one feasible long-only weight, so there is
             # nothing to optimize - but skipping the rebalance emits no target at all, and a
             # selection that is this narrow at every rebalance then produces an empty weight
             # frame and a backtest that never opens a position.
+            degenerate += 1
             rows.extend(_equal_weight_rows(ts, assets, side_map, long_short, time_col))
             continue
 
@@ -456,6 +465,7 @@ def compute_mvo_weights(
         )
 
         if window_rets.height < lookback // 2:
+            degenerate += 1
             rows.extend(_equal_weight_rows(ts, assets, side_map, long_short, time_col))
             continue
 
@@ -465,11 +475,23 @@ def compute_mvo_weights(
         ret_matrix = ret_matrix[:, valid_mask]
         ret_matrix = ret_matrix[~np.any(np.isnan(ret_matrix), axis=1)]
 
-        min_obs = max(top_k, lookback // 2)
+        # The floor is a count of return observations, so the quantity it is compared
+        # against has to be a length in time. `top_k` is a cross-section width, and when
+        # the allocation spec omits it `_apply_allocation` defaults it to the number of
+        # distinct symbols in the whole weight frame. Measured 2026-09-24: that put the
+        # floor at 268 on `sp500_options` against a 63-day lookback and at 3,113 on
+        # `us_equities_panel` against 126, neither of which any window can supply, so
+        # every rebalance fell through to equal weight under an `mvo_ledoit_wolf` label -
+        # 99 of 99 and 4,031 of 4,031, with nothing in the row saying so. The cross-section
+        # the estimate actually spans is `ret_matrix.shape[1]`, which is bounded by the
+        # selection rather than by the universe, and Ledoit-Wolf shrinkage is what makes
+        # a window shorter than the cross-section usable in the first place.
+        min_obs = max(ret_matrix.shape[1], lookback // 2)
         # Two assets are enough: Ledoit-Wolf shrinks a 2x2 covariance and the SLSQP solve
         # below is well posed on two bounded weights that sum to one. The old floor of three
         # made `mvo_ledoit_wolf` at `top_k=2` the one allocator that produced nothing.
         if ret_matrix.shape[0] < min_obs or ret_matrix.shape[1] < 2:
+            degenerate += 1
             rows.extend(_equal_weight_rows(ts, assets, side_map, long_short, time_col))
             continue
 
@@ -505,6 +527,8 @@ def compute_mvo_weights(
             options={"maxiter": 500, "ftol": 1e-10},
         )
 
+        if not result.success:
+            degenerate += 1
         w_opt = result.x if result.success else w0
         if long_short:
             w_sum = np.abs(w_opt).sum()
@@ -517,6 +541,19 @@ def compute_mvo_weights(
         for a, w in zip(valid_assets, w_opt, strict=False):
             if abs(w) > 1e-6:
                 rows.append({time_col: ts, "symbol": a, "weight": float(w)})
+
+    if rebalances and degenerate * 2 >= rebalances:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "mvo_ledoit_wolf returned equal weight on %d of %d rebalances (%.0f%%): the "
+            "covariance window was too short, the cross-section too narrow, or the SLSQP "
+            "solve did not converge. The weights this run registers are mostly not an "
+            "optimization, and nothing in the registry row says so.",
+            degenerate,
+            rebalances,
+            100.0 * degenerate / rebalances,
+        )
 
     if not rows:
         return pl.DataFrame(
