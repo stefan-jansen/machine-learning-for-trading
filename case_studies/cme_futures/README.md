@@ -2,7 +2,7 @@
 
 This case study uses daily Databento data on 30 CME futures products spanning seven sectors (equity indices, treasuries, energy, metals, currencies, agriculture, and livestock) to test whether carry and term-structure signals produce tradeable alpha at a weekly cadence. Futures have a return decomposition that splits into spot and roll components, natural sector groupings that constrain diversification, and inherent leverage that magnifies both signal and friction.
 
-The pipeline runs a long-short carry-ranked strategy with weekly Friday-close decisions and Monday-open execution, trades 30 front-month continuous contracts built with ratio back-adjustment, and prices in commission, bid-ask spread, and roll slippage. Two results sit side by side and belong to different model families. The credible cross-sectional signal is the latent-factor SDF's: IC +0.034 (HAC 95% CI [+0.006, +0.062], t_HAC = 2.36), the only family clearing zero. The strategy the case study ships is a different lineage — GBM with an `hrp` allocator and a 2% trailing stop — and it posts a validation Sharpe of **1.236** [+0.397, +2.126]. The teaching point is that portfolio Sharpe comes from magnitude at the top of the cross-section rather than from average IC, which is also why the family with the best IC is not the family that carries. Its holdout Sharpe is **0.287** [−1.034, +1.638], an interval wide enough to contain both the validation estimate and zero, which is the second teaching point: a two-year window on weekly decisions does not adjudicate a strategy.
+The pipeline runs a long-short carry-ranked strategy with weekly Friday-close decisions and Monday-open execution, trades 30 front-month continuous contracts built with ratio back-adjustment, and prices in commission, bid-ask spread, and roll slippage. The teaching point is the distinction between average rank correlation and traded performance: portfolio Sharpe comes from magnitude at the top of the cross-section rather than from average IC, so the family that ranks best on IC and the family the selection rule carries need not be the same one. The holdout is two years of weekly decisions, a window short enough that the interval around anything it estimates is wide by construction.
 
 ## At a Glance
 
@@ -58,89 +58,9 @@ This is a stable-pct approximation. CME publishes maintenance dollars in scan-vo
 | ZC | 2011-01-03 | 723.2 | 2025-12-30 | 440.5 | 0.61× | 4.43% | 2.70% | −39% |
 | NG | 2011-01-03 | 221.3 | 2025-12-31 | 3.97 | 0.018× | 7.27% | 0.13% | −98% |
 
-Anchored pct is closest to truth near 2025-12-31; back in 2011 the stable-pct approximation under-margins high-momentum equity indices (engine accepts orders a live broker may have rejected) and over-margins crashed commodities (engine rejects orders a live broker may have accepted). Net effect on absolute Sharpe in the 2011–2015 portion of the validation window is on the order of single-digit percent; relative comparisons across families, allocators, and cost variants are unaffected. Holdout (2024–2025) is anchored at the same window as the pct calculation, so this drift does not bear on the headline holdout numbers.
+Anchored pct is closest to truth near 2025-12-31; back in 2011 the stable-pct approximation under-margins high-momentum equity indices (engine accepts orders a live broker may have rejected) and over-margins crashed commodities (engine rejects orders a live broker may have accepted). The effect is confined to absolute levels in the 2011-2015 portion of the validation window; relative comparisons across families, allocators, and cost variants are unaffected. Holdout (2024–2025) is anchored at the same window as the pct calculation, so this drift does not bear on the holdout.
 
 Account sizing: `initial_cash` is **$10M** in `config/setup.yaml`. The 30-product universe spans contract notionals from ≈$35k (NG) to ≈$22M (ZT 2-year T-Note), and the engine sizes positions as `target_notional / contract_notional → integer contracts`. At k=5 per side (10 positions total) the per-position dollar budget is 5% × cash; $10M clears the binding constraint (ES at ≈$347k holdout notional in the late window) and lets all 30 products participate. NQ in the very-late holdout (Dec 2025, peak notional ≈$513k vs $500k per-position budget) is the one residual integer-share footnote.
-
-## Key Results
-
-All figures below are read from `run_log/registry.db` as rebuilt on 2026-08-30: 100 training
-runs, 496 validation prediction sets, 1,151 backtests, and one holdout evaluation. An earlier
-edition of this section reported a different lineage, a holdout Sharpe of 1.142 over 511 periods,
-and IC counts of 1,290 - none of which the current registry contains. They described a registry
-that was replaced, and they are not reproduced here.
-
-**Signal quality.** The latent-factor SDF is the one family whose HAC 95% CI excludes zero, and it
-does so on both horizons. On the 5-day primary label: IC +0.034 [+0.006, +0.062] (t_HAC = 2.36) over
-1,285 daily observations. On the 21-day variant: IC +0.064 [+0.020, +0.109] (t_HAC = 2.82) over
-1,269. Nothing else clears on either. The best GBM on the primary label is `leaves_15_mae` at +0.021
-[−0.009, +0.050] (t_HAC = 1.39); linear (`lasso_f0.85`) +0.018, deep_learning (`lstm_h64`) +0.010 and
-tabular DL (`tabm_l`) +0.009 all straddle zero, and on the 21-day label GBM (−0.007) and tabular DL
-(−0.003) sit below it. The predictive signal concentrates in the carry-driven cross-section the
-latent-factor SDF captures.
-
-**The shipped strategy.** The carrier is resolved by `resolve_solvent_carrier`, which ranks
-candidates on the 1,270 sessions they all price rather than on each one's own window - a raw ranking
-of the Sharpe column names a different family and a different horizon, and rewards whichever
-candidate had the most forgiving span. The carrier is gbm/`leaves_31_mse` on `fwd_ret_5d`, from the
-risk-overlay stage: equal-weight long-short top-5 at the signal stage, an `hrp` allocator with a
-63-bar volatility window at the portfolio stage, and a 2% trailing stop at the risk stage.
-
-Validation Sharpe **1.236** [+0.397, +2.126] over 1,286 daily periods (CAGR +19.5%, MaxDD −25.9%,
-2,355 trades, Sortino 2.04, PSR p = 0.003). On common support the same run reads 1.294.
-
-Selection adjustment, from the `fwd_ret_5d` label cohort: K = 550 candidates, effective trials
-12.8 after correlation correction, **DSR_ER = 0.045**. The carrier survives deflation at the label
-scale. The `fwd_ret_21d` cohort reads 0.037 on K = 554. Those two do not add to the 1,140-candidate
-pool below and are not meant to: a cohort drops any backtest whose prediction set has a fold with no
-computable IC, which is 36 of the 1,140 here. A prediction that could not be scored on every fold is
-not a variant the selection could have chosen. Both were absent from earlier editions of
-this file, which quoted deflation numbers `cohort_metrics` did not contain - not because the
-computation was wrong but because `19_strategy_analysis` never called for one, while three sibling
-case studies did. It calls for it now.
-
-Two distinctions matter when reading 1.236 as a selected maximum. The pool is the 1,140 candidates
-across the signal, allocation and risk-overlay stages; the registry's other 12 backtests are the 11
-cost-sensitivity cells and the holdout itself, neither of which is selected from. And 1.236 is not
-the statistic selection maximised - that is common-support Sharpe, on which this carrier reads 1.294.
-Ranked on their own full windows the pool's maximum is 1.274, a different configuration. So 1.236 is
-the carrier's full-window Sharpe reported after a selection made on a different number, and it is
-optimistic by construction in the ordinary way a pool maximum is.
-
-**Holdout.** The same configuration, refitted through the holdout fold and replayed on 2024-2025:
-Sharpe **0.287** [−1.034, +1.638] over 516 daily periods (CAGR +2.8%, MaxDD −13.3%, 970 trades,
-Sortino 0.42, PSR p = 0.333). The refit is genuine rather than a validation-fitted model scored on a
-later window - the holdout training run carries its own identity, `365d0ce706e2`, and its own CV
-declares the holdout fold.
-
-**The honest reading is that this establishes very little, in either direction.** The point estimate
-falls from 1.236 to 0.287, which invites a decay story, and the interval will not support one:
-comparing the carrier's validation series against its own holdout replay gives a Sharpe difference of
-**−0.949 [−2.583, +0.624], p = 0.246**. The two windows are disjoint - that is what a holdout is - so
-each side is bootstrapped independently over its own sessions, 1,286 in validation against 516 in the
-holdout, rather than paired on shared dates. The difference in the point estimates is therefore all
-the comparison has to work with; what it adds is the interval around it, and that interval contains
-zero comfortably.
-
-Against a holdout-window equal-weight benchmark the strategy reads −0.470 [−2.071, +1.136],
-p = 0.554, also indistinguishable. A 516-session window on a weekly rebalance carries too few
-independent decisions to separate a strategy that decayed from one that had two ordinary years. What
-the holdout does establish is the one thing it exists for: no choice in this case study was made on
-this period.
-
-**Friction floor.** One curve, not two. `16_costs.ipynb` sweeps the shipped carrier including its
-risk overlay, where a previous edition swept two pre-overlay allocation-stage combinations that are
-not what the case study reports. Total cost per leg, commission and slippage split evenly and applied
-symmetrically at entry and exit:
-
-| bps | 0 | 1 | 2 | 3 | 5 | 7 | 10 | 15 | 20 | 30 | 50 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| Sharpe | 1.499 | 1.415 | 1.341 | 1.285 | 1.182 | 1.043 | 0.857 | 0.549 | 0.227 | −0.390 | −1.582 |
-
-Break-even sits between 20 and 30 bps per leg. At CME-typical friction for liquid contracts, 1-5 bps,
-the strategy retains most of its frictionless Sharpe. The zero-cost figure exceeds the carrier's own
-registered 1.236 because the carrier's run carries `setup.yaml`'s declared friction and the 0 bps
-cell removes it. Cost is not the binding constraint on this strategy; the holdout interval is.
 
 ## Running
 
@@ -169,6 +89,31 @@ uv run python case_studies/cme_futures/18_holdout_backtest.py
 uv run python case_studies/cme_futures/19_strategy_analysis.py
 ```
 
+## Results
+
+This README describes how the case study is built, not what it found. Results are
+not restated here: the registry is rebuilt whenever the case study is re-derived,
+and a number copied into prose stays correct only until the next rebuild.
+
+[`19_strategy_analysis`](19_strategy_analysis.ipynb) reads the registry back and reports the selected
+configuration with its interval evidence. That notebook, and the registry it reads,
+are where a result comes from.
+
+To read the results without training anything, download the published bundle, which
+carries the registry and the artifacts behind it:
+
+```bash
+uv run python scripts/download_artifacts.py --cs cme_futures
+```
+
+Two bundles are published, and they are separate generations rather than revisions
+of one another. `v3.1.0-artifacts` is current and is what the command above fetches.
+`v3.0.0-artifacts` holds the results as first published. The 3.1 rebuild re-keyed
+every content-addressed hash, so a hash taken from one bundle does not resolve in
+the other.
+
 ## Run Log
 
-Model training runs, predictions, and backtest results are tracked in a content-addressed registry under `run_log/registry.db`.
+`run_log/registry.db` records every training run, prediction set and backtest,
+each addressed by a hash of the specification that produced it. The artifacts sit
+beside it under `run_log/training/`, `run_log/predictions/` and `run_log/backtest/`.

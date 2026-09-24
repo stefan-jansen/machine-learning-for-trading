@@ -6,7 +6,7 @@ perpetuals create the book's smallest cross-section and highest non-intraday dec
 The pipeline therefore emphasizes completed-bar timing, official funding cash flows, transaction
 costs, and uncertainty from only two validation folds.
 
-## Dataset Profile
+## At a Glance
 
 | Property | Value |
 |---|---|
@@ -72,7 +72,31 @@ The order matters downstream of 12: the funnel is valid only once every model fa
 registered its predictions and every equal-weight baseline exists, and 17 and 18 open the holdout
 once, on the configuration 19 reports.
 
+## Results
+
+This README describes how the case study is built, not what it found. Results are
+not restated here: the registry is rebuilt whenever the case study is re-derived,
+and a number copied into prose stays correct only until the next rebuild.
+
+[`19_strategy_analysis`](19_strategy_analysis.ipynb) reads the registry back and reports the selected
+configuration with its interval evidence. That notebook, and the registry it reads,
+are where a result comes from.
+
+To read the results without training anything, download the published bundle, which
+carries the registry and the artifacts behind it:
+
+```bash
+uv run python scripts/download_artifacts.py --cs crypto_perps_funding
+```
+
+Two bundles are published, and they are separate generations rather than revisions
+of one another. `v3.1.0-artifacts` is current and is what the command above fetches.
+`v3.0.0-artifacts` holds the results as first published. The 3.1 rebuild re-keyed
+every content-addressed hash, so a hash taken from one bundle does not resolve in
+the other.
+
 ## Run Log
 
-Model training runs, predictions, and backtest results are tracked in a content-addressed registry
-under `run_log/registry.db`.
+`run_log/registry.db` records every training run, prediction set and backtest,
+each addressed by a hash of the specification that produced it. The artifacts sit
+beside it under `run_log/training/`, `run_log/predictions/` and `run_log/backtest/`.

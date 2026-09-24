@@ -11,7 +11,7 @@ The pipeline is unusually long because the universe is unusually large. Sixteen 
 | Asset Class | Broad US equities (NYSE/NASDAQ/AMEX) |
 | Frequency | Daily |
 | Universe | ~3,200 stocks (price > $5, ADV > $1M, point-in-time) |
-| History | 1990 -- 2018-Q1 |
+| History | 1990-2018Q1 |
 | Primary Label | fwd_ret_1d |
 | CV Folds | 16 (10Y train, 1Y val) |
 | Cost Model | Material (5-30 bps per leg, era-dependent + borrow) |
@@ -45,16 +45,6 @@ The pipeline is unusually long because the universe is unusually large. Sixteen 
 | Holdout Backtest | [`21_holdout_backtest`](21_holdout_backtest.ipynb) | Ch20 | The holdout predictions traded under the selected allocator, overlay and cost level | One backtest run at `stage='holdout'`, same artifact layout |
 | Strategy Analysis | [`22_strategy_analysis`](22_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment: signal, lineage, holdout, attribution | `results/strategy_assessment.json`, `20_strategy_synthesis/output/us_equities_panel/us_equities_panel_tearsheet.html` |
 
-## Key Results
-
-**Signal direction.** GBM `leaves_31_huber` on the 5-day variant horizon achieves the highest cross-stage validation Sharpe and a strong daily-pooled IC on the panel's fwd_ret_1d grid. Pooled IC is 0.0357 with the HAC-adjusted 95% CI at [0.0293, 0.0421] over 4,018 daily cross-sections (t_HAC = 10.96), well clear of zero. Per-family rank-1 IC is monotone in horizon for GBM (1d 0.032 → 5d 0.043 → 21d 0.058) and linear (1d 0.016 → 5d 0.022 → 21d 0.029), with each CI excluding zero. Tree-based and linear families produce signals with low pairwise correlation, so an ensemble across families would not be fighting a single shared signal.
-
-**Strategy-stage performance with CIs.** Validation Sharpe for this lineage's risk_overlay carrier (score_weighted top_k=20 + `time_exit_40`) is 2.028 with a paired-bootstrap 95% CI of [1.464, 2.549] (PSR p ≈ 2e-15, classification `excludes_zero_strong`). The strategy posts a higher Sharpe than the equal-weight US-equities universe over the same window by 1.11 [0.48, 1.76] (p ≈ 0, `excludes_zero_strong`). A FF5+MOM HAC regression credits the validation edge as alpha-driven: annualized alpha ≈ 0.76 with t_HAC ≈ 7.7, residual Sharpe ≈ 2.04, R² ≈ 0.01. Cohort-level selection-bias metrics from `cohort_metrics` (family cohort `risk_overlay/fwd_ret_5d/gbm`, K_variants = 20 position-level overlays, K_eff_MP ≈ 2.0, K_eff_ER ≈ 2.5) record DSR_ER 0.106 with p ≈ 0 (and DSR_MP 0.112, ER and MP within 0.006), and PBO 0.0 across 12,870 CSCV combinations × 16 folds. On the broader label cohort (`label/fwd_ret_5d`, K_variants = 314 across all families and stages) the same leader records DSR_ER 0.065 at p ≈ 7e-13 with K_eff_ER ≈ 12.2 — the leader's edge survives both the small overlay-cohort adjustment and the cross-stage cross-family adjustment.
-
-**Holdout closure.** The 2016-Q1 to 2018-Q1 holdout puts this lineage at Sharpe −0.492. The index-paired diff against validation reads −2.520 [−3.804, −1.117] with p ≈ 5e-4. The CI excludes zero on the negative side, so the deterioration is statistically resolved. The reference equal-weight universe over the same holdout window posts Sharpe 1.71 (well above its validation reading of 0.92, reflecting the cap-weighted bull market of that period); against that elevated reference, strategy minus benchmark over the holdout reads −2.363 [−4.591, −0.213] (p ≈ 0.03, `excludes_zero_strong` on the negative side). The overall reading is that the validation edge does not carry across the holdout regime under the chosen rebalance cadence.
-
-**Friction floor.** The cost-sensitivity sweep on this lineage produces a moderately steep envelope. Within the cross-stage rank-1 prediction lineage, zero-cost gross Sharpe is 2.503 (the gross-return ceiling under the 5-day-label / daily-marked strategy), and Sharpe at the 10 bps post-decimalization midpoint is 2.117. The edge-to-cost ratio comfortably clears the 1.2× kill-condition floor (`evidence_passes`). The universal Ch20 gates resolve: validation Sharpe lower bound (1.46) is above zero, and the holdout strategy-vs-EW CI excludes zero negatively. The steepness of the cost curve and the daily rebalance cadence place the strategy in a regime where execution quality is the binding operational constraint.
-
 ## Running
 
 ```bash
@@ -87,6 +77,31 @@ uv run python case_studies/us_equities_panel/22_strategy_analysis.py
 
 The strategy-analysis notebook in `22_strategy_analysis.py` writes a full diagnostic tear sheet (`template="full"`) to the case study's gitignored output directory; readers regenerate it locally.
 
+## Results
+
+This README describes how the case study is built, not what it found. Results are
+not restated here: the registry is rebuilt whenever the case study is re-derived,
+and a number copied into prose stays correct only until the next rebuild.
+
+[`22_strategy_analysis`](22_strategy_analysis.ipynb) reads the registry back and reports the selected
+configuration with its interval evidence. That notebook, and the registry it reads,
+are where a result comes from.
+
+To read the results without training anything, download the published bundle, which
+carries the registry and the artifacts behind it:
+
+```bash
+uv run python scripts/download_artifacts.py --cs us_equities_panel
+```
+
+Two bundles are published, and they are separate generations rather than revisions
+of one another. `v3.1.0-artifacts` is current and is what the command above fetches.
+`v3.0.0-artifacts` holds the results as first published. The 3.1 rebuild re-keyed
+every content-addressed hash, so a hash taken from one bundle does not resolve in
+the other.
+
 ## Run Log
 
-Model training runs, predictions, and backtest results are tracked in a content-addressed registry under `run_log/registry.db`.
+`run_log/registry.db` records every training run, prediction set and backtest,
+each addressed by a hash of the specification that produced it. The artifacts sit
+beside it under `run_log/training/`, `run_log/predictions/` and `run_log/backtest/`.
