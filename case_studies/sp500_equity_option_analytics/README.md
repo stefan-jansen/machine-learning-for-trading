@@ -7,7 +7,7 @@ lagged one day, and trades execute at the following Monday open. The distinctive
 whether options contain information, but whether that information survives point-in-time feature
 engineering, weekly portfolio construction, costs, risk controls, and a regime change.
 
-## Dataset Profile
+## At a Glance
 
 | Property | Value |
 |---|---|
@@ -20,13 +20,11 @@ engineering, weekly portfolio construction, costs, risk controls, and a regime c
 | Evaluation | Two walk-forward folds; 10-session embargo; 2021 holdout |
 | Execution | Friday close to Monday open; one-day lag on option features |
 | Cost model | 13 bps round trip at the configured midpoint; 0-50 bps stress grid |
-| Current evidence | v3.1 validation carrier: NLinear, score weighted, top 10, 5% trailing stop |
+| Holdout | 2021, observed on an earlier lineage; see the note below |
 
-The corrected v3.1 validation Sharpe is 2.088 with a 95% interval of `[1.005, 3.117]`. The
-matching NLinear holdout was not run because the 2021 holdout had already been observed on an older
-IPCA lineage. The current notebooks therefore present validation evidence, label out-of-sample
-efficacy unresolved, and make no deployment claim. The book-aligned v3.0 record remains preserved;
-the two result versions are not mixed.
+The 2021 holdout was observed before the current sweep was built, on an IPCA lineage that the
+rebuild superseded. The notebooks therefore report validation evidence and leave out-of-sample
+efficacy unresolved rather than re-spending a window that has already been looked at.
 
 ## Pipeline
 
@@ -93,3 +91,32 @@ the greedy funnel is valid only after all model predictions and all equal-weight
 The results source of truth is `run_log/registry.db`, with content-addressed artifacts under
 `run_log/training/`, `run_log/predictions/`, and `run_log/backtest/`. Legacy `results/*.json` files
 are not used.
+
+## Results
+
+This README describes how the case study is built, not what it found. Results are
+not restated here: the registry is rebuilt whenever the case study is re-derived,
+and a number copied into prose stays correct only until the next rebuild.
+
+[`20_strategy_analysis`](20_strategy_analysis.ipynb) reads the registry back and reports the selected
+configuration with its interval evidence. That notebook, and the registry it reads,
+are where a result comes from.
+
+To read the results without training anything, download the published bundle, which
+carries the registry and the artifacts behind it:
+
+```bash
+uv run python scripts/download_artifacts.py --cs sp500_equity_option_analytics
+```
+
+Two bundles are published, and they are separate generations rather than revisions
+of one another. `v3.1.0-artifacts` is current and is what the command above fetches.
+`v3.0.0-artifacts` holds the results as first published. The 3.1 rebuild re-keyed
+every content-addressed hash, so a hash taken from one bundle does not resolve in
+the other.
+
+## Run Log
+
+`run_log/registry.db` records every training run, prediction set and backtest,
+each addressed by a hash of the specification that produced it. The artifacts sit
+beside it under `run_log/training/`, `run_log/predictions/` and `run_log/backtest/`.

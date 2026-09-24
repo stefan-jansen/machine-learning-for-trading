@@ -1,6 +1,6 @@
 # Case Study: NASDAQ-100 Microstructure
 
-This case study uses AlgoSeek TAQ-derived 15-minute bars for 114 NASDAQ-100 constituents to test whether microstructure signals -- order flow, quote staleness, relative spreads -- produce tradeable intraday alpha. This is the highest-frequency case in the book, and it is designed to show how a dominant cost floor makes a raw signal loss-making on the full universe -- and how two disciplined adjustments, a cost-feasible universe screen and ensemble model selection, recover it. The naive build fails; the disciplined build claws the holdout back from clearly-negative to marginally-positive. That iteration -- diagnose the cost problem, screen the universe, treat model selection as estimation under uncertainty -- is the lesson.
+This case study uses AlgoSeek TAQ-derived 15-minute bars for 115 NASDAQ-100 constituents to test whether microstructure signals -- order flow, quote staleness, relative spreads -- produce tradeable intraday alpha. This is the highest-frequency case in the book, and it is built around what a dominant cost floor does to a raw signal on the full universe, and what two disciplined adjustments, a cost-feasible universe screen and ensemble model selection, do about it. That iteration -- diagnose the cost problem, screen the universe, treat model selection as estimation under uncertainty -- is the lesson.
 
 ## At a Glance
 
@@ -9,7 +9,7 @@ This case study uses AlgoSeek TAQ-derived 15-minute bars for 114 NASDAQ-100 cons
 | Asset Class | US equities (NASDAQ-100) |
 | Frequency | 15-minute bars |
 | Universe | 115 stocks |
-| History | 2020--2021 |
+| History | 2020-2021 |
 | Primary Label | fwd_ret_15m |
 | CV Folds | 2 (6M train, 6M val) |
 | Cost Model | per_share_plus_spread ($0.0035/share + measured half-spread; 5 bps friction floor) |
@@ -39,26 +39,6 @@ This case study uses AlgoSeek TAQ-derived 15-minute bars for 114 NASDAQ-100 cons
 | Holdout Backtest | [`19_holdout_backtest`](19_holdout_backtest.ipynb) | Ch20 | Trades those predictions once, with the sizing and overlay the case study settled on | One backtest run at `stage='holdout'` |
 | Strategy Analysis | [`20_strategy_analysis`](20_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with IC, Sharpe, and cost analysis | `results/strategy_assessment.json`, `20_strategy_synthesis/output/nasdaq100_microstructure/nasdaq100_microstructure_tearsheet.html` |
 
-## Key Results
-
-The book's study in **cost and selection discipline**: a raw intraday cross-sectional signal that is friction-dominated on the full universe, and the two disciplined adjustments that recover it. Built the naive way — the full NASDAQ-100, no careful spread analysis — the strategy is loss-making across the sweep and the holdout Sharpe lands at **−0.89**. Careful cost analysis shows the edge is real but concentrated in names too expensive to trade at this cadence; screening to a cost-feasible universe and replacing the noisy single-best model with an ensemble walks the holdout from **−0.89 → −0.21 → +0.53**. The recovered number is modest and its confidence interval is wide — the lesson is *how disciplined adjustments change the answer*, not a claim of a deployable edge.
-
-**Signal quality**: The highest-IC configuration on the primary `fwd_ret_15m` label is gbm/leaves_7_mae at +0.0060 (HAC CI [+0.0026, +0.0094], excludes zero); linear/ridge_a1000000.0 follows at +0.0049 (CI [+0.0022, +0.0076], excludes zero). IC strengthens monotonically toward the short end — the highest-IC GBM configuration runs +0.0104 at fwd_ret_5m. At fwd_ret_60m the linear/ridge_a1000000.0 IC is +0.0069 with HAC CI [-0.0021, +0.0159] (t=1.50, p=0.13) — point estimate faintly positive but the CI straddles zero. The most-shrunk regularizers achieve the highest IC at every horizon: small-leaf MAE GBM and ridge with $\alpha \in \{10^6, 10^7\}$.
-
-**The two adjustments, on the holdout.** Each step is a single deliberate change, and each is one holdout consultation of the chosen configuration (all three reproducible from `run_log/registry.db`):
-
-| Step | Change | Holdout Sharpe | CI95 |
-|---|---|---|---|
-| 1. Naive baseline | full universe, single-best model | **−0.89** | [−3.59, +2.32] |
-| 2. Cost-feasible universe | screen to the cheapest-to-trade names, frozen per split | **−0.21** | [−2.37, +3.64] |
-| 3. Ensemble selection | average the 12-model set instead of the single-best pick | **+0.53** | [−1.94, +3.07] |
-
-Adjustment 1 is the microstructure lesson: the cost-expensive tail of the 114-name panel consumes the intraday edge, so the full universe collapses out of sample while the cost-feasible subset does not (see `17_costs.py` for the full-vs-screened contrast). Adjustment 2 is the selection lesson: the per-model validation Sharpes have enormous, completely overlapping 95% CIs, so the single-best pick is noise — averaging the model set (an ensemble) is estimation under selection uncertainty. The ensemble is a **robustness device against selection noise, not a return booster**: it converts the single-best pick's out-of-sample loss (−0.21) into an honest modest positive rather than adding alpha. **Every holdout CI above is wide and straddles zero (n≈128 days); the recovery is a point-estimate rescue from clearly-negative to marginally-positive, not a significance result.** The naive-baseline row uses the direction label `fwd_dir_15m` while the screened steps use `fwd_ret_60m`; the ladder is directionally honest — the full universe is deeply negative regardless of label — but it is not one strategy tuned in place.
-
-**Holdout closure (the ensemble carrier)**: The deployed configuration is the cost-feasible ensemble at holdout Sharpe **+0.53** [−1.94, +3.07] (n=128 trading days) — positive on the point estimate, where the naive full-universe baseline (−0.89) and the single-best cost-feasible pick (−0.21) are not. It remains **below a passive equal-weight buy-and-hold of the same screened basket** over the window: the recovery is to *viability*, not to out-performance — the active signal claws back to positive but does not beat simply holding the cost-feasible names. The strategy-vs-equal-weight paired-difference interval is not populated in the registry for this case study (`backtest_paired_metrics` has no producer here), so kill gate 2 reads **no data** rather than a spurious pass — the gate helpers treat the missing bootstrap as no-evidence, not as a green light. The honest headline: the ensemble recovers a positive point estimate, not statistical significance and not a market-beating edge; every interval above straddles zero.
-
-**Friction floor — why the naive build fails**: The bps cost trajectory for the naive-lineage prediction (`1c4327c80284`, linear/ridge_a1000000.0/fwd_ret_60m) walks monotonically from Sharpe -0.78 at zero cost through -10 at the 50 bps tail; the CI upper bound clips positive only at the zero / 1 / 2 / 3 bps cells. The realistic NQ100 large-cap half-spread of 1–3 bps plus the per-share $0.0035 floor (~5 bps friction floor) sits inside the negative band. This is the diagnostic behind Adjustment 1: on the full universe the cost floor swamps the edge, which is why screening to the cheapest-to-trade names is load-bearing rather than cosmetic — the expensive tail is where the cost is, and dropping it is what moves the holdout off the floor. (Position-level overlays alone do not: the 20-row-per-label risk-overlay sweep — trailing_stop, stop_loss, time_exit — is uniformly negative across all three regression labels on the naive lineage.) Portfolio-level kill switches (max-drawdown breaker, daily-loss limit) are NOT swept for model selection — their permanent-halt semantics produced zero-std Sharpe artifacts in earlier passes; they remain available as Ch19 §19.8 governance instruments.
-
 ## Running
 
 ```bash
@@ -85,6 +65,31 @@ uv run python case_studies/nasdaq100_microstructure/19_holdout_backtest.py
 uv run python case_studies/nasdaq100_microstructure/20_strategy_analysis.py
 ```
 
+## Results
+
+This README describes how the case study is built, not what it found. Results are
+not restated here: the registry is rebuilt whenever the case study is re-derived,
+and a number copied into prose stays correct only until the next rebuild.
+
+[`20_strategy_analysis`](20_strategy_analysis.ipynb) reads the registry back and reports the selected
+configuration with its interval evidence. That notebook, and the registry it reads,
+are where a result comes from.
+
+To read the results without training anything, download the published bundle, which
+carries the registry and the artifacts behind it:
+
+```bash
+uv run python scripts/download_artifacts.py --cs nasdaq100_microstructure
+```
+
+Two bundles are published, and they are separate generations rather than revisions
+of one another. `v3.1.0-artifacts` is current and is what the command above fetches.
+`v3.0.0-artifacts` holds the results as first published. The 3.1 rebuild re-keyed
+every content-addressed hash, so a hash taken from one bundle does not resolve in
+the other.
+
 ## Run Log
 
-Model training runs, predictions, and backtest results are tracked in a content-addressed registry under `run_log/registry.db`.
+`run_log/registry.db` records every training run, prediction set and backtest,
+each addressed by a hash of the specification that produced it. The artifacts sit
+beside it under `run_log/training/`, `run_log/predictions/` and `run_log/backtest/`.

@@ -13,7 +13,7 @@ The teaching point is methodological: equity-style bps-of-notional cost models a
 | Asset Class | S&P 500 equity options (ATM straddles) |
 | Frequency | Weekly last-available-session entry, daily delta hedge during hold |
 | Universe | S&P 500 constituents with listed options |
-| History | 2017–2021 |
+| History | 2017-2021 |
 | Primary Label | `ret_to_expiry` (HTM short straddle, ~30-day DTE) |
 | CV Folds | 2 (single-window, expanding) |
 | Cost Model | HTM daily-MTM with full per-leg accounting (entry-side option spread + daily underlying hedge spread; no exit-leg option trade) |
@@ -22,7 +22,7 @@ The teaching point is methodological: equity-style bps-of-notional cost models a
 
 All `ret_to_expiry` backtests dispatch through the **HTM cohort engine** (`_htm_backtest.py` to `_run_htm_daily_mtm`). Weekly last-available-session entry with about 30 days to expiry puts up to **5 concurrent cohorts** per underlying at any time. Each cohort carries a short straddle plus a daily-rebalanced delta hedge. Cohort capital is 1/N_ROLL, and portfolio P&L is the weighted sum of per-cohort daily MTM. The shared `ml4t-backtest` engine assumes one position per symbol with continuous reallocation and does not model overlap, paired option and hedge legs, or daily option-premium MTM.
 
-The cost-mitigation cascade (O'Donovan & Yu 2024) is encoded in the `strategy.signal.universe_filter` spec field: `None` runs on the full S&P 500 ATM straddle surface (rung 2 in O'Donovan & Yu's framing), `'liquid'` restricts to the per-rebalance bottom-quintile half-spread subset (rung 3). The canonical sweep is pinned to `'liquid'` (`setup.yaml::backtest.sweep.universe_filter`), since the full surface does not survive round-trip costs; the `'full'` vs `'liquid'` contrast is retained in the Ch18 HTM cost cascade as a narrative comparison only, not as a rank-1 candidate.
+The cost-mitigation cascade (O'Donovan & Yu 2024) is encoded in the `strategy.signal.universe_filter` spec field: `None` runs on the full S&P 500 ATM straddle surface (rung 2 in O'Donovan & Yu's framing), `'liquid'` restricts to the per-rebalance bottom-quintile half-spread subset (rung 3). The sweep is pinned to `'liquid'` (`setup.yaml::backtest.sweep.universe_filter`); the `'full'` versus `'liquid'` contrast is retained in the Ch18 HTM cost cascade as a comparison rather than as a selection candidate.
 
 ## Pipeline
 
@@ -50,25 +50,11 @@ The cost-mitigation cascade (O'Donovan & Yu 2024) is encoded in the `strategy.si
 | Strategy Analysis | [`18_strategy_analysis`](18_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment with paired-bootstrap holdout closure | `results/strategy_assessment.json`. The tear sheet is gated on a `trades.parquet` the vectorized HTM backtester does not emit, so it is skipped |
 | Appendix | [`90_ic_diagnostic`](90_ic_diagnostic.ipynb) | — | Signal-attribution deep dive outside the main pipeline | Nothing - it reads the registry |
 
-## Key Results
-
-A negative-result case on the HTM primary label `ret_to_expiry`. The cross-stage validation rank-1 is `deep_learning / patchtst` with an HRP overlay on the top-5 cross-section of the cost-feasible liquid universe. A cohort is entered on the last available session of each ISO week - Friday, or Thursday when Friday is a holiday - and held to expiry, where it is cash-settled: the HTM engine takes no market exit and pays no exit spread, so `decision.exit_time` in `setup.yaml` describes the label's horizon and not an early exit the backtest performs. Every number below is read from `run_log/registry.db` by [`18_strategy_analysis`](18_strategy_analysis.ipynb); the carrier is resolved there rather than pinned here, because a name written into prose agrees with the registry only until the next rebuild.
-
-**Signal direction.** The carrier's daily IC is +0.0128 [-0.0112, +0.0368] over 478 validation dates (HAC lag 34, t=1.047, p=0.296), positive on 55.4% of them. The interval straddles zero, and the prediction and strategy evidence agree that validation does not establish an edge.
-
-**Validation performance.** Validation Sharpe is -0.2461 [-1.5461, +1.1682] over 473 daily periods, with maximum drawdown -0.7606 driven by a single 225-day episode that begins 2019-07-22, bottoms 2020-06-11 and never recovers inside the window. Across the two validation folds the backtest spans, Sharpe ranges [-0.553, +0.174] with a standard deviation of 0.514, so the point estimate is not distinguishable from fold-to-fold noise. Every one of the 2,358 equal-weight baseline backtests on this label is negative - 786 prediction sets, three concentration arms each. Restricted to the 262 prediction sets with complete fold coverage, which is what the search-risk statistics rank, the 786 rows have mean Sharpe -1.012, median -1.030 and P90 -0.809, and the best of them is -0.481 (`gbm / default_mse`); the best baseline anywhere on the label is -0.311, also gbm. By family the medians are -1.046 (deep_learning, n=540), -1.060 (tabular_dl, 216), -1.074 (gbm, 1,350) and -1.269 (linear, 252). The 60 allocation-stage rows run from -0.8952 to the carrier's -0.2461, which is the best anywhere on the label. The carrier's own 60-variant allocation cohort deflates to DSR_ER -0.0230 (p=0.743). PBO has only two combinations, below the ten-combination reporting threshold.
-
-**Holdout closure.** The carrier was refitted over the holdout interval by [`16_holdout_predictions`](16_holdout_predictions.ipynb) - a training identity of its own, covering a CV interval that ends a full option cycle before the window opens - and traded by [`17_holdout_backtest`](17_holdout_backtest.ipynb). Holdout Sharpe is +0.5622 over 247 sessions. The holdout-minus-validation difference is +0.8083 [-1.5299, +3.2209] (p=0.494) and straddles zero: one year of weekly straddle cohorts is too few independent observations to separate a strategy that turned around from one that had an ordinary year. Against the equal-weight holdout universe (Sharpe +2.7137) the difference is -1.9853 [-3.9036, -0.0619] (p=0.046), which excludes zero on the negative side - over the holdout year the strategy underperforms simply holding the universe it selects from. The holdout never enters selection.
-
-**Friction floor.** The HTM cost grid contains 32 rows across four model families, two universes, and four fractions of the quoted half-spread. Every row is negative, from -0.24 at the lowest fraction to -1.66 at the full spread, and Sharpe falls monotonically in the fraction paid within every family and universe. Premium-denominated option spreads remain the binding constraint.
-
-The printed book records the production environment its results were computed in. This README reports the corrected living-code registry, including the holiday-aware weekly schedule and current model cohort. Hardware and library differences can cause small numerical variation, while the no-edge conclusion should remain stable.
-
 ## Running
 
 Run from the repository root with the project environment. The pipeline requires the materialized AlgoSeek S&P 500 options straddles and matching daily underlying bars under `ML4T_DATA_PATH`. Missing licensed data fails at the loader boundary.
 
-Notebooks 09a and 09b require explicit CUDA. On an RTX 3090, the accepted full runs took about 12 minutes for LSTM and 67 minutes for PatchTST. Other notebooks use the stored registry and artifacts when available. Do not replace a skipped long model with a CPU run; retain the accepted artifact or document the skip.
+Notebooks 09a and 09b require explicit CUDA. On an RTX 3090, full runs took about 12 minutes for LSTM and 67 minutes for PatchTST. Other notebooks use the stored registry and artifacts when available. Do not replace a skipped long model with a CPU run; retain the stored artifact or document the skip.
 
 ```bash
 # From repo root
@@ -95,6 +81,31 @@ uv run python case_studies/sp500_options/18_strategy_analysis.py
 uv run python case_studies/sp500_options/90_ic_diagnostic.py
 ```
 
+## Results
+
+This README describes how the case study is built, not what it found. Results are
+not restated here: the registry is rebuilt whenever the case study is re-derived,
+and a number copied into prose stays correct only until the next rebuild.
+
+[`18_strategy_analysis`](18_strategy_analysis.ipynb) reads the registry back and reports the selected
+configuration with its interval evidence. That notebook, and the registry it reads,
+are where a result comes from.
+
+To read the results without training anything, download the published bundle, which
+carries the registry and the artifacts behind it:
+
+```bash
+uv run python scripts/download_artifacts.py --cs sp500_options
+```
+
+Two bundles are published, and they are separate generations rather than revisions
+of one another. `v3.1.0-artifacts` is current and is what the command above fetches.
+`v3.0.0-artifacts` holds the results as first published. The 3.1 rebuild re-keyed
+every content-addressed hash, so a hash taken from one bundle does not resolve in
+the other.
+
 ## Run Log
 
-Model training runs, predictions, and backtest results are tracked in a content-addressed registry under `run_log/registry.db`.
+`run_log/registry.db` records every training run, prediction set and backtest,
+each addressed by a hash of the specification that produced it. The artifacts sit
+beside it under `run_log/training/`, `run_log/predictions/` and `run_log/backtest/`.
