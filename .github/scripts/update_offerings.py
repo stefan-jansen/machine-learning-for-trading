@@ -112,9 +112,28 @@ def collect(props: dict, now: datetime) -> tuple[list[dict], list[dict]]:
             }
         )
 
+    # Every scheduled cohort, from `course_cohorts`, not one per course from
+    # `next_live_cohort`. That field holds a single cohort, so a course with two
+    # dates on the calendar advertised only the nearer one: `agent-engineering`
+    # was listed on Maven for Oct 3 and Nov 21, 2026 and the README showed Oct 3
+    # alone. It is also None while a cohort is running with no successor
+    # scheduled, which dropped `research-to-production` out of the table entirely.
+    # `course_cohorts` is keyed by `course_id`, so the course record supplies the
+    # name, slug and description and the cohort supplies the dates.
+    courses_by_id = {
+        course.get("course_id") or course.get("id"): course
+        for course in props.get("courses", []) + props.get("paid_workshop_courses", [])
+    }
+
     cohorts = []
-    for course in props.get("courses", []) + props.get("paid_workshop_courses", []):
-        cohort = course.get("next_live_cohort") or {}
+    for cohort in props.get("course_cohorts", []):
+        # A self-paced entry has no start date and belongs in no schedule; an
+        # unlisted one is not on sale. Neither is a date a reader can act on.
+        if cohort.get("visibility") != "listed" or cohort.get("type") != "live":
+            continue
+        course = courses_by_id.get(cohort.get("course_id"))
+        if course is None:
+            continue
         start = parse_instant(cohort.get("start_date"))
         if start is None or start <= now:
             continue
