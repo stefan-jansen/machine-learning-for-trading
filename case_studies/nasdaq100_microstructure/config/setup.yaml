@@ -588,6 +588,21 @@ backtest:
       bars_per_day_grid: [210]            # was 14 bars of 15 minutes; same 3.5h window
       top_k_grid: [5, 10, 20]
       lookback_days: 21
+      # What this grid reaches is not what it declares, and it differs by family.
+      # `long_q` x `max_slots` x `hold_bars` x `exit_signal_q` is 36 combinations per
+      # prediction, and 36 rows per prediction were registered. Measured 2026-09-24
+      # against the canonical registry, on the reported Sharpe, total return and trade
+      # count: `deep_learning` produces 36 distinct outcomes from its 36 rows on all ten
+      # of its prediction sets and `gbm` 35.5 on average over its eighteen, but `linear`
+      # produces **4 or 5** on every one of its eight. Its 288 registered rows carry 36
+      # distinguishable results between them.
+      #
+      # The cause is in `slot_strategy.py`: entries are ranked within the candidate set
+      # and admitted up to free capacity, so raising the entry quantile only removes
+      # names the capacity cap was already excluding. On linear predictions the 0.95 and
+      # 0.99 candidate sets differ only below that cap, and `long_q: 0.90` is the only
+      # level that binds. Read a linear slot count as an upper bound on the search that
+      # was actually run.
     # How the signal stage walks the grid above. Two passes, because the whole
     # grid over every prediction is not affordable here and nothing else in the
     # book has this shape: every other case study declares 2 to 4 entry schemes
