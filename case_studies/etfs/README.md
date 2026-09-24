@@ -30,6 +30,7 @@ The configuration is the most cost-favorable in the book — long-only rank-and-
 | Tabular DL | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | TabM rank-1 adapter MLP ensemble | Training runs and prediction sets; checkpoints under `run_log/training/tabular_dl/` |
 | LSTM | [`09_dl_lstm`](09_dl_lstm.ipynb) | Ch13 | Temporal gating over sequential ETF return windows | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | TSMixer | [`10_dl_tsmixer`](10_dl_tsmixer.ipynb) | Ch13 | Cross-asset lead-lag patterns via time-feature mixing | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
+| NLinear | [`10a_dl_nlinear`](10a_dl_nlinear.ipynb) | Ch13 | The smallest sequence model that still counts as one: no gate, no recurrence, no mixing layer, so it is what the two above have to beat | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | Latent factors (index) | [`11_latent_factors`](11_latent_factors.ipynb) | Ch14 | Index of the five latent-factor notebooks below; prints their best registered IC | Nothing - it reads the registry |
 | PCA | [`11a_pca`](11a_pca.ipynb) | Ch14 | Principal components as the persistent-ID baseline of the suite | Training runs and prediction sets |
 | IPCA | [`11b_ipca`](11b_ipca.ipynb) | Ch14 | Instrumented PCA with characteristics loading the factors | Training runs and prediction sets |
@@ -70,6 +71,7 @@ uv run python case_studies/etfs/07_gbm.py
 uv run python case_studies/etfs/08_tabular_dl.py
 uv run python case_studies/etfs/09_dl_lstm.py
 uv run python case_studies/etfs/10_dl_tsmixer.py
+uv run python case_studies/etfs/10a_dl_nlinear.py
 uv run python case_studies/etfs/11a_pca.py
 uv run python case_studies/etfs/11b_ipca.py
 uv run python case_studies/etfs/11c_conditional_autoencoder.py

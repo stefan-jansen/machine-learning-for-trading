@@ -74,8 +74,9 @@ uv sync --frozen
 for notebook in \
   01_feasibility_analysis 02_labels 03_financial_features 04_model_based_features \
   05_evaluation 06_linear 07_gbm 08_tabular_dl 09_dl_lstm 10_dl_patchtst \
-  11_latent_factors 11a_pca 11b_ipca 11c_conditional_autoencoder \
-  11d_stochastic_discount_factor 11e_supervised_autoencoder 12_causal_dml \
+  11a_pca 11b_ipca 11c_conditional_autoencoder \
+  11d_stochastic_discount_factor 11e_supervised_autoencoder 11_latent_factors \
+  12_causal_dml \
   13_model_analysis 14_backtest 15_portfolio_management 16_risk_management \
   17_costs 18_holdout_predictions 19_holdout_backtest 20_strategy_analysis
 do

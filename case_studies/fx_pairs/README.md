@@ -30,6 +30,7 @@ The pipeline is a study in hypothesis revision, from short-horizon momentum to m
 | Tabular DL | [`08_tabular_dl`](08_tabular_dl.ipynb) | Ch12 | TabM attention-style ensembling on the FX feature matrix | Training runs and prediction sets; checkpoints under `run_log/training/tabular_dl/` |
 | TCN | [`09_dl_tcn`](09_dl_tcn.ipynb) | Ch13 | Dilated causal convolutions for daily FX dynamics | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | NLinear | [`10_dl_nlinear`](10_dl_nlinear.ipynb) | Ch13 | Tests whether FX dynamics are approximately linear | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
+| LSTM | [`10a_dl_lstm`](10a_dl_lstm.ipynb) | Ch13 | The recurrent member of the three architectures the `deep_learning` menu declares; what it carries forward is not fixed the way NLinear's subtraction is | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | Causal DML | [`11_causal_dml`](11_causal_dml.ipynb) | Ch15 | Does FX momentum cause future returns or reflect overshooting? | A row in the registry's `causal_runs` |
 | Model Analysis | [`12_model_analysis`](12_model_analysis.ipynb) | -- | Cross-model IC comparison and fold stability diagnostics | Nothing - it reads the registry |
 | Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Long-short daily FX strategy simulation | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
@@ -95,6 +96,7 @@ uv run python case_studies/fx_pairs/07_gbm.py
 uv run python case_studies/fx_pairs/08_tabular_dl.py
 uv run python case_studies/fx_pairs/09_dl_tcn.py
 uv run python case_studies/fx_pairs/10_dl_nlinear.py
+uv run python case_studies/fx_pairs/10a_dl_lstm.py
 uv run python case_studies/fx_pairs/11_causal_dml.py
 uv run python case_studies/fx_pairs/12_model_analysis.py
 uv run python case_studies/fx_pairs/13_backtest.py

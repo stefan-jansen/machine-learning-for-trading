@@ -34,21 +34,17 @@ costs, and uncertainty from only two validation folds.
 | TCN | [`10_dl_tcn`](10_dl_tcn.ipynb) | Ch13 | Evaluates dilated causal convolutions on the same sequence contract. | Training runs and prediction sets; checkpoints under `run_log/training/deep_learning/` |
 | Causal DML | [`11_causal_dml`](11_causal_dml.ipynb) | Ch15 | Tests whether the basis premium has a causal interpretation after adjustment. | A row in the registry's `causal_runs` |
 | Model analysis | [`12_model_analysis`](12_model_analysis.ipynb) | Ch12-15 | Compares four current family leaders on one physical validation panel. | Nothing - it reads the registry |
-| Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Replays a frozen carrier with completed-bar prices and official funding. | Nothing - it replays a frozen carrier with `register=False` |
-| Portfolio | [`14_portfolio_management`](14_portfolio_management.ipynb) | Ch17 | Compares corrected point-in-time allocation methods on that carrier. | Nothing - it replays a frozen carrier with `register=False` |
-| Risk | [`15_risk_management`](15_risk_management.ipynb) | Ch19 | Evaluates fixed and pre-validation-calibrated position-risk rules. | Nothing - it replays a frozen carrier with `register=False` |
-| Costs | [`16_costs`](16_costs.ipynb) | Ch18 | Measures cost sensitivity and price-only versus funding-inclusive breakevens, on the configuration risk management selected. | Nothing - it replays a frozen carrier with `register=False` |
-| Synthesis | [`19_strategy_analysis`](19_strategy_analysis.ipynb) | Ch20 | Keeps current model evidence separate from frozen carrier diagnostics. | Nothing - it reads the registry |
+| Backtest | [`13_backtest`](13_backtest.ipynb) | Ch16 | Runs every prediction set equally weighted on completed-bar prices and official funding. | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
+| Portfolio | [`14_portfolio_management`](14_portfolio_management.ipynb) | Ch17 | Sizes the survivors six ways, with point-in-time allocation on the small cross-section. | One backtest run per variant, same artifact layout |
+| Risk | [`15_risk_management`](15_risk_management.ipynb) | Ch19 | Fourteen ways of leaving a position early, fixed and pre-validation-calibrated. | One backtest run per variant, same artifact layout |
+| Costs | [`16_costs`](16_costs.ipynb) | Ch18 | How much friction the survivor absorbs: price-only versus funding-inclusive breakevens, on the configuration risk management selected. | One backtest run per variant, same artifact layout |
+| Holdout Predictions | [`17_holdout_predictions`](17_holdout_predictions.ipynb) | Ch20 | Refits the selected configuration on history ending before the holdout window, because a result selected on validation cannot also be the evidence that the selection was sound | one `training_runs` row and one `prediction_sets` row at `split='holdout'` |
+| Holdout Backtest | [`18_holdout_backtest`](18_holdout_backtest.ipynb) | Ch20 | Trades the holdout predictions with the sizing, overlay and costs already settled | one `backtest_runs` row at `stage='holdout'` |
+| Synthesis | [`19_strategy_analysis`](19_strategy_analysis.ipynb) | Ch20 | Makes the one choice the case study exists to make, then reports how many candidates it was the best of, how wide its interval is, and what survives correcting for the selection | Nothing - it reads the registry |
 
 ## Running
 
-Run notebooks from the repository root. Notebooks 07-10 require CUDA; the other notebooks use CPU.
-The complete release pipeline is not yet supported because the current model registry has no
-backtests or cohorts, while notebooks 13-16 preserve a frozen carrier for diagnostic replay. The
-publication lineage must be chosen before the downstream producer sequence can be documented as a
-reader-reproducible run.
-
-The signed current-model sequence is:
+Run notebooks from the repository root. Notebooks 07-10 require CUDA; the rest are CPU.
 
 ```bash
 uv run python case_studies/crypto_perps_funding/01_feasibility_analysis.py
@@ -63,7 +59,20 @@ uv run python case_studies/crypto_perps_funding/09_dl_lstm.py
 uv run python case_studies/crypto_perps_funding/10_dl_tcn.py
 uv run python case_studies/crypto_perps_funding/11_causal_dml.py
 uv run python case_studies/crypto_perps_funding/12_model_analysis.py
+uv run python case_studies/crypto_perps_funding/13_backtest.py
+uv run python case_studies/crypto_perps_funding/14_portfolio_management.py
+uv run python case_studies/crypto_perps_funding/15_risk_management.py
+uv run python case_studies/crypto_perps_funding/16_costs.py
+uv run python case_studies/crypto_perps_funding/17_holdout_predictions.py
+uv run python case_studies/crypto_perps_funding/18_holdout_backtest.py
+uv run python case_studies/crypto_perps_funding/19_strategy_analysis.py
 ```
 
-Notebooks 13-17 are signed for their declared frozen-versus-current boundaries. They are not a
-current end-to-end strategy and should not be combined into one until the release registry is fixed.
+The order matters downstream of 12: the funnel is valid only once every model family has
+registered its predictions and every equal-weight baseline exists, and 17 and 18 open the holdout
+once, on the configuration 19 reports.
+
+## Run Log
+
+Model training runs, predictions, and backtest results are tracked in a content-addressed registry
+under `run_log/registry.db`.
