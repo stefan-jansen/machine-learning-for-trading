@@ -8,7 +8,7 @@ This case study uses AlgoSeek TAQ-derived 15-minute bars for 114 NASDAQ-100 cons
 |----------|-------|
 | Asset Class | US equities (NASDAQ-100) |
 | Frequency | 15-minute bars |
-| Universe | 114 stocks |
+| Universe | 115 stocks |
 | History | 2020--2021 |
 | Primary Label | fwd_ret_15m |
 | CV Folds | 2 (6M train, 6M val) |
@@ -80,6 +80,8 @@ uv run python case_studies/nasdaq100_microstructure/14_backtest.py
 uv run python case_studies/nasdaq100_microstructure/15_portfolio_management.py
 uv run python case_studies/nasdaq100_microstructure/16_risk_management.py
 uv run python case_studies/nasdaq100_microstructure/17_costs.py
+uv run python case_studies/nasdaq100_microstructure/18_holdout_predictions.py
+uv run python case_studies/nasdaq100_microstructure/19_holdout_backtest.py
 uv run python case_studies/nasdaq100_microstructure/20_strategy_analysis.py
 ```
 
