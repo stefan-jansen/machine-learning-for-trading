@@ -143,6 +143,13 @@ the workflow:
 | Oct 24, 2026 | [Loop Engineering: Reliable Work From Coding Agents](https://maven.com/stefan-jansen/loop-engineering) | Get reliable work out of coding agents: harness design, verification, and recovery from a bad run. |
 | Nov 21, 2026 | [Engineering a Multi-Agent Forecasting System](https://maven.com/stefan-jansen/agent-engineering) | Build a multi-agent forecasting system whose reasoning is auditable end to end. |
 
+**Courses with no date on the calendar.** Either self-paced and on sale now, or between cohorts with a waitlist on the course page.
+
+| Offering | How it runs | What you leave with |
+|----------|-------------|---------------------|
+| [ML for Trading: Foundations](https://maven.com/stefan-jansen/ml4t-foundations) | Self-paced, start any time | Build the ML for Trading pipeline yourself, end to end, and the evidence to say what it does and does not establish. |
+| [ML for Trading: From Research to Production](https://maven.com/stefan-jansen/research-to-production) | Next cohort not yet scheduled | Take one research idea from a question to a costed, monitored strategy, with the evidence trail that makes the result checkable. |
+
 **Free live sessions.** Thirty minutes to an hour, no cost, recording sent to everyone who registers.
 
 | When | Session |
