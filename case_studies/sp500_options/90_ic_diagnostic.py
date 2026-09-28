@@ -35,8 +35,9 @@ from ml4t.diagnostic.metrics import compute_ic_uncertainty
 from sklearn.decomposition import PCA
 from sklearn.linear_model import Ridge
 
-from case_studies.sp500_options._ic_diagnostics import daily_ic
+from case_studies.sp500_options._ic_diagnostics import daily_ic, lagged_by_sessions
 from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.coverage import absent_calendar_sessions
 from utils.cv_splits import select_folds
 from utils.modeling import generate_cv_splits, prepare_cv_folds
 from utils.paths import get_case_study_dir
@@ -335,15 +336,33 @@ def mean_daily_ic(frame: pl.DataFrame, feature: str, target: str) -> float:
     return float(mean_ic)
 
 
+# %% [markdown]
+# A lag here is a number of sessions, and it is read off the session list rather than off a
+# symbol's rows. The panel is sparse per name - a name carries a row only on the sessions its
+# selected contract quoted - so the row before a row is often not the session before it, and a
+# shift over rows would put a value from an unknown distance back under the heading "63
+# sessions". Each validation row instead takes the value its name carried exactly `lag` sessions
+# earlier, or nothing if the name did not quote then. That earlier session may fall in a training
+# span; a lagged feature is a value already known at the decision, so reading it there is not a
+# look at anything the fold withholds.
+
 # %% tags=["results"]
 lags = (0, 5, 10, 15, 20, 42, 63)
-lag_panel = validation.select("timestamp", "symbol", "iv_atm_z_252", DIAGNOSTIC_LABEL).sort(
-    "symbol", "timestamp"
+SESSIONS = dataset.get_column("timestamp").unique().sort()
+assert not absent_calendar_sessions(SESSIONS.to_list(), calendar="NYSE"), (
+    "the panel's dates miss an exchange session, so they cannot serve as the session list"
 )
+lag_source = dataset.select("timestamp", "symbol", "iv_atm_z_252")
+validation_keys = validation.select("timestamp", "symbol", "iv_atm_z_252", DIAGNOSTIC_LABEL)
 lag_rows = []
 for lag in lags:
-    shifted = lag_panel.with_columns(
-        pl.col("iv_atm_z_252").shift(lag).over("symbol").alias("iv_lagged")
+    shifted = validation_keys.join(
+        lagged_by_sessions(
+            lag_source, "iv_atm_z_252", lag, alias="iv_lagged", sessions=SESSIONS
+        ).select("symbol", "timestamp", "iv_lagged"),
+        on=["symbol", "timestamp"],
+        how="left",
+        validate="1:1",
     )
     autocorrelation = (
         1.0
