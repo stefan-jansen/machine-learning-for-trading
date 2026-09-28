@@ -100,6 +100,7 @@ from statsmodels.tsa.stattools import adfuller
 from case_studies.utils.artifact_digest import read_digest, value_digest
 from case_studies.utils.coverage import assert_sessions_complete
 from case_studies.utils.cv_window import modeling_fold_boundaries
+from case_studies.utils.feature_engineering import contiguous_run
 from case_studies.utils.temporal import (
     fit_wasserstein_kmeans,
     garch11_conditional_volatility,
@@ -365,7 +366,11 @@ _sessions = (
     .with_columns(pl.col("session").cast(pl.Int64))
 )
 _archive_rows = raw_df.height
-raw_df = raw_df.join(_sessions, on="timestamp", how="inner").sort(["symbol", "timestamp"])
+raw_df = (
+    raw_df.join(_sessions, on="timestamp", how="inner")
+    .with_columns(contiguous_run("session", "symbol").alias("_run"))
+    .sort(["symbol", "timestamp"])
+)
 print(
     f"{_sessions.height:,} of {_dates.height:,} dates in the archive are {CALENDAR} sessions; "
     f"the other {_dates.height - _sessions.height} carry stray prints and take "
@@ -396,8 +401,14 @@ print(
 )
 
 # %%
+# A return is taken within one unbroken run of a stock's sessions, as in `03_financial_features`:
+# where the previous row is not the previous session - a missed print, or a ticker the exchange
+# reassigned to another company - there is no one-session return, and the cross-sectional median
+# and the variance model below would otherwise read a move across months as one day's.
 raw_df = raw_df.with_columns(
-    (pl.col("adj_close") / pl.col("adj_close").shift(1).over("symbol") - 1).alias("returns"),
+    (pl.col("adj_close") / pl.col("adj_close").shift(1).over("symbol", "_run") - 1).alias(
+        "returns"
+    ),
     (pl.col("close") * pl.col("volume")).alias("dollar_volume"),
 )
 raw_df = raw_df.with_columns(
