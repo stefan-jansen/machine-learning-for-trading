@@ -310,6 +310,22 @@ def clip_within_date(
     )
 
 
+def contiguous_run(step: str, over: str | Sequence[str], *, size=1) -> pl.Expr:
+    """Number each unbroken stretch of an entity's rows, in *step* order.
+
+    *step* is a session counter or a timestamp, and *size* the distance between two
+    consecutive observations on it: ``1`` for a session number, a ``timedelta`` for a
+    bar clock. A row whose predecessor in the same entity is not exactly one step back
+    starts a new run. A shift or a rolling window taken over ``[*over, "run"]`` then
+    counts steps rather than rows: across a halt, a vendor outage or a ticker the
+    exchange reassigned it returns nothing instead of a value spanning the gap, and it
+    warms up again after it.
+    """
+    partition = [over] if isinstance(over, str) else list(over)
+    broken = (pl.col(step).diff().over(partition, order_by=step) != size).fill_null(False)
+    return broken.cum_sum().over(partition, order_by=step).cast(pl.UInt32).alias("run")
+
+
 def cross_sectional_percentile(column: str, over: str | Sequence[str]) -> pl.Expr:
     """Percentile position of *column* within each decision timestamp, in (0, 100).
 

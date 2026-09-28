@@ -82,6 +82,7 @@ from case_studies.utils.feature_engineering import (
     EPS,
     assert_values_agree,
     assign_families,
+    contiguous_run,
     cross_sectional_percentile,
     families_from_config,
     family_coverage,
@@ -196,6 +197,15 @@ register_frame(FAMILIES).select(["family", "role", "inputs", "lookback (bars)", 
 # twenty-one settlements. A fixed twenty-one-row sum would then omit real cash flows, so the
 # seven-day total is taken over a seven-day *time* window and counts whatever settlements fall in
 # it. The count of shortened intervals printed below is how much of the sample this affects.
+#
+# **Every per-symbol window in Section C counts settlements, and the panel does not have a row
+# for every one.** The exchange published no bars for some contracts through two outages in
+# 2022, of two and three days, so the row before a row is sometimes days back. A shift or a
+# rolling window over a perpetual's rows would take the move across the outage as one
+# settlement's return and a window spanning it as covering its nominal length. `_run` numbers each
+# unbroken stretch of a perpetual's settlements, and every window below is taken over
+# `SERIES = ["symbol", "_run"]`: across a gap it returns nothing, and it warms up again after it.
+# The count printed below is how many stretches the gaps split the panel into.
 
 # %%
 available_at = (pl.col("timestamp") + pl.duration(hours=BAR_HOURS)).alias("timestamp")
@@ -219,18 +229,31 @@ cashflows = (
     )
     .agg(pl.col("_paid").sum().alias(f"cum_positive_funding_{cashflow_label}"))
 )
-panel = prices.join(
-    funding.select("timestamp", "symbol", "funding_rate"), on=["timestamp", "symbol"], how="left"
-).join(cashflows, on=["timestamp", "symbol"], how="left")
+panel = (
+    prices.join(
+        funding.select("timestamp", "symbol", "funding_rate"),
+        on=["timestamp", "symbol"],
+        how="left",
+    )
+    .join(cashflows, on=["timestamp", "symbol"], how="left")
+    .with_columns(
+        contiguous_run("timestamp", "symbol", size=timedelta(hours=BAR_HOURS)).alias("_run")
+    )
+)
+SERIES = ["symbol", "_run"]
 observability = panel.sort(["symbol", "timestamp"]).select(
-    pl.corr(pl.col("funding_rate"), pl.col("close").log().diff().over("symbol")).alias("backward"),
+    pl.corr(pl.col("funding_rate"), pl.col("close").log().diff().over(SERIES)).alias("backward"),
     pl.corr(
-        pl.col("funding_rate"), pl.col("close").log().diff().over("symbol").shift(-1).over("symbol")
+        pl.col("funding_rate"), pl.col("close").log().diff().over(SERIES).shift(-1).over(SERIES)
     ).alias("forward"),
 )
 print(f"{len(panel):,} settlement bars over {panel['symbol'].n_unique()} perpetuals")
 print(f"{panel['funding_rate'].is_not_null().mean():.4%} of them carry an official settlement")
 print(f"{funding.filter(pl.col('funding_interval_hours') != BAR_HOURS).height} shortened intervals")
+print(
+    f"{panel.select(SERIES).n_unique() - panel['symbol'].n_unique()} gaps in the "
+    f"{BAR_HOURS}-hour bars split a perpetual's history"
+)
 print(f"funding against the interval it is computed from: {observability['backward'][0]:+.4f}")
 print(f"funding against the interval that follows it:     {observability['forward'][0]:+.4f}")
 
@@ -317,13 +340,13 @@ def carry_features(df: pl.DataFrame) -> pl.DataFrame:
     z = CLIP["zscore"]
     df = df.with_columns(
         [
-            rolling_zscore("premium_index_close", bars, "symbol")
+            rolling_zscore("premium_index_close", bars, SERIES)
             .clip(-z, z)
             .alias(f"premium_zscore_{label}")
             for label, bars in W["premium_zscore"].items()
         ]
         + [
-            rolling_zscore("funding_rate", bars, "symbol")
+            rolling_zscore("funding_rate", bars, SERIES)
             .clip(-z, z)
             .alias(f"funding_rate_zscore_{label}")
             for label, bars in W["funding_zscore"].items()
@@ -341,14 +364,14 @@ def carry_features(df: pl.DataFrame) -> pl.DataFrame:
 
 def funding_moments(df: pl.DataFrame, bars: int) -> pl.DataFrame:
     """Trailing covariance of the settlement series with its own lag, and the lag's variance."""
-    lagged = pl.col("funding_rate").shift(1).over("symbol")
+    lagged = pl.col("funding_rate").shift(1).over(SERIES)
     return df.with_columns(
         (
-            (pl.col("funding_rate") * lagged).rolling_mean(bars).over("symbol")
-            - pl.col("funding_rate").rolling_mean(bars).over("symbol")
-            * lagged.rolling_mean(bars).over("symbol")
+            (pl.col("funding_rate") * lagged).rolling_mean(bars).over(SERIES)
+            - pl.col("funding_rate").rolling_mean(bars).over(SERIES)
+            * lagged.rolling_mean(bars).over(SERIES)
         ).alias("_cov"),
-        lagged.rolling_var(bars, ddof=0).over("symbol").alias("_var"),
+        lagged.rolling_var(bars, ddof=0).over(SERIES).alias("_var"),
     )
 
 
@@ -467,20 +490,20 @@ def mean_reversion_features(df: pl.DataFrame) -> pl.DataFrame:
     ranks = percentile_rank_features(RANKED, windows=list(windows.values()))
     return df.with_columns(
         [
-            (pl.col(RANKED) - pl.col(RANKED).rolling_mean(bars).over("symbol")).alias(
+            (pl.col(RANKED) - pl.col(RANKED).rolling_mean(bars).over(SERIES)).alias(
                 f"premium_dev_mean_{label}"
             )
             for label, bars in W["premium_dev_mean"].items()
         ]
         + [
-            ranks[f"rank_{bars}"].over("symbol").alias(f"premium_quantile_pos_{label}")
+            ranks[f"rank_{bars}"].over(SERIES).alias(f"premium_quantile_pos_{label}")
             for label, bars in windows.items()
         ]
         + [
             (pl.col(RANKED) > 0)
             .cast(pl.Float64)
             .rolling_mean(bars)
-            .over("symbol")
+            .over(SERIES)
             .alias(f"premium_persistence_{label}")
             for label, bars in W["premium_persistence"].items()
         ]
@@ -501,13 +524,13 @@ def momentum_features(df: pl.DataFrame) -> pl.DataFrame:
     horizons = W["premium_momentum"]
     df = df.with_columns(
         [
-            (pl.col(RANKED) - pl.col(RANKED).shift(bars).over("symbol")).alias(
+            (pl.col(RANKED) - pl.col(RANKED).shift(bars).over(SERIES)).alias(
                 f"premium_change_{label}"
             )
             for label, bars in horizons.items()
         ]
         + [
-            (pl.col("funding_rate") - pl.col("funding_rate").shift(bars).over("symbol")).alias(
+            (pl.col("funding_rate") - pl.col("funding_rate").shift(bars).over(SERIES)).alias(
                 f"funding_rate_change_{label}"
             )
             for label, bars in W["funding_change"].items()
@@ -539,13 +562,13 @@ def volatility_features(df: pl.DataFrame) -> pl.DataFrame:
     """Trailing dispersion of the premium and of the price, plus short-over-long ratios."""
     df = df.with_columns(
         [
-            pl.col("_premium_change").rolling_std(bars).over("symbol").alias(f"premium_vol_{label}")
+            pl.col("_premium_change").rolling_std(bars).over(SERIES).alias(f"premium_vol_{label}")
             for label, bars in W["premium_volatility"].items()
         ]
         + [
-            trailing_volatility(
-                "_log_return", bars, "symbol", periods_per_year=BARS_PER_YEAR
-            ).alias(f"price_vol_{label}")
+            trailing_volatility("_log_return", bars, SERIES, periods_per_year=BARS_PER_YEAR).alias(
+                f"price_vol_{label}"
+            )
             for label, bars in W["price_volatility"].items()
         ]
     )
@@ -616,7 +639,7 @@ def regime_features(df: pl.DataFrame) -> pl.DataFrame:
             .then(1.0)
             .otherwise(-1.0)
             .rolling_mean(bars)
-            .over("symbol")
+            .over(SERIES)
             .alias(f"premium_regime_{label}")
             for label, bars in W["premium_regime"].items()
         ]
@@ -626,14 +649,11 @@ def regime_features(df: pl.DataFrame) -> pl.DataFrame:
                 - 100
                 / (
                     1
-                    + pl.col("_premium_change")
-                    .clip(lower_bound=0)
-                    .rolling_mean(bars)
-                    .over("symbol")
+                    + pl.col("_premium_change").clip(lower_bound=0).rolling_mean(bars).over(SERIES)
                     / (-pl.col("_premium_change"))
                     .clip(lower_bound=0)
                     .rolling_mean(bars)
-                    .over("symbol")
+                    .over(SERIES)
                     .clip(lower_bound=EPS)
                 )
             ).alias(f"premium_rsi_{label}")
@@ -674,8 +694,8 @@ def per_symbol_features(df: pl.DataFrame) -> pl.DataFrame:
     return (
         df.sort(["symbol", "timestamp"])
         .with_columns(
-            (pl.col(RANKED) - pl.col(RANKED).shift(1).over("symbol")).alias("_premium_change"),
-            pl.col("close").log().diff().over("symbol").alias("_log_return"),
+            (pl.col(RANKED) - pl.col(RANKED).shift(1).over(SERIES)).alias("_premium_change"),
+            pl.col("close").log().diff().over(SERIES).alias("_log_return"),
         )
         .pipe(carry_features)
         .pipe(mean_reversion_features)
@@ -719,8 +739,9 @@ print(f"{len(built):,} pass the gate and carry the {len(XS_COLS)} within-settlem
 # ### D.1 What each construction reads
 #
 # Three kinds of operation appear above. A **rolling** window ends at its own row and reads a fixed
-# number of settlements backward, always `.over("symbol")`, so a shift means "the previous
-# settlement for this perpetual" and never "the previous row in the file". A **cross-sectional**
+# number of settlements backward, always `.over(SERIES)`, so a shift means "the previous
+# settlement for this perpetual" and never "the previous row in the file" - the run in `SERIES`
+# is what keeps that true across a gap in the bars. A **cross-sectional**
 # statistic - the three in C.5 and the percentile - is taken with `.over("timestamp")`, so it reads
 # every perpetual at that settlement and no other date. A **time-based rolling** aggregate builds
 # the seven-day cash flow on the settlement series' own clock, which is what lets it span an
@@ -737,7 +758,9 @@ print(f"{len(built):,} pass the gate and carry the {len(XS_COLS)} within-settlem
 # fallback instead of a null - a column that reports a value from the first bar of the sample has
 # a default somewhere, and a default is indistinguishable from an estimate once it is in a model.
 #
-# It runs on the panel before the gate, because the gate drops the warmup stretch it measures.
+# It runs on the panel before the gate, because the gate drops the warmup stretch it measures, and
+# it runs per stretch of `SERIES` rather than per perpetual, so a window that did not restart after
+# a gap in the bars would fail it too.
 
 # %%
 warmup_audit(
@@ -753,7 +776,7 @@ warmup_audit(
         "vol_ratio_medium": W["premium_volatility"]["336h"],
         "premium_regime_72h": W["premium_regime"]["72h"],
     },
-    entity="symbol",
+    entity=SERIES,
 )
 
 # %% [markdown]
@@ -927,9 +950,9 @@ plot_timing_contract(
 )
 
 # %% [markdown] tags=["results"]
-# The matrix carries **39 features** on **99,877 rows** across **19 perpetuals**, from
-# **2020-01-31** to **2025-12-31**, under content digest **873623a4af13b3fc**. Assembly discarded
-# **8,421** of the **108,298** settlement bars the panel starts with, and the **537** missing
+# The matrix carries **39 features** on **99,197 rows** across **19 perpetuals**, from
+# **2020-01-31** to **2025-12-31**, under content digest **8e2640cd5107505f**. Assembly discarded
+# **9,101** of the **108,298** settlement bars the panel starts with, and the **537** missing
 # premium-index observations in the input account for most of that rather than the warmup does.
 
 # %%
@@ -1201,8 +1224,9 @@ render_quality_report(report)
 # removes a stretch of ninety periods rather than a row - and when enough perpetuals are shadowed
 # at once, the period falls below `MIN_CROSS_SECTION` and is dropped for every perpetual on it,
 # including ones whose own premium was fine. That is why the loss appears as holes inside eighteen
-# spans while the price bars are complete: there is no gap in the panel behind any of these keys,
-# and the check below confirms it before attributing them.
+# spans. The price bars are the other candidate: the gaps Section B counts restart every window
+# after them, so a key within ninety periods of one is missing for that reason. The check below
+# counts those separately before attributing the rest.
 
 # %%
 sessions = panel.select("timestamp").unique().sort("timestamp").with_row_index("i")
@@ -1220,8 +1244,11 @@ behind = (
     .group_by(["symbol", "i"])
     .len()
 )
-short_history = behind.filter(pl.col("len") < LEADING_BUDGET).height
-print(f"price bars behind: {short_history} of {missing_at.height:,} keys have a gap in the panel")
+bar_gap = behind.filter(pl.col("len") < LEADING_BUDGET).select("symbol", "i")
+print(
+    f"price bars behind: {bar_gap.height:,} of {missing_at.height:,} keys have a gap in the panel "
+    f"within the {LEADING_BUDGET} periods before them"
+)
 
 no_premium = (
     panel.filter(pl.col("premium_index_close").is_null())
@@ -1242,32 +1269,36 @@ attributed = pl.concat(
         missing_at.join(shadow, on=["symbol", "i"], how="semi").select("symbol", "timestamp"),
     ]
 ).unique()
+after_bar_gap = missing_at.join(bar_gap, on=["symbol", "i"], how="semi").select(
+    "symbol", "timestamp"
+)
+unexplained = missing_at.height - pl.concat([attributed, after_bar_gap]).unique().height
 print(
     f"of {missing_at.height:,} missing keys outside the warmup, {attributed.height:,} "
     f"({attributed.height / missing_at.height:.2%}) sit within {LEADING_BUDGET} periods of a "
     f"settlement with no premium index, or on a period the cross-section filter dropped as a "
-    f"consequence; {missing_at.height - attributed.height:,} are accounted for by neither"
+    f"consequence; {after_bar_gap.join(attributed, on=['symbol', 'timestamp'], how='anti').height:,} "
+    f"more follow a gap in the price bars; {unexplained:,} are accounted for by none of these"
 )
 
 # %% [markdown]
 # ### Sign-off
 #
-# **Coverage is 92.22% of the keys the labels declare, and the shortfall has one cause with a
-# knock-on rather than the two it looks like.** 1,710 keys are the warmup: all 19 perpetuals lose
+# **Coverage is 91.60% of the keys the labels declare, and the shortfall has one main cause with a
+# knock-on, plus the gaps in the price bars.** 1,710 keys are the warmup: all 19 perpetuals lose
 # exactly 90 periods, the longest trailing window the null policy waits for, and none loses more.
-# The other 6,710 sit inside or after a perpetual's span, which no window length explains, and
-# **the price panel has no gap behind a single one of them** - the check above establishes that
-# before attributing anything, because a missing bar would have been the obvious answer and is not
-# the answer here.
+# The other 7,390 sit inside or after a perpetual's span. **720 of them follow a gap in the price
+# bars** - the eight outages Section B counts, after which every window warms up again rather than
+# reading across the gap - and the check above separates them before attributing anything else.
 #
-# What removes them is the premium index. A settlement with no premium value takes the premium
-# features down for the ninety periods that read back through it, so one absent value costs a
+# What removes most of the rest is the premium index. A settlement with no premium value takes the
+# premium features down for the ninety periods that read back through it, so one absent value costs a
 # stretch rather than a row; and when enough perpetuals are shadowed at once the period falls below
 # `MIN_CROSS_SECTION` and is dropped for every perpetual on it, including ones whose own premium
-# was fine. **That accounts for 5,642 of the 6,710**, and the two effects overlap heavily because
+# was fine. **That accounts for 5,642 of the 7,390**, and the two effects overlap heavily because
 # the second is caused by the first rather than being independent of it.
 #
-# **1,068 keys - 1.0% of the label universe - are accounted for by neither**, and that is the
+# **1,028 keys - 0.9% of the label universe - are accounted for by none of these**, and that is the
 # number this notebook carries forward rather than a number it explains away. Widening the window
 # to 132 or 180 periods moves it by less than half a percent, so they are not a longer shadow;
 # they are something else, small enough not to change a fold or a ranking and large enough to be
