@@ -1,46 +1,42 @@
-# Machine Learning for Trading — 3rd Edition
+# Machine Learning for Trading, 3rd Edition
 
-**Build, test, and deploy ML-driven trading strategies — from data sourcing to live execution.**
+**Build, test, and deploy ML-driven trading strategies, from data sourcing to live execution.**
 
-This repository hosts the code for [*Machine Learning for Trading, 3rd Edition*](https://amzn.to/4eigy2F)
-by [Stefan Jansen](https://www.linkedin.com/in/applied-ai/) — a ground-up
-rebuild, organized around one end-to-end workflow: how you define a research idea and develop it iteratively into a
-strategy you can actually run, and keep running, in a live market.
-
-- [Nine case studies](https://www.ml4trading.io/case-studies/) illustrate the workflow throughout the 27 chapters of the
-  book, from raw data through features, models, backtests, costs, and risk to deployment.
-- **Generative AI** and **autonomous agents** are new to this edition and cut across that workflow, bringing
-  retrieval-augmented generation, knowledge graphs, and multi-agent systems to financial research.
-- The [companion website](https://ml4trading.io) features [112 primers](https://ml4trading.io/primer/),
-  [61 agent skills](https://ml4trading.io/skills/),
-  and [six production Python libraries](https://ml4trading.io/libraries/)
-  that facilitate substantial parts of the workflow.
-
-**Start here: [Installation](docs/installation.md)** walks a blank Linux, Windows or macOS
-machine to a running notebook, prerequisites included. The short version is under
-[Quick Start](#quick-start) below.
-
-<!-- offerings:next start -->
-> **Next free session:** [Can AI agents improve themselves?](https://maven.com/p/cf1c90), a 30-minute live session on **Thursday, October 1, 2026, 11:00 AM ET / 15:00 UTC**. [All courses, workshops, and free lessons](https://ml4trading.io/courses/?utm_source=github&utm_medium=readme&utm_campaign=ml4t3e&utm_content=offerings).
-<!-- offerings:next end -->
+The code for [*Machine Learning for Trading, 3rd Edition*](https://amzn.to/4eigy2F) by
+[Stefan Jansen](https://www.linkedin.com/in/applied-ai/): 27 chapters and nine case studies, rebuilt
+from the ground up around one end-to-end workflow. How a research idea becomes a strategy you can
+run, and keep running, in a live market.
 
 <p align="center">
   <a href="https://amzn.to/4eigy2F"><img src="assets/cover.png" width="45%" alt="Machine Learning for Trading, 3rd Edition"></a>
 </p>
+
+**Looking for the second edition?** It is complete and stable on the `second-edition` branch:
+`git checkout second-edition`, and everything is exactly where that book describes it.
+
+## Contents
+
+- [What's new in the third edition](#whats-new-in-the-third-edition)
+- [Nine case studies](#nine-case-studies), the structural centerpiece of this edition
+- [Courses and workshops](#courses-and-workshops)
+- [The code, chapter by chapter](#the-code-chapter-by-chapter), 27 chapter guides
+- [Quick start](#quick-start): install, download the data, run your first notebook
+- [Companion resources](#companion-resources): primers, agent skills, and the six libraries
+- [Repository layout](#repository-layout)
 
 ---
 
 ## What's New in the Third Edition
 
 The whole book traces one path: from data infrastructure and strategy research, across an *evidence boundary* that
-separates tuning from evaluation, to deployment and monitoring — with a feedback loop that retrains, pauses, or
+separates tuning from evaluation, to deployment and monitoring, with a feedback loop that retrains, pauses, or
 retires a strategy as its edge decays.
 
 <p align="center">
   <img src="assets/workflow.png" width="90%" alt="The ML4T workflow: data infrastructure and strategy research, an evidence boundary separating tuning from evaluation, and deployment with a retrain/pause/retire feedback loop">
 </p>
 
-Where earlier editions moved technique by technique, the third edition runs that one process end to end — and adds
+Where earlier editions moved technique by technique, the third edition runs that one process end to end, and adds
 substantial new material:
 
 - **A wider model toolkit**: from gradient boosting (XGBoost, LightGBM, CatBoost) to deep time-series architectures
@@ -61,7 +57,7 @@ substantial new material:
   history is short.
 
 Methodological rigor is treated as a first-class topic rather than an afterthought. The book draws an explicit line
-between exploration and confirmation — the *evidence boundary* — uses walk-forward cross-validation throughout, and
+between exploration and confirmation, the *evidence boundary*, uses walk-forward cross-validation throughout, and
 confronts the multiple-testing and overfitting problems that quietly invalidate most backtests, with tools like the
 Deflated Sharpe Ratio, the Rademacher Anti-Serum, and White's Reality Check, plus conformal prediction for honest
 uncertainty estimates.
@@ -75,7 +71,7 @@ and visualization stack.
 The structural centerpiece of the third edition is **[nine case studies](case_studies/)** that run the length of the
 book. ETFs, crypto
 perpetuals, intraday equities, options, FX, futures, and equity factor panels are each carried through the *same*
-pipeline — from raw data and labels to features, models, backtests, costs, risk overlays, and a final deployment
+pipeline, from raw data and labels to features, models, backtests, costs, risk overlays, and a final deployment
 assessment. One disciplined process applied to nine very different markets shows where it works, where it breaks, and
 why.
 
@@ -91,83 +87,55 @@ why.
 | [S&P 500 Options](case_studies/sp500_options/)                          | Options            | Daily     | Options-only strategies (straddles, delta-hedged positions)                  |
 | [US Equities](case_studies/us_equities_panel/)                          | Equities           | Daily     | Broad cross-section of US stocks with classic factor exposures               |
 
-### Companion Resources
-
-The [companion website](https://ml4trading.io) carries three things the chapters
-lean on but do not reprint.
-
-- **[112 primers](https://ml4trading.io/primer/)** are free, open explainers, one
-  page per concept, covering what a chapter assumes you already know: limit order
-  book mechanics, bitemporal data models, fractional differencing, multiple
-  testing in factor research, conformal prediction, the deflated Sharpe ratio,
-  hierarchical risk parity, Almgren-Chriss execution, walk-forward validation.
-  Nothing to install and nothing to sign up for.
-- **[61 agent skills](https://ml4trading.io/skills/)** are task recipes for coding
-  agents, each carrying the same guards against lookahead bias, leakage, and
-  multiple testing that the task needs when a person does it by hand. They span
-  the research loop: building bars and triple-barrier labels, feature selection,
-  purged walk-forward CV, cost models and tear sheets, position sizing, kill
-  switches, live monitoring. Browsing the catalog is free; opening a skill's
-  detail requires a website account.
-- **[Six Python libraries](https://ml4trading.io/libraries/)** carry the pipeline
-  the notebooks are built on, one per stage of the workflow. They are listed
-  below and each is documented and usable on its own.
-
 ---
 
-## The ML4T Libraries
+## Courses and Workshops
 
-The notebooks are built on six production Python packages, each documented and usable on its own — one per stage of
-the workflow:
-
-| Library                                                     | Stage      | What it does                                                                   |
-|-------------------------------------------------------------|------------|--------------------------------------------------------------------------------|
-| [`ml4t-data`](https://ml4trading.io/docs/data/)             | Data       | Unified market-data acquisition from 19+ providers behind one interface        |
-| [`ml4t-engineer`](https://ml4trading.io/docs/engineer/)     | Signal     | Features, labels, alternative bars, and leakage-safe dataset preparation       |
-| [`ml4t-models`](https://ml4trading.io/docs/models/)         | Models     | Finance-native latent factors, SDFs, direct prediction, and portfolio learning |
-| [`ml4t-diagnostic`](https://ml4trading.io/docs/diagnostic/) | Evaluation | Feature validation, strategy diagnostics, and the Deflated Sharpe Ratio        |
-| [`ml4t-backtest`](https://ml4trading.io/docs/backtest/)     | Strategy   | Event-driven backtesting with realistic execution                              |
-| [`ml4t-live`](https://ml4trading.io/docs/live/)             | Deployment | Production trading with broker integrations                                    |
-
----
-
-## Courses, Workshops, and Free Lessons
+Live cohorts, one-day workshops, and free sessions, all scheduled on
+[Maven](https://maven.com/stefan-jansen). The listing below is generated daily from that schedule.
 
 <!-- offerings:all start -->
-**Cohorts and workshops.** Live, scheduled, and worked through with direct feedback on your own research.
+### Machine Learning for Trading
 
-| Starts | Offering | What you leave with |
-|--------|----------|---------------------|
-| Oct 3, 2026 | [Engineering a Multi-Agent Forecasting System](https://maven.com/stefan-jansen/agent-engineering) | Build a multi-agent forecasting system whose reasoning is auditable end to end. |
+The workflow this repository implements, taught end to end.
+
+| When | Offering | What you leave with |
+|------|----------|---------------------|
+| Self-paced | [Foundations](https://maven.com/stefan-jansen/ml4t-foundations) | Build the ML for Trading pipeline yourself, end to end, and the evidence to say what it does and does not establish. |
 | Oct 10, 2026 | [ML for Trading in the Age of AI Agents](https://maven.com/stefan-jansen/ml4t-ai-agents) | Run the whole ML for Trading workflow once, end to end, in a single session. |
+| Dec 3 – Feb 18, 2027 | [Research to Production](https://maven.com/stefan-jansen/research-to-production) | Take one research idea from a question to a costed, monitored strategy, with the evidence trail that makes the result checkable. |
+
+**Free live sessions**, with the recording sent to everyone who registers: [How AI Agents Change the ML for Trading Workflow](https://maven.com/p/222e36) (Wed, Oct 7, 11:00 AM ET / 15:00 UTC)
+
+### Agentic systems
+
+Designing multi-agent systems whose reasoning can be audited.
+
+| When | Offering | What you leave with |
+|------|----------|---------------------|
+| Oct 3, 2026 · Nov 21, 2026 | [Engineering a Multi-Agent Forecasting System](https://maven.com/stefan-jansen/agent-engineering) | Build a multi-agent forecasting system whose reasoning is auditable end to end. |
+
+**Free live sessions**, with the recording sent to everyone who registers: [Can AI agents improve themselves?](https://maven.com/p/cf1c90) (Thu, Oct 1, 11:00 AM ET / 15:00 UTC) · [Why Multi-Agent Systems Break, and How To Fix It](https://maven.com/p/393eee) (Wed, Nov 4, 11:00 AM ET / 16:00 UTC)
+
+### Coding agents
+
+Getting reliable work out of the agents you code with.
+
+| When | Offering | What you leave with |
+|------|----------|---------------------|
 | Oct 24, 2026 | [Loop Engineering: Reliable Work From Coding Agents](https://maven.com/stefan-jansen/loop-engineering) | Get reliable work out of coding agents: harness design, verification, and recovery from a bad run. |
-| Nov 21, 2026 | [Engineering a Multi-Agent Forecasting System](https://maven.com/stefan-jansen/agent-engineering) | Build a multi-agent forecasting system whose reasoning is auditable end to end. |
-| Dec 3 – Feb 18, 2027 | [ML for Trading: From Research to Production](https://maven.com/stefan-jansen/research-to-production) | Take one research idea from a question to a costed, monitored strategy, with the evidence trail that makes the result checkable. |
-
-**Courses with no date on the calendar.** Either self-paced and on sale now, or between cohorts with a waitlist on the course page.
-
-| Offering | How it runs | What you leave with |
-|----------|-------------|---------------------|
-| [ML for Trading: Foundations](https://maven.com/stefan-jansen/ml4t-foundations) | Self-paced, start any time | Build the ML for Trading pipeline yourself, end to end, and the evidence to say what it does and does not establish. |
-
-**Free live sessions.** Thirty minutes to an hour, no cost, recording sent to everyone who registers.
-
-| When | Session |
-|------|---------|
-| Thu, Oct 1, 11:00 AM ET / 15:00 UTC | [Can AI agents improve themselves?](https://maven.com/p/cf1c90) |
-| Wed, Oct 7, 11:00 AM ET / 15:00 UTC | [How AI Agents Change the ML for Trading Workflow](https://maven.com/p/222e36) |
-| Wed, Nov 4, 11:00 AM ET / 16:00 UTC | [Why Multi-Agent Systems Break, and How To Fix It](https://maven.com/p/393eee) |
 
 *Between cohorts, the [**Insights** newsletter](https://insights.ml4trading.io/) covers the same ground weekly, source by source.*
 <!-- offerings:all end -->
 
 ---
 
-## The Book, Chapter by Chapter
+## The Code, Chapter by Chapter
 
-An introduction and a closing chapter bookend six workflow-aligned parts. Every
-chapter title links to its own guide, which carries the full description, the
-notebooks, and the data each one needs.
+One directory per chapter, each opening with a guide that maps the chapter's sections onto the
+notebooks that implement them and lists the data each one needs. The book carries no code listings,
+so these guides are where a chapter's implementation lives: read a chapter, then open its directory.
+An introduction and a closing chapter bookend six workflow-aligned parts.
 
 ### Introduction
 
@@ -345,7 +313,7 @@ on **one** of the two paths:
 # Option B, local uv. Open the tokenized URL it prints, in full.
 ML4T_DATA_PATH="${ML4T_DATA_PATH:-$PWD/data}" uv run jupyter lab
 
-# Option A, Docker. Then open http://localhost:8888 in your browser — no token.
+# Option A, Docker. Then open http://localhost:8888 in your browser, no token.
 docker compose up ml4t
 ```
 
@@ -370,8 +338,36 @@ preamble. Full details in the **[Docker environments guide](envs/README.md)**.
 | `benchmark`  | Database clients (TimescaleDB, ClickHouse, QuestDB, InfluxDB)    | Ch02 storage benchmarks |
 | `rapids`     | RAPIDS cuML + LightGBM CUDA (build locally)                      | One Ch12 GPU benchmark  |
 
-**Looking for the second edition?** It is complete and stable on the `second-edition` branch —
-`git checkout second-edition`, and everything is exactly where the book describes it.
+---
+
+## Companion Resources
+
+The [companion website](https://ml4trading.io) carries three things the chapters lean on but do not
+reprint.
+
+- **[112 primers](https://ml4trading.io/primer/)** are free, open explainers, one page per concept,
+  covering what a chapter assumes you already know: limit order book mechanics, bitemporal data
+  models, fractional differencing, multiple testing in factor research, conformal prediction, the
+  deflated Sharpe ratio, hierarchical risk parity, Almgren-Chriss execution, walk-forward
+  validation. Nothing to install and nothing to sign up for.
+- **[61 agent skills](https://ml4trading.io/skills/)** are task recipes for coding agents, each
+  carrying the same guards against lookahead bias, leakage, and multiple testing that the task needs
+  when a person does it by hand. They span the research loop: building bars and triple-barrier
+  labels, feature selection, purged walk-forward CV, cost models and tear sheets, position sizing,
+  kill switches, live monitoring. Browsing the catalog is free; opening a skill's detail requires a
+  website account.
+- **[Six Python libraries](https://ml4trading.io/libraries/)** carry the pipeline the notebooks are
+  built on, one per stage of the workflow. Each is a production package, documented and usable on
+  its own:
+
+| Library                                                     | Stage      | What it does                                                                   |
+|-------------------------------------------------------------|------------|--------------------------------------------------------------------------------|
+| [`ml4t-data`](https://ml4trading.io/docs/data/)             | Data       | Unified market-data acquisition from 19+ providers behind one interface        |
+| [`ml4t-engineer`](https://ml4trading.io/docs/engineer/)     | Signal     | Features, labels, alternative bars, and leakage-safe dataset preparation       |
+| [`ml4t-models`](https://ml4trading.io/docs/models/)         | Models     | Finance-native latent factors, SDFs, direct prediction, and portfolio learning |
+| [`ml4t-diagnostic`](https://ml4trading.io/docs/diagnostic/) | Evaluation | Feature validation, strategy diagnostics, and the Deflated Sharpe Ratio        |
+| [`ml4t-backtest`](https://ml4trading.io/docs/backtest/)     | Strategy   | Event-driven backtesting with realistic execution                              |
+| [`ml4t-live`](https://ml4trading.io/docs/live/)             | Deployment | Production trading with broker integrations                                    |
 
 ---
 
@@ -379,7 +375,7 @@ preamble. Full details in the **[Docker environments guide](envs/README.md)**.
 
 ```text
 machine-learning-for-trading/
-├── 01_process_is_edge/ … 27_systematic_edge/   27 chapters — Jupytext .py + .ipynb, each with a README
+├── 01_process_is_edge/ … 27_systematic_edge/   27 chapters, Jupytext .py + .ipynb, each with a README
 ├── case_studies/     nine datasets carried through the full pipeline (Ch6 → Ch20)
 ├── data/             download scripts and loaders for every dataset      → data/README.md
 ├── utils/            shared config, paths, styling, modeling, and CV code → utils/README.md

@@ -159,15 +159,105 @@ def test_a_workshop_between_cohorts_is_not_advertised():
     assert standing == []
 
 
-def test_the_standing_table_renders_with_its_own_columns():
-    """A dated table cannot carry a row with no date, so the block needs a second one."""
+def test_an_undated_offering_shares_the_dated_table():
+    """One table per theme, so a self-paced seat and a cohort sit in the same one.
+
+    The two tables this replaces were cut by scheduling mechanics, which put the
+    course most readers of the repository want under a heading reading "Courses with
+    no date on the calendar". The `When` cell carries the distinction instead.
+    """
     props = _props(
         [_course(9, "ml4t-foundations", "Foundations", None, fmt="full_course")],
         [_cohort(9, None, type="self_paced")],
     )
     lessons, cohorts, standing = offerings.collect(props, NOW)
     block = offerings.render_all(lessons, cohorts, standing)
-    assert "| Offering | How it runs | What you leave with |" in block
-    assert "| [Foundations](https://maven.com/stefan-jansen/ml4t-foundations) |" in block
-    assert "Self-paced, start any time" in block
+    assert "| When | Offering | What you leave with |" in block
+    assert (
+        "| Self-paced | [Foundations](https://maven.com/stefan-jansen/ml4t-foundations) |" in block
+    )
+    assert "| Offering | How it runs | What you leave with |" not in block
     assert "Nothing is on the calendar right now" not in block
+
+
+def test_an_undated_offering_sorts_above_a_dated_one():
+    """A reader who can start today should not read a date column to find that out."""
+    props = _props(
+        [
+            _course(9, "ml4t-foundations", "Foundations", None, fmt="full_course"),
+            _course(10, "research-to-production", "R2P", None, fmt="full_course"),
+        ],
+        [_cohort(9, None, type="self_paced"), _cohort(10, "2026-12-03T14:00:00Z")],
+    )
+    block = offerings.render_all(*offerings.collect(props, NOW))
+    assert block.index("| Self-paced |") < block.index("| Dec 3, 2026 |")
+
+
+def test_two_cohorts_of_one_course_render_as_one_row_carrying_both_dates():
+    """#1130 required both dates to appear; two identical rows is not how.
+
+    The title and the blurb come from the course, so a second cohort repeats every
+    cell but the date. The dates merge into the one row instead.
+    """
+    props = _props(
+        [_course(11, "agent-engineering", "Agent Engineering", None)],
+        [_cohort(11, "2026-10-03T14:00:00Z"), _cohort(11, "2026-11-21T14:00:00Z")],
+    )
+    block = offerings.render_all(*offerings.collect(props, NOW))
+    assert "| Oct 3, 2026 \u00b7 Nov 21, 2026 |" in block
+    assert block.count("[Agent Engineering]") == 1
+
+
+def test_an_unmapped_slug_still_renders():
+    """A new course must not vanish from the front page because a dict was not updated.
+
+    That is the failure #1130 and #1132 were both instances of, and a theme map is a
+    fresh way to reintroduce it. Negative control for the OTHER_THEME fallback: the
+    slug is absent from THEMES and the row is still on the page.
+    """
+    assert "brand-new-course" not in offerings.THEMES
+    props = _props(
+        [_course(12, "brand-new-course", "Brand New", None)],
+        [_cohort(12, "2026-10-03T14:00:00Z")],
+    )
+    block = offerings.render_all(*offerings.collect(props, NOW))
+    assert "[Brand New](https://maven.com/stefan-jansen/brand-new-course)" in block
+
+
+def test_a_theme_with_nothing_scheduled_renders_no_heading():
+    """An empty theme heading reads as an offering that was cancelled."""
+    props = _props(
+        [_course(13, "loop-engineering", "Loop", None)],
+        [_cohort(13, "2026-10-24T14:00:00Z")],
+    )
+    block = offerings.render_all(*offerings.collect(props, NOW))
+    assert "### Coding agents" in block
+    assert "### Agentic systems" not in block
+
+
+def test_display_names_drop_the_prefix_the_heading_already_carries():
+    assert (
+        offerings.display_name("ml4t-foundations", "ML for Trading: Foundations") == "Foundations"
+    )
+    assert (
+        offerings.display_name(
+            "research-to-production", "ML for Trading: From Research to Production"
+        )
+        == "Research to Production"
+    )
+    # A course with no entry keeps whatever Maven calls it.
+    assert (
+        offerings.display_name("agent-engineering", "Engineering a Thing") == "Engineering a Thing"
+    )
+
+
+def test_a_free_lesson_is_themed_by_title_most_specific_first():
+    """The keywords overlap on purpose, so the order is the behaviour under test."""
+    theme = offerings.theme_for_lesson
+    # Names both "coding agents" and nothing else: the specific rule wins.
+    assert theme("How to Be Productive with Coding Agents, Beyond Code") == "coding-agents"
+    # Names agents twice and trading once; trading is checked first and wins.
+    assert theme("How AI Agents Change the ML for Trading Workflow") == "ml4t"
+    assert theme("Why Multi-Agent Systems Break, and How To Fix It") == "agents"
+    # Negative control: no keyword at all falls back rather than being dropped.
+    assert theme("A session about nothing in particular") == offerings.OTHER_THEME
