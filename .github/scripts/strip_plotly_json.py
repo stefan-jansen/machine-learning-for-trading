@@ -87,6 +87,18 @@ def strip_plotly(raw: str) -> tuple[str, int, int]:
     return json.dumps(nb, indent=1, ensure_ascii=False) + "\n", stripped, skipped
 
 
+def _display(path: Path) -> str:
+    """Repo-relative where that is meaningful, absolute otherwise.
+
+    A notebook outside the repository is a legitimate argument - a scratch copy, a
+    file under review - and must not crash the run just to print its name.
+    """
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _process(path: Path, *, check: bool) -> tuple[bool, int, int]:
     raw = path.read_text(encoding="utf-8")
     new, stripped, skipped = strip_plotly(raw)
@@ -101,7 +113,10 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="report only; exit 1 if any would change")
     args = ap.parse_args()
 
-    paths = args.notebooks or _iter_notebooks()
+    # Resolve before anything prints a path. A relative argument - which is how anyone
+    # types one - reached `relative_to(REPO_ROOT)` unresolved and raised ValueError, but
+    # only once there was something to report, so a run over an already-clean tree hid it.
+    paths = [p.resolve() for p in args.notebooks] or _iter_notebooks()
     dirty: list[Path] = []
     total_stripped = total_skipped = 0
     saved = 0
@@ -111,8 +126,9 @@ def main() -> int:
         total_stripped += stripped
         total_skipped += skipped
         if skipped:
-            rel = path.relative_to(REPO_ROOT)
-            print(f"{rel}: {skipped} Plotly output(s) with no static fallback, left alone")
+            print(
+                f"{_display(path)}: {skipped} Plotly output(s) with no static fallback, left alone"
+            )
         if changed:
             dirty.append(path)
             saved += before - (before if args.check else path.stat().st_size)
@@ -126,7 +142,7 @@ def main() -> int:
     if not args.check:
         print(f"{saved / 1e6:.1f} MB removed")
     for path in dirty:
-        print(f"  {path.relative_to(REPO_ROOT)}")
+        print(f"  {_display(path)}")
     return 1 if args.check else 0
 
 

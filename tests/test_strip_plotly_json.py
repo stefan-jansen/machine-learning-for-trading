@@ -134,6 +134,32 @@ def test_other_mime_types_in_the_same_output_survive():
     assert set(data) == {"image/png", "text/html", "text/plain"}
 
 
+def test_a_relative_path_is_reported_not_crashed(tmp_path, monkeypatch, capsys):
+    """How anyone actually types a path, and it raised ValueError.
+
+    `relative_to(REPO_ROOT)` on an unresolved relative argument raises, but only on
+    the branch that prints a path - so a run over an already-clean tree returned 0 and
+    the bug stayed invisible. Caught by review on the first push, not by this suite.
+    """
+    nb_path = tmp_path / "probe.ipynb"
+    nb_path.write_text(_raw(_nb([_plotly_output(fallback=True)])), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["strip_plotly_json.py", "--check", "probe.ipynb"])
+
+    assert stripper.main() == 1
+    assert "probe.ipynb" in capsys.readouterr().out
+
+
+def test_a_notebook_outside_the_repo_is_named_absolutely(tmp_path, monkeypatch, capsys):
+    """A scratch copy under review is a legitimate argument, not a crash."""
+    nb_path = tmp_path / "outside.ipynb"
+    nb_path.write_text(_raw(_nb([_plotly_output(fallback=False)])), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["strip_plotly_json.py", "--check", str(nb_path)])
+
+    assert stripper.main() == 0
+    assert str(nb_path) in capsys.readouterr().out
+
+
 # --- folding it into the stamp --------------------------------------------------
 
 
@@ -305,3 +331,42 @@ def test_sync_paths_still_works_through_the_shared_helper(repo):
     assert after["outputs_digest"] == digest != before["outputs_digest"]
     assert after["executed_at"] == before["executed_at"]
     assert "paths sanitized" in after["notes"]
+
+
+def test_stamping_a_fresh_run_strips_before_it_digests(repo):
+    """Closes the ordering trap rather than documenting it.
+
+    Every re-run writes the Plotly payload back. If stamping digested the payload and
+    the strip happened afterwards, the committed notebook's outputs would no longer be
+    the ones the digest describes, and the gate would report OUTPUTS CHANGED on a
+    notebook whose numbers never moved. Stamping strips first, so there is no order for
+    an author to get wrong.
+    """
+    py = repo / "demo.py"
+    py.write_text("# %%\nfig.show()\n", encoding="utf-8")
+    subprocess.run(["git", "add", "demo.py"], cwd=repo, check=True)
+
+    nb_path = repo / "demo.ipynb"
+    nb_path.write_text(_raw(_nb([_plotly_output(fallback=True)])), encoding="utf-8")
+
+    stamp = provenance.stamp_notebook(nb_path, "ml4t-gpu", parameters={})
+
+    on_disk = json.loads(nb_path.read_text())
+    assert PLOTLY not in on_disk["cells"][1]["outputs"][0]["data"]
+    assert on_disk["cells"][1]["outputs"][0]["data"]["image/png"] == "aGVsbG8=\n"
+    # The digest describes the file as committed, which is the whole point.
+    assert stamp["outputs_digest"] == provenance.outputs_digest(on_disk)
+    assert stripper.strip_plotly(nb_path.read_text())[1] == 0
+
+
+def test_stamping_leaves_a_payload_that_is_the_only_copy(repo):
+    """Negative control: stamping must not quietly delete an unbacked figure."""
+    py = repo / "demo.py"
+    py.write_text("# %%\nfig.show()\n", encoding="utf-8")
+    subprocess.run(["git", "add", "demo.py"], cwd=repo, check=True)
+
+    nb_path = repo / "demo.ipynb"
+    nb_path.write_text(_raw(_nb([_plotly_output(fallback=False)])), encoding="utf-8")
+
+    provenance.stamp_notebook(nb_path, "ml4t-gpu", parameters={})
+    assert PLOTLY in json.loads(nb_path.read_text())["cells"][1]["outputs"][0]["data"]

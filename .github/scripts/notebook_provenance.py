@@ -1151,7 +1151,20 @@ def stamp_notebook(
     py = paired_py(nb_path)
     if py is None:
         raise SystemExit(f"no paired .py for {display_path(nb_path)} — cannot stamp")
-    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    # Strip before anything reads the outputs, so the digest below describes the file
+    # as it will be committed. A fresh run writes the Plotly payload back every time,
+    # and doing this here is what keeps that from becoming an ordering trap: stamp
+    # then strip leaves a digest computed over outputs that no longer exist, and the
+    # gate reports OUTPUTS CHANGED on a notebook whose numbers never moved. Lossless
+    # and bounded - it removes only a payload duplicated by a static image, touches no
+    # source, no execution count and no other mime type, and skips any output where
+    # the payload is the figure's only copy. See strip_plotly_json.py.
+    raw = nb_path.read_text(encoding="utf-8")
+    stripped_raw, stripped_count, _ = _plotly_rewrite_counted(raw)
+    if stripped_count:
+        nb_path.write_text(stripped_raw, encoding="utf-8")
+        raw = stripped_raw
+    nb = json.loads(raw)
     conflict = contradicts_injected_cell(nb, parameters)
     if conflict:
         raise SystemExit(f"refusing to stamp {display_path(nb_path)}: {conflict}")
@@ -2084,10 +2097,14 @@ def _sanitize_rewrite(raw: str) -> str:
 
 
 def _plotly_rewrite(raw: str) -> str:
+    return _plotly_rewrite_counted(raw)[0]
+
+
+def _plotly_rewrite_counted(raw: str) -> tuple[str, int, int]:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from strip_plotly_json import strip_plotly
 
-    return strip_plotly(raw)[0]
+    return strip_plotly(raw)
 
 
 def sync_plotly(nb_path: Path) -> str:
