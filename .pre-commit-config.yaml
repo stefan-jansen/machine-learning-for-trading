@@ -50,6 +50,20 @@ repos:
         entry: python3 .github/scripts/check_notebook_pair_sync.py
         files: \.(ipynb|py)$
 
+      # A committed notebook must not carry the Plotly figure JSON beside the static
+      # image of the same figure. Plotly serializes every data point of every trace,
+      # which made 25.3 MB out of 0.03 MB of source in 01_academic_characteristics and
+      # left a reader on github.com staring at an empty pane for twenty seconds. The
+      # PNG is what every static reader shows; a reader who runs the cell gets the
+      # interactive figure back. Only outputs that carry no static image are left
+      # alone, because there the payload is the only copy of the chart.
+      # Fix: strip_plotly_json.py, then notebook_provenance.py sync-plotly <nb>.
+      - id: strip-plotly-json
+        name: no embedded Plotly JSON beside a static image
+        language: system
+        entry: python3 .github/scripts/strip_plotly_json.py --check
+        files: \.ipynb$
+
       # Sync gate: a stamped notebook must be its CURRENT .py executed in a
       # production run. Fails if any provenance-stamped .ipynb is stale (its
       # paired .py changed since execution) or was committed from a TEST-mode
