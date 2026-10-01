@@ -21,7 +21,7 @@ machine to a running notebook, prerequisites included. The short version is unde
 [Quick Start](#quick-start) below.
 
 <!-- offerings:next start -->
-> **Next free session:** [How to Be Productive with Coding Agents, Beyond Code](https://maven.com/p/efe730), a 30-minute live session on **Wednesday, September 30, 2026, 11:00 AM ET / 15:00 UTC**. [All courses, workshops, and free lessons](https://ml4trading.io/courses/?utm_source=github&utm_medium=readme&utm_campaign=ml4t3e&utm_content=offerings).
+> **Next free session:** [Can AI agents improve themselves?](https://maven.com/p/cf1c90), a 30-minute live session on **Thursday, October 1, 2026, 11:00 AM ET / 15:00 UTC**. [All courses, workshops, and free lessons](https://ml4trading.io/courses/?utm_source=github&utm_medium=readme&utm_campaign=ml4t3e&utm_content=offerings).
 <!-- offerings:next end -->
 
 <p align="center">
@@ -142,19 +142,18 @@ the workflow:
 | Oct 10, 2026 | [ML for Trading in the Age of AI Agents](https://maven.com/stefan-jansen/ml4t-ai-agents) | Run the whole ML for Trading workflow once, end to end, in a single session. |
 | Oct 24, 2026 | [Loop Engineering: Reliable Work From Coding Agents](https://maven.com/stefan-jansen/loop-engineering) | Get reliable work out of coding agents: harness design, verification, and recovery from a bad run. |
 | Nov 21, 2026 | [Engineering a Multi-Agent Forecasting System](https://maven.com/stefan-jansen/agent-engineering) | Build a multi-agent forecasting system whose reasoning is auditable end to end. |
+| Dec 3 – Feb 18, 2027 | [ML for Trading: From Research to Production](https://maven.com/stefan-jansen/research-to-production) | Take one research idea from a question to a costed, monitored strategy, with the evidence trail that makes the result checkable. |
 
 **Courses with no date on the calendar.** Either self-paced and on sale now, or between cohorts with a waitlist on the course page.
 
 | Offering | How it runs | What you leave with |
 |----------|-------------|---------------------|
 | [ML for Trading: Foundations](https://maven.com/stefan-jansen/ml4t-foundations) | Self-paced, start any time | Build the ML for Trading pipeline yourself, end to end, and the evidence to say what it does and does not establish. |
-| [ML for Trading: From Research to Production](https://maven.com/stefan-jansen/research-to-production) | Next cohort not yet scheduled | Take one research idea from a question to a costed, monitored strategy, with the evidence trail that makes the result checkable. |
 
 **Free live sessions.** Thirty minutes to an hour, no cost, recording sent to everyone who registers.
 
 | When | Session |
 |------|---------|
-| Wed, Sep 30, 11:00 AM ET / 15:00 UTC | [How to Be Productive with Coding Agents, Beyond Code](https://maven.com/p/efe730) |
 | Thu, Oct 1, 11:00 AM ET / 15:00 UTC | [Can AI agents improve themselves?](https://maven.com/p/cf1c90) |
 | Wed, Oct 7, 11:00 AM ET / 15:00 UTC | [How AI Agents Change the ML for Trading Workflow](https://maven.com/p/222e36) |
 | Wed, Nov 4, 11:00 AM ET / 16:00 UTC | [Why Multi-Agent Systems Break, and How To Fix It](https://maven.com/p/393eee) |
