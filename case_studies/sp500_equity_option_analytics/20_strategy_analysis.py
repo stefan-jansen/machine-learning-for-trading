@@ -982,14 +982,13 @@ risk_diagnostics
 # `19_holdout_backtest`, on the configuration this funnel selected. This section reads
 # that result; it does not create one, and it applies no gate to it.
 #
-# There is deliberately no seal here, and an earlier version of this notebook had an elaborate one
-# - a research lock, a four-state ordering check on when the fit ran against when the lock was
-# taken, a field-by-field identity diff between the sealed and published fits, and a
-# `holdout_evaluations` lineage read. All of it existed to make the holdout unrepeatable and to
-# adjudicate what to do when the selected configuration changed underneath it. The holdout is
-# repeatable: if it is run on the wrong configuration, it is run again on the right one. Machinery
-# whose purpose is to prevent that is machinery whose purpose is to preserve a stale answer, so it
-# is gone rather than parked. What replaces it is a count: the earlier rows stay, and a window
+# There is deliberately no seal here. A seal - a research lock, an ordering check on when the fit
+# ran against when the lock was taken, a field-by-field identity diff between the sealed and the
+# published fit, a `holdout_evaluations` lineage read - exists to make the holdout unrepeatable
+# and to adjudicate what to do when the selected configuration changes underneath it. The holdout
+# is repeatable: if it is run on the wrong configuration, it is run again on the right one, and
+# machinery whose purpose is to prevent that is machinery whose purpose is to preserve a stale
+# answer. What stands in its place is a count: every fit stays on the record, and a window
 # carrying more than one holdout fit is reported as one that has been read more than once.
 #
 # What remains worth checking is not whether the holdout was allowed to run, but whether the

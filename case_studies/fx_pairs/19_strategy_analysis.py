@@ -695,8 +695,8 @@ performance_figure.show()
 # ### Register the cohort and paired evidence this section reads
 #
 # The bootstrapped comparisons and the effective-rank cohort statistics are computed here rather
-# than assumed. They used to be a side effect of the holdout lock transaction; with that gone,
-# the notebook that reads them is the notebook that has to produce them.
+# than assumed: the notebook that reads them is the notebook that has to produce them, so there is
+# nothing to populate elsewhere first.
 #
 # The selected configuration is passed in rather than left to the populator. Left to itself it
 # ranks the registry on raw Sharpe, which would be a second selector sitting beside

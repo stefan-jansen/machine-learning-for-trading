@@ -110,13 +110,13 @@ SUPERSEDES_ALLOCATION_POPULATIONS: dict[str, str] | None = None
 # `get_case_study_dir` rather than beside the registry read further down: `CASE_DIR` has to
 # already answer for the workspace.
 #
-# `WORKSPACE` is read at both tiers. It used to be read on the preview branch only, so a
-# canonical run that passed one was answered with `Study.regenerate` and registered its
-# backtests in the published store while its caller read from the workspace it asked for -
-# no exception, no warning, and an exit status that said the run had refused (#1100). A
-# canonical run with a workspace is the same full-fidelity sweep writing to that root, which
-# is what a rehearsal against a private registry needs. A preview still requires one, because
-# a preview with no workspace has nowhere of its own to write.
+# `WORKSPACE` is read at both tiers. Reading it on the preview branch only would answer a
+# canonical run that passed one with `Study.regenerate`, registering its backtests in the
+# published store while its caller read from the workspace it asked for - no exception, no
+# warning, and an exit status saying the run had refused. A canonical run with a workspace is
+# the same full-fidelity sweep writing to that root, which is what a rehearsal against a
+# private registry needs. A preview still requires one, because a preview with no workspace
+# has nowhere of its own to write.
 _workspace_study = None
 if EXECUTION_TIER == "preview" and not WORKSPACE:
     raise ValueError("preview execution requires WORKSPACE")

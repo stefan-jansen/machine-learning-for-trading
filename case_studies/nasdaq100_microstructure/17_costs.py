@@ -656,14 +656,13 @@ def _pairs_on_both(frame: pl.DataFrame) -> pl.DataFrame:
 
 # The section's claim is about the screen and not about a model family, so the family is a
 # choice about which comparison gets published rather than a condition of the comparison
-# being valid. gbm is asked for first because that is what previous renders carried and a
-# family that changes between renders changes the number under the prose. It used to be a
-# `tr.family = 'gbm'` clause in the query above, which is the same choice written as though
-# it were a requirement: a run that fits no gbm at all - the pull-request fixture runs
-# 06_linear and 07_gbm on the weekly tier and skips them - then matched nothing, and the
-# refusal below reported a sweep that had not reached pass 2 when what had happened is that
-# the one family it would look at was absent. Any family carrying the same (prediction, arm)
-# on both universes answers the same question.
+# being valid. gbm is asked for first because a family that changes between renders changes
+# the number under the prose. It is a preference and not a `tr.family = 'gbm'` clause in the
+# query above, which would write the same choice as though it were a requirement: a run that
+# fits no gbm at all - the pull-request fixture runs 06_linear and 07_gbm on the weekly tier
+# and skips them - would match nothing, and the refusal below would report a sweep that had
+# not reached pass 2 when the one family it looks at was simply absent. Any family carrying
+# the same (prediction, arm) on both universes answers the same question.
 _candidate_families = ["gbm"] + sorted(set(_arms["family"].unique()) - {"gbm"})
 _family = next(
     (

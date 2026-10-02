@@ -313,14 +313,13 @@ pl.DataFrame(
 # first few decisions of the validation span have no width and the allocator holds nothing
 # through them. On this case study's 8-hourly grid the warm-up is three decisions.
 #
-# It used to cost a great deal more. Calibrating on whole earlier folds only meant the earliest
-# fold had no earlier fold, so the allocator sat out the entire first year - and that is worth
-# keeping in view even though it is fixed, because of how the resulting number looked. **A period
-# a strategy sits out still counts as a period it observed.** A day holding nothing books a
-# return of exactly zero, so a book flat for a year reports the same period count as one that
-# traded every day of it, and every summary built on that count agreed the two were comparable.
-# The strategy that sat out 2022 posted the highest Sharpe in the stage by not trading a losing
-# year.
+# Calibrating on whole earlier folds only would cost a great deal more: the earliest fold has no
+# earlier fold, so the allocator would sit out the entire first year. That is worth keeping in
+# view, because of how such a number reads. **A period a strategy sits out still counts as a
+# period it observed.** A day holding nothing books a return of exactly zero, so a book flat for
+# a year reports the same period count as one that traded every day of it, and every summary
+# built on that count treats the two as comparable. A strategy that sat out 2022 would post the
+# highest Sharpe in the stage by not trading a losing year.
 #
 # Section 4 therefore measures which folds each result actually **traded**, from its registered
 # return series, and pairs only within a matching set. That test is not about one allocator: any

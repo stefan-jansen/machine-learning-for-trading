@@ -331,9 +331,9 @@ print(f"  Entries: {len(qc_predictions)} dates")
 #
 # The listing is generated from that cadence rather than written out here, so
 # there is no second place for the horizon to be stated and go stale. It is the
-# same reason the horizon itself is derived: this notebook previously carried a
-# monthly rebalance in prose while the case study deployed a five-session
-# signal, and nothing in it could fail.
+# same reason the horizon itself is derived: prose carrying a monthly rebalance
+# while the case study deploys a five-session signal is wrong in a way nothing
+# in the notebook can fail on.
 
 # %%
 ALGORITHM_TEMPLATE = """class PredictionUniverseAlgorithm(QCAlgorithm):

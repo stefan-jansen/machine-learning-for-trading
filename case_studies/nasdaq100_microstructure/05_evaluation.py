@@ -319,11 +319,9 @@ label_df = _normalize_symbol_column(label_df.filter(before_holdout).collect())
 # `generate_cv_splits` returns, so the holdout stays out by the same cut, on top of the
 # `before_holdout` filter already applied above.
 #
-# The assertion below is kept and its job has changed: it used to establish that two
-# validation windows did not overlap, because an overlap would have made one bar take two
-# refitted values. There is now one value per bar by construction, so what it checks is
-# that the artifact is keyed the way this notebook believes it is - a duplicate here means
-# the writer changed and this cell did not.
+# The assertion below checks that the artifact is keyed the way this notebook believes it is.
+# There is one value per bar by construction - a fold column would mean one bar carrying two
+# refitted values - so a duplicate here means the writer changed and this cell did not.
 
 # %%
 assert "fold" not in temporal.columns, (

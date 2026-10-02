@@ -37,12 +37,11 @@
 # saved every 5, so each label produces ten scoreable models rather than one, each registered
 # separately.
 #
-# **All ten are published, and that is deliberate.** An earlier version of this notebook fixed a
-# reporting checkpoint in advance, showed that the best validation checkpoint was a different one,
-# and reported the fixed one anyway. That is the right instinct about the trap - picking the epoch
-# with the best validation IC is choosing after seeing the answer - but the wrong remedy, because
-# it throws away nine models the case study paid to train and leaves the choice to be made again,
-# undocumented, downstream. Publishing the whole schedule lets
+# **All ten are published, and that is deliberate.** Fixing one reporting checkpoint in advance
+# would be the right instinct about the trap - picking the epoch with the best validation IC is
+# choosing after seeing the answer - and the wrong remedy, because it throws away nine models the
+# case study paid to train and leaves the choice to be made again, undocumented, downstream.
+# Publishing the whole schedule lets
 # [`14_backtest`](14_backtest.ipynb) select on validation backtest Sharpe with every candidate
 # visible and the rule stated. **Selection happens there, not here.**
 #

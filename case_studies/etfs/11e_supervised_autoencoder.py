@@ -50,10 +50,10 @@
 # **The network is trained rather than solved, which decides what this notebook publishes.**
 # `case_studies/config/sae/sae.yaml` declares 50 epochs saved every 5, the same schedule
 # `cae.yaml` declares, so each label produces ten scoreable models rather than one and each is
-# registered separately. All ten are published. An earlier version of this notebook fixed a
-# reporting checkpoint in advance and reported that one, which is the right instinct about the trap
-# - reading off the epoch with the best validation IC is choosing after seeing the answer - and the
-# wrong remedy, because it discards nine models the case study paid to train and leaves the choice
+# registered separately. All ten are published. Fixing one reporting checkpoint in advance and
+# reporting that one is the right instinct about the trap - reading off the epoch with the best
+# validation IC is choosing after seeing the answer - and the wrong remedy, because it discards
+# nine models the case study paid to train and leaves the choice
 # to be made again, undocumented, downstream. Publishing the whole schedule lets
 # [`14_backtest`](14_backtest.ipynb) select on validation backtest Sharpe with every candidate
 # visible and the rule stated. **Selection happens there, not here.**
