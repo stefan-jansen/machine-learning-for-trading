@@ -65,11 +65,8 @@ from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
 
-"""Bull vs Bear Debate — adversarial stress-testing of forecasts."""
+"""Bull vs Bear Debate - adversarial stress-testing of forecasts."""
 
-import warnings
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import polars as pl
@@ -88,6 +85,8 @@ from agent_providers import ChatMessage, TokenUsage, create_llm_client
 from agent_research import ResearchAgent, format_agent_summary, parse_json
 from agent_schemas import AgentForecastArtifact, DebateArtifact, DebateRound
 from agent_tools import create_search_client
+
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 # RUN_LIVE=False (the default) replays the pinned 2026-06-09 trace named below:
@@ -323,7 +322,7 @@ class DebateAgent:
 # ## Setup: Run Research Agents
 #
 # We first run the research agents from NB06 to establish baseline probability
-# estimates that the debate will stress-test — this time on the pinned contested
+# estimates that the debate will stress-test - this time on the pinned contested
 # question, where the agents are expected to disagree.
 
 # %%
@@ -335,8 +334,8 @@ if RUN_LIVE:
     question = get_chapter_contested_question()
     provider_name = llm.model_name
 
-    # Run N agents, each under its own tracer so the full conversation — every
-    # prompt sent and every raw response — is captured and attributed per agent.
+    # Run N agents, each under its own tracer so the full conversation - every
+    # prompt sent and every raw response - is captured and attributed per agent.
     agent_tracers = []
     for i in range(N_AGENTS):
         tracer = trace_llm(llm, label=f"agent_{i}")
@@ -378,8 +377,8 @@ print(f"\nAggregate (Neyman ρ=0.3): {aggregate.extremized_probability:.2f}")
 # ### Pre-debate agent timelines
 #
 # Before the debate stress-tests them, here is the full captured run for each
-# research agent — every query, the documents retrieved, and the untruncated
-# rationale — rendered by the same `show_agents` observability helper used in
+# research agent - every query, the documents retrieved, and the untruncated
+# rationale - rendered by the same `show_agents` observability helper used in
 # NB06. On this contested question the agents enter the debate already
 # disagreeing; the timelines show *which* evidence pulled each one toward its
 # starting probability.
@@ -458,8 +457,8 @@ rounds_df
 
 # %% [markdown]
 # The table above is the *shape* of the debate; the transcript below is its
-# *substance*. `show_debate_transcript` prints each round in full — both sides'
-# complete arguments and the key evidence they cited, with nothing truncated —
+# *substance*. `show_debate_transcript` prints each round in full - both sides'
+# complete arguments and the key evidence they cited, with nothing truncated -
 # so the reader can see not just that the gap stayed open but the reasoning each
 # side used to hold its ground. This is the debate counterpart to NB06's
 # per-agent timelines: the same auditing discipline applied to the adversarial
@@ -505,8 +504,10 @@ if len(result.rounds) >= 2:
     y_max = max(bear_probs + bull_probs + [agg_p])
     pad = max(0.05, (y_max - y_min) * 0.15)
     ax.set_ylim(max(0.0, y_min - pad), min(1.0, y_max + pad))
-    fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        "Bull and bear probabilities, their midpoint and the initial aggregate are plotted across the retained debate rounds. Agreement does not establish forecasting accuracy.",
+    )
 
 # %% [markdown]
 # **Interpretation**: The plot tracks the bull-bear gap across rounds.
@@ -564,7 +565,7 @@ else:
 # The same auditing discipline as NB06, now covering both stages. `RunTrace`
 # bundles the question, the research-agent artifacts, the complete debate
 # transcript, and the raw model conversation for every research and debate call
-# — captured by the per-agent and debate `TracingLLMClient`s — into one JSON
+# - captured by the per-agent and debate `TracingLLMClient`s - into one JSON
 # record under `forecast_traces/`. Reload it to replay exactly what each
 # debater was shown and how it responded, round by round.
 
@@ -606,8 +607,8 @@ else:
 # %% [markdown]
 # ## Replaying the Debate Calls
 #
-# The raw audit view for the debate: every bull and bear prompt — including the
-# opposing side's previous argument that gets fed back in each round — next to
+# The raw audit view for the debate: every bull and bear prompt - including the
+# opposing side's previous argument that gets fed back in each round - next to
 # the untruncated JSON each debater returned. The transcript and trajectory
 # figure above are both derived from exactly these responses.
 
@@ -618,21 +619,18 @@ print(replay_llm_calls(debate_calls, content_chars=700))
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Trajectory shape is the signal**: A narrowing bull-bear gap shows
-#    information being incorporated; a flat or widening gap means the debate
-#    has not surfaced new evidence and is noise. The chapter trace shown here
-#    illustrates the latter — the gap stays flat across all three rounds
-#    (bull and bear both lock in their first-round position), which is the
-#    honest demonstration of why a single short debate is not sufficient when
-#    the two sides have already committed to their priors.
-# 2. **Midpoint ≠ average**: The debate midpoint captures adversarial stress-testing
-#    that simple agent averaging misses
-# 3. **Consensus gating**: Early termination when the gap closes below threshold
-#    saves token budget without losing information
-# 4. **Debate adds most value when agents disagree** — if they're already
-#    aligned, debate is a waste of tokens
+# 1. **Gap trajectory** describes agreement. Inspect the cited arguments to
+#    determine whether new evidence was used; narrowing alone does not establish
+#    learning, and a flat gap alone does not establish that the discussion was useless.
+# 2. **Midpoint** is the arithmetic mean of the final bull and bear probabilities.
+#    Their opposing prompts may produce different estimates from the initial
+#    research ensemble; the averaging operation is the same.
+# 3. **Consensus stopping** avoids remaining calls when the declared threshold is
+#    reached. It may also omit useful later discussion; the threshold is a design choice.
+# 4. **Forecasting value** requires resolved outcomes and matched runs with and
+#    without debate. This trace demonstrates the mechanism, not an accuracy gain.
 #
-# **Next**: [`forecasting_pipeline`](08_forecasting_pipeline.ipynb) — wire everything together into the full
+# **Next**: [`forecasting_pipeline`](08_forecasting_pipeline.ipynb) - wire everything together into the full
 # agent → aggregation → debate → supervisor pipeline.
 #
 # **Book**: Section 24.7 discusses the debate pattern in the context of Bridgewater's

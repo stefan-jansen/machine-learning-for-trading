@@ -48,26 +48,23 @@ from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
 
-"""Agent State, Memory, and Quality Gates — explicit state for reliable agents."""
+"""Agent State, Memory, and Quality Gates - explicit state for reliable agents."""
 
 import json
-import warnings
 from datetime import datetime, timedelta
-
-warnings.filterwarnings("ignore")
 
 from agent_fixtures import get_demo_question
 from agent_schemas import AgentState, QualityGateResult
 
 # %% tags=["parameters"]
-# (Parameters cell kept for Papermill — no notebook-level overrides are
+# (Parameters cell kept for Papermill - no notebook-level overrides are
 # currently exposed; future tunables like MIN_EVIDENCE_ITEMS / MAX_AGE_HOURS
 # would be added here.)
 
 # %% [markdown]
 # ## The State Problem
 #
-# Most agent tutorials treat state implicitly — it lives in the LLM's message history
+# Most agent tutorials treat state implicitly - it lives in the LLM's message history
 # and disappears when the conversation ends. For financial agents, this is dangerous:
 #
 # - You can't audit what evidence the agent considered
@@ -165,7 +162,7 @@ search_evidence.append(
 )
 
 # %%
-# Evidence item 3: historical base-rate evidence — required by the
+# Evidence item 3: historical base-rate evidence - required by the
 # coverage gate alongside forward-looking search.
 search_evidence.append(
     {
@@ -223,8 +220,8 @@ def check_coverage_gate(
 ) -> QualityGateResult:
     """Check that evidence covers required types and has minimum items.
 
-    The default `required_types` is two — `search_results` and `base_rate`
-    — so the gate fails when either is missing. That matches the chapter's
+    The default `required_types` is two - `search_results` and `base_rate`
+    - so the gate fails when either is missing. That matches the chapter's
     coverage rule: a credible forecast needs both forward-looking evidence
     and a historical anchor.
     """
@@ -257,7 +254,7 @@ def check_coverage_gate(
 # %% [markdown]
 # ### Freshness gate
 #
-# Checks that evidence was gathered recently — stale search results may not
+# Checks that evidence was gathered recently - stale search results may not
 # reflect the current state of the world.
 
 
@@ -300,9 +297,9 @@ def check_freshness_gate(
 # %% [markdown]
 # ### Consistency gate
 #
-# Checks that no search results violate the cutoff date. This catches lookahead
-# bias — if any result was published after the cutoff, the agent's forecast would
-# be contaminated with future information.
+# Checks whether retained publication dates violate the cutoff. This detects
+# explicit date violations. It cannot establish historical page content or
+# remove information already present in the model's training data.
 
 
 # %%
@@ -442,8 +439,8 @@ for g in bad_gates:
 #
 # The third gate, freshness, fires when an evidence item's timestamp is
 # older than `max_age_hours`. To make the failure observable we construct
-# a state whose evidence was written 48 hours ago — twice the default
-# 24-hour window — and check that the freshness gate fails while coverage
+# a state whose evidence was written 48 hours ago - twice the default
+# 24-hour window - and check that the freshness gate fails while coverage
 # and consistency still pass.
 
 # %%
@@ -540,11 +537,11 @@ if not all(g.passed for g in ablation_gates):
     print(f"Synthesis status: {ablation.synthesis_status}")
     print("Agent correctly abstains when evidence is insufficient.")
 else:
-    print("Ablation still passes all gates — base rate wasn't critical for coverage.")
+    print("Ablation still passes all gates - base rate wasn't critical for coverage.")
 
 # %% [markdown]
 # **Interpretation**: Removing the `base_rate` evidence trips the coverage
-# gate — the default `required_types=["search_results", "base_rate"]`
+# gate - the default `required_types=["search_results", "base_rate"]`
 # treats the historical anchor as part of the minimum coverage contract.
 # That is the point of an explicit gate: ablations that previously
 # "looked fine" now fail loudly, and checkpoint/replay turns the ablation
@@ -561,15 +558,15 @@ else:
 # ## Key Takeaways
 #
 # 1. **Explicit state** captures everything the agent knows, separate from the LLM's
-#    context window — enabling audit, replay, and comparison
+#    context window - enabling audit, replay, and comparison
 # 2. **Quality gates** catch insufficient, stale, and contaminated evidence before
-#    the agent produces output — abstention is better than unreliable forecasts
-# 3. **Checkpointing** enables persistence and replay — run the same analysis with
+#    the agent produces output - abstention is better than unreliable forecasts
+# 3. **Checkpointing** enables persistence and replay - run the same analysis with
 #    different parameters or evidence subsets
 # 4. **Ablation via replay** reveals which evidence sources actually matter for
 #    forecast quality
 #
-# **Next**: [`research_agent`](04_research_agent.ipynb) — combines providers, tools, and state into
+# **Next**: [`research_agent`](04_research_agent.ipynb) - combines providers, tools, and state into
 # a complete ResearchAgent that produces calibrated probability forecasts.
 #
 # **Book**: Section 24.3 covers the memory hierarchy in depth, including vector stores

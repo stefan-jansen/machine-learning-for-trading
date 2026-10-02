@@ -54,15 +54,12 @@ from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
 
-"""Full Forecasting Pipeline — agent-debate-supervisor end-to-end."""
+"""Full Forecasting Pipeline - agent-debate-supervisor end-to-end."""
 
 import math
 import re
 import time
-import warnings
 from datetime import date
-
-warnings.filterwarnings("ignore")
 
 import polars as pl
 from agent_fixtures import get_chapter_clear_question, get_chapter_contested_question
@@ -266,7 +263,7 @@ def _supervisor_finalize(
 #
 # Three phases: (1) identify disagreements, (2) run clarifying searches,
 # (3) finalize with evidence. The supervisor only overrides the ensemble
-# when its confidence is "high" — preserving agent diversity by default.
+# when its confidence is "high" - preserving agent diversity by default.
 
 
 # %%
@@ -663,7 +660,7 @@ if RUN_LIVE:
     search = create_search_client()
 
     # One tracer per question wraps the shared client so the full four-phase
-    # conversation — research, debate, and supervisor calls — is captured and
+    # conversation - research, debate, and supervisor calls - is captured and
     # persisted as a standalone, replayable run trace for each question.
     for q in questions:
         tracer = trace_llm(llm, label="pipeline")

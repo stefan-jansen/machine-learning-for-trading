@@ -36,14 +36,11 @@ from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
 
-"""Scoring, Replay, and Security — capstone evaluation and governance."""
+"""Scoring, Replay, and Security - capstone evaluation and governance."""
 
 import json
 import math
 import re
-import warnings
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import polars as pl
@@ -65,6 +62,8 @@ from agent_providers import create_llm_client
 from agent_research import ResearchAgent
 from agent_schemas import AgentForecastArtifact, ForecastResult, SearchResult
 from agent_tools import ToolExecutor, create_search_client
+
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 # Offline mode scores the retained final probabilities with their provenance limits.
@@ -322,8 +321,10 @@ if predictions:
     ax.set_xlim(-0.05, 1.05)
     ax.set_ylim(-0.05, 1.05)
     ax.set_aspect("equal")
-    fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        "A reliability diagram uses the eligible retained historical teaching records. Missing original research and post-outcome model knowledge prevent interpreting this small panel as forecasting skill.",
+    )
 else:
     print("No accepted resolved forecasts; reliability plot skipped.")
 

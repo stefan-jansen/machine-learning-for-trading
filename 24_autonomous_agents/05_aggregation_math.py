@@ -51,12 +51,9 @@ from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
 
-"""From Opinions to Probabilities — aggregation math for multi-agent forecasting."""
+"""From Opinions to Probabilities - aggregation math for multi-agent forecasting."""
 
 import math
-import warnings
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -71,6 +68,7 @@ from agent_pipeline import (
 )
 
 from utils.reproducibility import set_global_seeds
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 N_FORECASTERS = 3
@@ -83,7 +81,7 @@ set_global_seeds(SEED)
 # ## The Averaging Problem
 #
 # Suppose three independent analysts each estimate a 65% probability that NVIDIA
-# beats earnings. Simple averaging gives 65% — but three independent sources
+# beats earnings. Simple averaging gives 65% - but three independent sources
 # agreeing should make us *more* confident, not equally confident.
 #
 # **Neyman extremization** formalizes this: when forecasters agree, the aggregate
@@ -107,14 +105,14 @@ print(
     f"p={result_independent.extremized_probability:.2f}"
 )
 
-# Moderately correlated (rho=0.3): typical for financial analysts
+# Assumed moderate correlation (rho=0.3): illustrative scenario
 result_moderate = neyman_extremize(probs, base=0.5, correlation=0.3)
 print(
     f"Moderate (ρ=0.3):    d={result_moderate.extremization_factor:.2f}, "
     f"p={result_moderate.extremized_probability:.2f}"
 )
 
-# Highly correlated (rho=0.7): analysts reading the same research
+# Assumed high correlation (rho=0.7): illustrative shared-research scenario
 result_correlated = neyman_extremize(probs, base=0.5, correlation=0.7)
 print(
     f"Correlated (ρ=0.7):  d={result_correlated.extremization_factor:.2f}, "
@@ -171,12 +169,18 @@ axes[1].set_title("Aggregate Probability vs Correlation (mean=65%)")
 axes[1].legend()
 axes[1].axhline(0.65, color="gray", linestyle="--", alpha=0.5)
 
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two mathematical plots show the extremization factor for assumed agent correlations and how those factors transform a fixed mean probability. The correlations are illustrative inputs.",
+)
 
 # %% [markdown]
 # **Interpretation**:
-# - **(a)** More forecasters increase $d$, but with diminishing returns — especially
+# The helper and panel (a) cap $d$ at 3.0 as an implementation choice. Without
+# that cap, the independent case grows as $\sqrt{n}$. Correlations here are
+# illustrative assumptions, not measured dependence among financial analysts.
+#
+# - **(a)** More forecasters increase $d$, but with diminishing returns - especially
 #   at high correlation. Going from 3 to 8 forecasters at $\rho=0.5$ barely changes $d$.
 # - **(b)** At zero correlation, 8 forecasters at 65% push the aggregate to 92%. At
 #   $\rho=0.7$, the same 8 forecasters only reach 68%. **Correlation is the binding
@@ -226,7 +230,7 @@ print(f"Neyman (ρ=0.3): {result_tight.extremized_probability:.2f}")
 # - $d$ shifts the midpoint asymmetrically
 #
 # This is algebraically equivalent to the chapter's logistic parameterization,
-# $p' = \sigma(a \cdot \text{logit}(p) + \log d)$ — the two notations match
+# $p' = \sigma(a \cdot \text{logit}(p) + \log d)$ - the two notations match
 # with $b = \log d$.
 
 # %%
@@ -250,15 +254,17 @@ ax.set_ylabel("Calibrated Probability")
 ax.set_title("Platt Scaling: Effect of Parameter a")
 ax.legend(loc="upper left")
 ax.set_aspect("equal")
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Probability transformations for fixed Platt slopes are compared with the identity line. These curves illustrate the formula, not measured model calibration.",
+)
 
 # %% [markdown]
 # **Interpretation**: Platt scaling with $a=1.5$ is appropriate for agents that are
 # systematically under-confident (e.g., always predicting near 50-60%). The $d$
 # parameter handles asymmetric miscalibration.
 #
-# **Warning**: Do not apply Platt scaling on top of Neyman extremization — both
+# **Warning**: Do not apply Platt scaling on top of Neyman extremization - both
 # push probabilities away from 0.5, leading to double extremization.
 
 # %% [markdown]
@@ -338,8 +344,10 @@ ax.set_ylabel("Calibrated Probability")
 ax.set_title("Log-Odds Extremization")
 ax.legend(loc="upper left")
 ax.set_aspect("equal")
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Fixed log-odds scaling curves are compared with unchanged probabilities. Larger coefficients push probabilities farther from one half.",
+)
 
 # %% [markdown]
 # **Interpretation**: Log-odds extremization produces curves very similar to Platt
@@ -405,8 +413,10 @@ axes[1].set_xlabel("Calibrated Probability")
 axes[1].set_ylabel("Outcome (0 or 1)")
 axes[1].set_title("After Calibration")
 
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Synthetic probability and outcome pairs appear before and after the declared calibration transform. This is an arithmetic demonstration, not held-out forecasting evidence.",
+)
 
 # %% [markdown]
 # **Finding**: The optimal $a > 1$ implies the raw forecasts were under-confident
@@ -441,8 +451,10 @@ ax.set_xlabel("Number of Agents")
 ax.set_ylabel("Effective N (information content)")
 ax.set_title("Diminishing Returns: Effective N vs Agent Count")
 ax.legend()
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Effective panel size grows with agent count for assumed correlations and approaches the corresponding reciprocal-correlation ceiling.",
+)
 
 # %% [markdown]
 # **Finding:** With $n_{\text{eff}} = n / (1 + (n-1)\rho)$ and $\rho=0.3$, ten agents have effective $N\approx2.70$. The limit as $n$ grows is $1/\rho\approx3.33$. This is an analytical consequence of the assumed correlation, not a measured property of our models. Additional agents increase calls roughly in proportion to count; this curve alone cannot select an optimal team size.
@@ -464,7 +476,7 @@ fig.show()
 #    calibration tuned on resolved forecasts (tuning quality scales with the size
 #    of the resolved-forecast panel)
 #
-# **Next**: [`multi_agent_research`](06_multi_agent_research.ipynb) — test
+# **Next**: [`multi_agent_research`](06_multi_agent_research.ipynb) - test
 # whether running multiple identical research agents on the same question
 # actually produces diversity worth aggregating, or whether the panel
 # collapses to a single mode.

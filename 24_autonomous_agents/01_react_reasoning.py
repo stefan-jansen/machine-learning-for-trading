@@ -47,13 +47,10 @@ from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
 
-"""LLM Providers and the ReAct Loop — multi-provider agent reasoning."""
+"""LLM Providers and the ReAct Loop - multi-provider agent reasoning."""
 
 import json
-import warnings
 from datetime import date
-
-warnings.filterwarnings("ignore")
 
 from agent_fixtures import get_live_question
 from agent_observability import TRACES_DIR, RunTrace, trace_llm
@@ -76,22 +73,22 @@ LLM_PROVIDER = ""  # Blank reads .env; "mock" selects a synthetic fixture
 MAX_STEPS = 6
 
 # %% [markdown]
-# **Optional dependencies** (for a real LLM and web search — the chapter runs in
+# **Optional dependencies** (for a real LLM and web search - the chapter runs in
 # offline replay mode without them):
 #
 # ```bash
 # uv pip install anthropic openai httpx        # cloud providers
-# # Ollama (free, local) — install from https://ollama.com, then:
+# # Ollama (free, local) - install from https://ollama.com, then:
 # #   ollama serve && ollama pull qwen3:8b
 # ```
 #
 # Then set your provider in the repo-root `.env` (copy it first:
-# `cp .env.example .env`). You set three things — **never a base URL**:
+# `cp .env.example .env`). You set three things - **never a base URL**:
 #
-# - `LLM_PROVIDER` — `deepseek` | `openrouter` | `openai` | `anthropic` | `google` | `ollama` | `mock`
-# - `LLM_API_KEY` — your key for that provider
-# - `LLM_MODEL` — *optional*; blank uses the provider default
-# - `TAVILY_API_KEY` — web search ([tavily.com](https://tavily.com))
+# - `LLM_PROVIDER` - `deepseek` | `openrouter` | `openai` | `anthropic` | `google` | `ollama` | `mock`
+# - `LLM_API_KEY` - your key for that provider
+# - `LLM_MODEL` - *optional*; blank uses the provider default
+# - `TAVILY_API_KEY` - web search ([tavily.com](https://tavily.com))
 #
 # Live mode auto-loads `.env`. Missing live credentials raise an explicit error;
 # select `mock` only for a labeled synthetic test fixture. Run `uv run python check_env.py` to confirm which
@@ -101,13 +98,13 @@ MAX_STEPS = 6
 # ## The LLM Provider Protocol
 #
 # Every notebook in this chapter uses the same `LLMClient` protocol. The key insight is
-# that agent logic should be **provider-agnostic** — the same ReAct loop works whether
+# that agent logic should be **provider-agnostic** - the same ReAct loop works whether
 # backed by a \$0 mock, a local Ollama model, or a commercial API.
 #
 # The protocol defines two methods:
 #
-# - `complete(messages) → str` — just the text
-# - `complete_with_usage(messages) → (str, TokenUsage)` — text plus token counts
+# - `complete(messages) → str` - just the text
+# - `complete_with_usage(messages) → (str, TokenUsage)` - text plus token counts
 #
 # Provider selection is automatic: set `LLM_PROVIDER=mock` for deterministic testing,
 # or let the factory auto-detect from available API keys.
@@ -134,7 +131,7 @@ print(f"Response: {response[:200]}")
 # %% [markdown]
 # ## The Forecasting Question
 #
-# We fetch a **live prediction market question** from Polymarket — an open
+# We fetch a **live prediction market question** from Polymarket - an open
 # question that the LLM cannot answer from training data. This ensures the
 # agent must search for current information and reason about genuine uncertainty.
 #
@@ -159,8 +156,8 @@ else:
 # The ReAct pattern interleaves **reasoning** (thinking about what to do) with **action**
 # (calling tools) in a loop. Our agent has exactly two actions:
 #
-# - `{"action": "search", "query": "..."}` — search the web for evidence
-# - `{"action": "forecast", "p_yes": 0.XX, "rationale": "..."}` — produce a probability
+# - `{"action": "search", "query": "..."}` - search the web for evidence
+# - `{"action": "forecast", "p_yes": 0.XX, "rationale": "..."}` - produce a probability
 #
 # The system prompt and step prompt are shown inline so readers can see exactly how
 # the LLM is instructed. This is the same prompt structure used by the AIA Forecaster.
@@ -370,7 +367,7 @@ print(f"Tokens: {tokens.total_tokens:,}")
 # %% [markdown]
 # ## Inspecting the Execution Trace
 #
-# Every step is captured as an `AgentTrace`. This is critical for **auditability** —
+# Every step is captured as an `AgentTrace`. This is critical for **auditability** -
 # in production, you need to know which queries were issued, what results came back,
 # and how the LLM arrived at its forecast.
 
@@ -391,7 +388,7 @@ for t in traces:
 # %% [markdown]
 # ## Persisting the Run
 #
-# A live run is a point-in-time capture — a live prediction-market question, the
+# A live run is a point-in-time capture - a live prediction-market question, the
 # Tavily documents available that day, and the model's reasoning over them.
 # Bundling the question, the agent's traces, and the raw model conversation into
 # one JSON record under `forecast_traces/` makes the session auditable and, more
@@ -448,7 +445,7 @@ else:
 # %% [markdown]
 # ## Provider Swapping
 #
-# The same `run_react_agent` works with any provider — agent logic is
+# The same `run_react_agent` works with any provider - agent logic is
 # provider-agnostic. To switch, edit the repo-root **`.env`** (the notebook
 # auto-loads it) and change one line:
 #
@@ -458,7 +455,7 @@ else:
 # LLM_MODEL=z-ai/glm-4.6      # optional; blank = the provider default
 # ```
 #
-# The base URL for each provider is predefined — you never set it. Then set
+# The base URL for each provider is predefined - you never set it. Then set
 # `RUN_LIVE = True` above and re-run the cells. Tip: `uv run python check_env.py`
 # prints the exact model that will run.
 
@@ -477,13 +474,13 @@ print(f"Synthetic p(YES): {p_mock}")
 # ## Key Takeaways
 #
 # 1. **Provider abstraction**: The `LLMClient` protocol decouples agent logic from
-#    providers — same code works with mock, Ollama, or commercial APIs
-# 2. **Explicit outcomes**: `search`, `forecast` and `abstain` keep the action space minimal —
+#    providers - same code works with mock, Ollama, or commercial APIs
+# 2. **Explicit outcomes**: `search`, `forecast` and `abstain` keep the action space minimal -
 #    the agent's job is to gather evidence and produce a supported probability; calibration is evaluated separately
 # 3. **Structured traces**: `AgentTrace` captures every search query and its results,
 #    separate from the LLM's context window
 # 4. **Mock-first development**: Build and test with deterministic mocks, then swap
 #    in real LLMs for evaluation
 #
-# **Next**: [`tool_contracts`](02_tool_contracts.ipynb) — the SearchClient protocol, Tavily integration,
+# **Next**: [`tool_contracts`](02_tool_contracts.ipynb) - the SearchClient protocol, Tavily integration,
 # and domain policy enforcement.

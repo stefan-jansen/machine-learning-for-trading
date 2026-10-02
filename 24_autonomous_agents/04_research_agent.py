@@ -50,14 +50,11 @@ sys.path.insert(0, str(get_chapter_dir(24)))
 
 from agent_pipeline import validate_probabilities
 
-"""The Research Agent — ReAct loop with rich output extraction."""
+"""The Research Agent - ReAct loop with rich output extraction."""
 
 import json
 import re
-import warnings
 from datetime import date
-
-warnings.filterwarnings("ignore")
 
 import polars as pl
 from agent_fixtures import get_chapter_contested_question
@@ -134,7 +131,7 @@ def build_step_prompt(
     """Format the step prompt with question context.
 
     When ``max_steps`` is given, the agent is told its search budget and is
-    nudged to commit once it has enough evidence — searching is not free, and an
+    nudged to commit once it has enough evidence - searching is not free, and an
     agent that knows its budget stops reformulating the same query and forecasts.
     """
     prompt = f"QUESTION:\n{question.question}\n\n"
@@ -145,7 +142,7 @@ def build_step_prompt(
     if max_steps is not None:
         prompt += (
             f"SEARCH BUDGET: you have at most {max_steps} steps. Search only when a "
-            "specific, named fact is missing — do not reformulate a query you already "
+            "specific, named fact is missing - do not reformulate a query you already "
             "ran. As soon as you have a base rate and the current signal, forecast.\n\n"
         )
     prompt += (
@@ -552,7 +549,7 @@ print(f"Question: {question.question}\n")
 # %% [markdown]
 # ## Inspecting the Forecast Artifact
 #
-# The `AgentForecastArtifact` captures everything about the agent's run —
+# The `AgentForecastArtifact` captures everything about the agent's run -
 # the probability, reasoning, evidence trail, and metadata.
 
 # %%
@@ -587,9 +584,9 @@ if artifact.uncertainties:
 # ## Execution Trace
 #
 # Every search query and its results are captured in the trace. `show_agent_timeline`
-# from `agent_observability` renders the whole run in order — each query, the
+# from `agent_observability` renders the whole run in order - each query, the
 # documents it returned (title, date, URL, and a snippet), and the forecast with
-# the untruncated rationale — so the agent's path from question to probability is
+# the untruncated rationale - so the agent's path from question to probability is
 # fully visible. This is the per-agent observability view reused across NB06–NB08.
 
 # %%
@@ -601,7 +598,7 @@ print(show_agent_timeline(artifact))
 # The executor's independent log captures timing and provenance for every
 # search call. Rendering it as a Polars DataFrame puts the query / status /
 # duration in three sortable columns rather than a hand-aligned string
-# table — the same audit data, in a form that downstream analysis code can
+# table - the same audit data, in a form that downstream analysis code can
 # read without parsing. (A live run also records per-call `duration_ms`; the
 # replay path reconstructs the same query/status/result-count audit from the
 # saved traces, since wall-clock timing is not part of the persisted record.)
@@ -708,11 +705,11 @@ if artifact.p_yes is not None and artifact_b.p_yes is not None:
 # ## Persisting the Run Trace
 #
 # The artifact holds the structured forecast; the `TracingLLMClient`s wrapped
-# around each agent hold the raw conversation. `RunTrace.capture` bundles both —
-# the question, both agents' artifacts, and every prompt/response — into one JSON
+# around each agent hold the raw conversation. `RunTrace.capture` bundles both -
+# the question, both agents' artifacts, and every prompt/response - into one JSON
 # record under `forecast_traces/`, the same auditable format the multi-agent
 # notebooks (NB06–NB08) write. Reload it with `RunTrace.load` to replay exactly
-# what the agent saw and said — which is what the default `RUN_LIVE = False` path
+# what the agent saw and said - which is what the default `RUN_LIVE = False` path
 # does above. A live run writes a fresh trace here; the default replay run reports
 # the pinned trace it loaded rather than overwriting it.
 
@@ -745,9 +742,9 @@ else:
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **ResearchAgent** combines the ReAct loop with rich output extraction — every
+# 1. **ResearchAgent** combines the ReAct loop with rich output extraction - every
 #    forecast comes with confidence, sentiment, evidence quality, and uncertainties
-# 2. **Structured artifacts**: `AgentForecastArtifact` captures the complete run —
+# 2. **Structured artifacts**: `AgentForecastArtifact` captures the complete run -
 #    probability, reasoning, traces, and token usage
 # 3. **Robust parsing**: JSON extraction handles markdown code blocks and malformed
 #    LLM output gracefully
@@ -755,7 +752,7 @@ else:
 #    debate (NB07), and full pipeline (NB08) notebooks
 # 5. **Token tracking**: Every LLM call is metered for cost analysis
 #
-# **Next**: [`aggregation`](05_aggregation_math.ipynb) — the mathematical foundation for combining
+# **Next**: [`aggregation`](05_aggregation_math.ipynb) - the mathematical foundation for combining
 # multiple probability estimates (Neyman extremization, weighted aggregation).
 #
 # **Book**: Section 24.6 discusses agent design patterns, including the trade-off

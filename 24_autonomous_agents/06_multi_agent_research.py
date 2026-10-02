@@ -58,12 +58,9 @@ from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
 
-"""Multi-Agent Research — parallel agents on one shared question."""
+"""Multi-Agent Research - parallel agents on one shared question."""
 
-import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-warnings.filterwarnings("ignore")
 
 import polars as pl
 from agent_fixtures import get_chapter_clear_question
@@ -152,8 +149,8 @@ def run_agent(agent_id: str):
 
     Each agent wraps the shared client in its own `TracingLLMClient` labeled
     with the `agent_id`. That records every prompt the agent sent and every
-    raw response it received — the full conversation, not just the parsed
-    forecast — and a per-agent tracer keeps the capture thread-safe and
+    raw response it received - the full conversation, not just the parsed
+    forecast - and a per-agent tracer keeps the capture thread-safe and
     correctly attributed. We merge the call logs afterward.
     """
     tracer = trace_llm(llm, label=agent_id)
@@ -192,7 +189,7 @@ artifacts.sort(key=lambda a: a.agent_id)
 #
 # Each agent produces a probability, confidence, sentiment, and evidence
 # trail. The Polars DataFrame puts these in sortable columns next to the
-# Polymarket market's own implied probability — readers can compare every
+# Polymarket market's own implied probability - readers can compare every
 # agent's forecast against the market in a single readout.
 
 # %%
@@ -223,9 +220,9 @@ panel_df
 #
 # The panel above shows only the final probability and confidence; the *why*
 # behind each forecast is invisible. `show_agents` from `agent_observability`
-# renders the full captured timeline for each agent — every search query, the
+# renders the full captured timeline for each agent - every search query, the
 # documents it retrieved (title, date, URL, and a snippet of the body), and the
-# untruncated rationale, key findings, and uncertainties — so the reader can
+# untruncated rationale, key findings, and uncertainties - so the reader can
 # trace question → evidence → interpretation → probability step by step. Each
 # `artifact` carries this in its `traces`, the same `AgentTrace` records built
 # in NB04; the renderer just lays them out in chronological order. Reading the
@@ -309,7 +306,7 @@ agg_df
 
 # %% [markdown]
 # **Finding**: Because the agents nearly agree and carry similar confidence,
-# weighted Neyman is virtually indistinguishable from unweighted Neyman — both
+# weighted Neyman is virtually indistinguishable from unweighted Neyman - both
 # extremize the ~0.19 consensus away from the 0.5 base rate (to 0.071 and 0.063
 # respectively) at $\rho=0.3$. Weighting only changes the aggregate when
 # per-agent probabilities or confidences differ materially, which they barely do
@@ -359,8 +356,8 @@ print(all_summaries)
 # ## Search Execution Audit
 #
 # The per-agent reasoning above shows each query and the titles it returned.
-# This cell rolls the same `traces` into one sortable table — every search,
-# which agent issued it, and how many results came back — so the reader can
+# This cell rolls the same `traces` into one sortable table - every search,
+# which agent issued it, and how many results came back - so the reader can
 # scan the whole panel's evidence-gathering at a glance. Overlapping query sets
 # across agents explain the clustered forecasts: when the agents retrieve the
 # same evidence base, they reach similar answers.
@@ -387,7 +384,7 @@ audit_df
 # Auditing an agent means being able to reconstruct exactly what it saw and
 # said. `RunTrace.capture` bundles the question, the parameters, every agent's
 # structured artifact, the aggregation result, and the complete raw model
-# conversation (`llm_calls` — every prompt sent and every response received,
+# conversation (`llm_calls` - every prompt sent and every response received,
 # captured by the per-agent `TracingLLMClient`s above) into one object, and
 # `save()` writes it to `forecast_traces/` as JSON. That saved file is exactly
 # what the replay path above reloads: it is the durable record of this
@@ -432,7 +429,7 @@ else:
 #
 # The timeline view earlier is the *parsed* trace; this is the *raw* one. For
 # the first agent, `replay_llm_calls` prints the exact messages the model
-# received — system prompt, question, and each tool result fed back in — next
+# received - system prompt, question, and each tool result fed back in - next
 # to the untruncated JSON it returned at every step. This is the audit ground
 # truth: the parsed forecast, the search queries, and the rationale all derive
 # from these responses, and nothing here is summarized away. Pass
@@ -464,7 +461,7 @@ print(replay_llm_calls(agent_0_calls, content_chars=600))
 #    and supervisor reconciliation (NB08), where a contested question supplies the
 #    disagreement those stages reconcile.
 #
-# **Next**: [`adversarial_debate`](07_adversarial_debate.ipynb) — bull vs bear
+# **Next**: [`adversarial_debate`](07_adversarial_debate.ipynb) - bull vs bear
 # debate on a contested question, where credible evidence supports both sides.
 #
 # **Book**: Section 24.7 uses this run to show that forecast spread reflects the

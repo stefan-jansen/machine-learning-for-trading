@@ -599,6 +599,9 @@ def test_framework_failure_preserves_completed_artifacts(tmp_path, pipeline_name
 
     from agent_observability import trace_llm
 
+    if pipeline_name == "langgraph_pipeline":
+        pytest.importorskip("langgraph.graph", reason="Requires the LangGraph runtime dependency")
+
     class MalformedSupervisor(SyntheticPipelineClient):
         def complete_with_usage(self, messages, json_mode=True):
             raw, usage = super().complete_with_usage(messages, json_mode)

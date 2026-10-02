@@ -48,14 +48,11 @@ from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
 
-"""Tool Contracts and Provenance — search protocol, audit trails, and domain policy."""
+"""Tool Contracts and Provenance - search protocol, audit trails, and domain policy."""
 
 import json
-import warnings
 from datetime import date
 from urllib.parse import urlparse
-
-warnings.filterwarnings("ignore")
 
 import polars as pl
 from agent_fixtures import get_demo_question
@@ -76,7 +73,7 @@ MAX_RESULTS = 5
 # ## The SearchClient Protocol
 #
 # The AIA Forecaster uses a single tool: **web search**. The `SearchClient` protocol
-# abstracts the provider — whether Tavily (real web search), a mock (deterministic
+# abstracts the provider - whether Tavily (real web search), a mock (deterministic
 # for CI), or a future provider like Brave or SerpAPI.
 #
 # ```python
@@ -92,7 +89,7 @@ MAX_RESULTS = 5
 # %% [markdown]
 # ### SearchResult structure
 #
-# Every search result carries provenance metadata — title, URL, snippet, published
+# Every search result carries provenance metadata - title, URL, snippet, published
 # date, and relevance score. This enables downstream quality checks and audit trails.
 
 # %%
@@ -136,14 +133,13 @@ for r in results:
 # %% [markdown]
 # ## Point-in-Time Filtering
 #
-# When `cutoff_date` is provided, the search client filters out results published
-# on or after that date. This prevents **lookahead bias** — the agent only sees
-# information that was available before the question's resolution.
-#
-# Without this, a backtesting agent could "cheat" by reading post-resolution news.
+# In this synthetic example, the client keeps only results with a parseable
+# publication date before `cutoff_date`. This removes explicitly later or undated
+# items. Publication dates do not establish historical page content or erase
+# model foreknowledge, so the filter alone cannot make a backtest point-in-time accurate.
 
 # %%
-# Search WITHOUT cutoff — all results returned
+# Search WITHOUT cutoff - all results returned
 all_results = search.search("NVIDIA Q4 earnings", max_results=MAX_RESULTS)
 print(f"Without cutoff: {len(all_results)} results")
 for r in all_results:
@@ -151,17 +147,17 @@ for r in all_results:
 
 print()
 
-# Search WITH cutoff — future results filtered out
+# Search WITH cutoff - future results filtered out
 filtered_results = search.search("NVIDIA Q4 earnings", max_results=MAX_RESULTS, cutoff_date=cutoff)
 print(f"With cutoff ({cutoff}): {len(filtered_results)} results")
 for r in filtered_results:
     print(f"  [{r.published or '?'}] {r.title}")
 
 # %% [markdown]
-# **Finding**: The cutoff filter removes results published on or after the cutoff date.
-# This **point-in-time filtering** is critical for backtesting — without it, the agent
-# would have access to future information that wasn't available when the forecast
-# was made.
+# **Finding**: The synthetic filter excludes records outside its date bound.
+# A historical simulation also needs evidence available at its forecast cutoff
+# and an assessment of the model's prior knowledge. These fixture results test
+# the filter, not historical forecasting skill.
 
 # %% [markdown]
 # ## Formatting Results for the Agent
@@ -177,7 +173,7 @@ print(formatted[:500])
 # ## Execution Audit Trail
 #
 # The `ToolExecutor` wraps the search client with logging. Every call is recorded
-# independently of the agent's reasoning trace — capturing what *actually* executed,
+# independently of the agent's reasoning trace - capturing what *actually* executed,
 # with timing and provenance.
 
 # %%
@@ -200,9 +196,9 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# **Observation**: In mock mode all calls complete in sub-millisecond time. In production
-# with Tavily, typical latencies are 200–800ms per call. The audit trail helps identify
-# slow queries that dominate pipeline latency.
+# **Observation**: These synthetic calls demonstrate the audit record, not
+# provider latency. Inspect measured durations from a genuine live capture to
+# identify slow queries; a fixture's timing cannot predict a live service.
 
 # %% [markdown]
 # ## Domain policy
@@ -216,7 +212,7 @@ assert len(DEFAULT_ALLOWED_DOMAINS) == 11, "DEFAULT_ALLOWED_DOMAINS count drifte
 pl.DataFrame({"allowed_domain": sorted(DEFAULT_ALLOWED_DOMAINS)})
 
 # %% [markdown]
-# ### Custom domain policy — observable enforcement
+# ### Custom domain policy - observable enforcement
 #
 # Policy enforcement here is **post-retrieval**: the search provider returns
 # whatever matches the query, and the agent's tool layer filters results
@@ -335,17 +331,17 @@ print(f"Log entry: {disabled_executor.execution_log[0].status}")
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **SearchClient protocol** abstracts the provider — same agent code works with
+# 1. **SearchClient protocol** abstracts the provider - same agent code works with
 #    Tavily, mock, or any future search API
-# 2. **Point-in-time filtering** prevents lookahead bias by removing results published
-#    after the cutoff date
-# 3. **Domain policies** restrict which sources the agent can access, ensuring
-#    evidence quality and compliance
+# 2. **Date filtering** excludes ineligible publication dates; historical content
+#    and model foreknowledge remain separate limitations
+# 3. **Domain policies** filter returned URL hostnames before results reach the
+#    agent; they do not certify evidence quality or compliance
 # 4. **Schema translation** renders tool definitions to both Anthropic and OpenAI
 #    formats from a single source of truth
 # 5. **Audit trails** log every search call with timing, status, and provenance
 #
-# **Next**: [`state_and_memory`](03_state_and_memory.ipynb) — explicit agent state, quality gates, and
+# **Next**: [`state_and_memory`](03_state_and_memory.ipynb) - explicit agent state, quality gates, and
 # checkpoint/replay for reproducibility.
 #
 # **Book**: Section 24.4 covers tool contract design, MCP (Model Context Protocol),
