@@ -26,8 +26,6 @@ import numpy as np
 import polars as pl
 import pytest
 
-from case_studies.utils.feature_engineering import contiguous_run
-
 NOTEBOOK = Path("case_studies/us_equities_panel/03_financial_features.py")
 
 # Applied to the complete series, before the screen.
@@ -92,6 +90,20 @@ def _load_notebook_functions(*wanted_names: str) -> dict[str, object]:
     namespace: dict[str, object] = {"np": np, "pl": pl}
     exec(compile(module, str(NOTEBOOK), "exec"), namespace)  # noqa: S102
     return {name: namespace[name] for name in wanted_names}
+
+
+# `contiguous_run("session", "symbol")` from `case_studies.utils.feature_engineering`,
+# written out rather than imported: that module also holds the stage's plotting helpers,
+# so importing it pulls in `utils.config`, which wants a data directory on disk. The
+# notebook functions below are exec'd with nothing but numpy and polars in scope for the
+# same reason, and the fixture holds to it.
+CONTIGUOUS_RUN = (
+    (pl.col("session").diff().over("symbol", order_by="session") != 1)
+    .fill_null(False)
+    .cum_sum()
+    .over("symbol", order_by="session")
+    .cast(pl.UInt32)
+)
 
 
 @pytest.fixture
@@ -159,9 +171,7 @@ def gapped_panel() -> pl.DataFrame:
     # a quote. Matches 03_financial_features, which numbers runs on `raw_df` and filters
     # afterwards.
     return (
-        pl.DataFrame(rows)
-        .sort(["symbol", "timestamp"])
-        .with_columns(contiguous_run("session", "symbol").alias("_run"))
+        pl.DataFrame(rows).sort(["symbol", "timestamp"]).with_columns(CONTIGUOUS_RUN.alias("_run"))
     )
 
 
