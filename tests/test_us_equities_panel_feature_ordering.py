@@ -26,6 +26,8 @@ import numpy as np
 import polars as pl
 import pytest
 
+from case_studies.utils.feature_engineering import contiguous_run
+
 NOTEBOOK = Path("case_studies/us_equities_panel/03_financial_features.py")
 
 # Applied to the complete series, before the screen.
@@ -150,7 +152,17 @@ def gapped_panel() -> pl.DataFrame:
                 "adv_21d": 1_000_000_000.0,
             }
         )
-    return pl.DataFrame(rows).sort(["symbol", "timestamp"])
+    # `_run` as the stage assigns it: on the complete series, before the screen, so a
+    # window never reaches across a session the symbol did not print. Both stocks print
+    # on every one of the 400 sessions, so each gets a single run and the orderings this
+    # module compares are unaffected - what the screen removes here is eligibility, not
+    # a quote. Matches 03_financial_features, which numbers runs on `raw_df` and filters
+    # afterwards.
+    return (
+        pl.DataFrame(rows)
+        .sort(["symbol", "timestamp"])
+        .with_columns(contiguous_run("session", "symbol").alias("_run"))
+    )
 
 
 ELIGIBLE = (pl.col("close") > 5.0) & (pl.col("adv_21d") > 1_000_000)
