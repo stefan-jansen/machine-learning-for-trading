@@ -60,12 +60,19 @@
 # debates a current question instead and will not reproduce these values.
 
 # %%
-"""Bull vs Bear Debate - adversarial stress-testing of forecasts."""
+import sys
 
-from datetime import date, datetime
+from utils.paths import get_chapter_dir
+
+sys.path.insert(0, str(get_chapter_dir(24)))
+
+"""Bull vs Bear Debate — adversarial stress-testing of forecasts."""
+
+import warnings
+
+warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mtick
 import polars as pl
 from agent_fixtures import get_chapter_contested_question
 from agent_observability import (
@@ -77,53 +84,27 @@ from agent_observability import (
     show_debate_transcript,
     trace_llm,
 )
-from agent_pipeline import neyman_extremize
+from agent_pipeline import neyman_extremize, validate_probabilities
 from agent_providers import ChatMessage, TokenUsage, create_llm_client
 from agent_research import ResearchAgent, format_agent_summary, parse_json
 from agent_schemas import AgentForecastArtifact, DebateArtifact, DebateRound
 from agent_tools import create_search_client
 
-from utils.style import COLORS, add_message_title, label_line_ends, show_with_alt
-
-# %% [markdown]
-# ## Settings
-#
-# `RUN_LIVE` left at `False` replays the pinned capture named below and makes no API calls.
-#
-# `DEBATE_ROUNDS` caps the argument. Three is enough for each side to state a case, answer the
-# other, and revise; past that the same points tend to be restated at increasing cost.
-#
-# `CONSENSUS_THRESHOLD` is how close the two sides have to come before the debate stops early.
-# Five percentage points is inside the resolution anyone should claim for a probability from
-# this kind of evidence, so continuing past it argues about noise.
-#
-# `DEBATE_WEIGHT` is how much of the final forecast comes from the debate midpoint rather than
-# the research agents' aggregate. It is low because the aggregate rests on three independent
-# evidence-gathering runs while the midpoint rests on two prompts arguing from summaries of
-# them. Nothing fits this value; it is a stated convention.
-#
-# `MIN_PANEL_DISAGREEMENT` is the spread below which the panel has effectively agreed and there
-# is nothing to debate. `MIN_GAP_CLOSURE` is how far the bull-bear gap has to close before the
-# debate counts as having moved anything.
-#
-# `NEYMAN_CORRELATION` is the pairwise correlation assumed when the research panel is
-# aggregated, as in [`05_aggregation_math`](05_aggregation_math.ipynb).
-#
-# `LLM_PROVIDER` is empty so the factory picks the first provider whose key is set, and
-# `"mock"` is a smoke test rather than a reproduction.
-
 # %% tags=["parameters"]
+# RUN_LIVE=False (the default) replays the pinned 2026-06-09 trace named below:
+# the notebook reloads that saved run and makes no API calls. Set RUN_LIVE=True
+# (with API keys) to debate a current question live; that path produces different
+# numbers.
 RUN_LIVE = False
 PINNED_TRACE = "07_adversarial_debate_20260609T141631Z_cf1ad76cf379.json"
+
+# Empty string auto-detects a provider (see NB06's note); the captured run used
+# claude-sonnet-4. LLM_PROVIDER="mock" is a CI smoke-test only (live path).
 LLM_PROVIDER = ""
 N_AGENTS = 3
-MAX_STEPS = 5
 DEBATE_ROUNDS = 3
 CONSENSUS_THRESHOLD = 0.05
-DEBATE_WEIGHT = 0.3
-MIN_PANEL_DISAGREEMENT = 0.05
-MIN_GAP_CLOSURE = 0.05
-NEYMAN_CORRELATION = 0.3
+MAX_STEPS = 5
 
 # %% [markdown]
 # ## Debate Prompts: Bull
@@ -186,23 +167,27 @@ Output JSON only:
 {{"argument": "Your strongest case for a lower probability of YES", "p_yes": 0.XX, "key_evidence": ["evidence point 1", "evidence point 2", "evidence point 3"]}}"""
 
 # %% [markdown]
-# ## One bull turn
+# ## Single-round driver
 #
-# The bull sees the common evidence and, after round one, the bear's previous
-# position. This helper returns the parsed argument, probability, evidence,
-# and token count.
+# Pulling one round's bull→bear→consensus-check into its own function keeps
+# the DebateAgent class small. The driver issues two LLM calls, parses
+# both, and returns a `DebateRound` plus the round's token usage.
 
 
 # %%
-def _run_bull_turn(
+def _run_debate_round(
     llm,
+    round_num: int,
     question: str,
     agent_summaries: str,
     aggregate_p_yes: float,
     prev_bear_argument: str | None,
     prev_bear_probability: float | None,
-) -> tuple[str, float, list[str], TokenUsage]:
-    """Run and parse one bull turn."""
+    consensus_threshold: float,
+) -> tuple[DebateRound, TokenUsage]:
+    """Run one bull→bear round. Returns (DebateRound, round_token_usage)."""
+    round_tokens = TokenUsage()
+
     bear_section = ""
     if prev_bear_argument is not None:
         bear_section = (
@@ -221,142 +206,42 @@ def _run_bull_turn(
     bull_raw, bull_tokens = llm.complete_with_usage(
         [ChatMessage(role="user", content=bull_prompt)], json_mode=True
     )
+    round_tokens = round_tokens + bull_tokens
     bull_parsed = parse_json(bull_raw)
-    return (
-        bull_parsed.get("argument", ""),
-        float(bull_parsed.get("p_yes", aggregate_p_yes)),
-        [str(e) for e in bull_parsed.get("key_evidence", [])],
-        bull_tokens,
-    )
-
-
-# %% [markdown]
-# ## One bear turn
-#
-# The bear always receives the current bull argument. Keeping the two model
-# calls separate makes the evidence flow and token accounting explicit.
-
-
-# %%
-def _run_bear_turn(
-    llm,
-    question: str,
-    agent_summaries: str,
-    aggregate_p_yes: float,
-    bull_argument: str,
-    bull_probability: float,
-) -> tuple[str, float, list[str], TokenUsage]:
-    """Run and parse one bear turn."""
+    bull_argument = bull_parsed.get("argument", "")
+    bull_p = float(bull_parsed["p_yes"])
+    validate_probabilities([bull_p])
+    bull_evidence = [str(e) for e in bull_parsed.get("key_evidence", [])]
 
     bear_prompt = BEAR_PROMPT_TEMPLATE.format(
         question=question,
         agent_summaries=agent_summaries,
         aggregate_p_yes=f"{aggregate_p_yes:.4f}",
         bull_argument=bull_argument,
-        bull_probability=f"{bull_probability:.4f}",
+        bull_probability=f"{bull_p:.4f}",
     )
     bear_raw, bear_tokens = llm.complete_with_usage(
         [ChatMessage(role="user", content=bear_prompt)], json_mode=True
     )
+    round_tokens = round_tokens + bear_tokens
     bear_parsed = parse_json(bear_raw)
-    return (
-        bear_parsed.get("argument", ""),
-        float(bear_parsed.get("p_yes", aggregate_p_yes)),
-        [str(e) for e in bear_parsed.get("key_evidence", [])],
-        bear_tokens,
-    )
+    bear_argument = bear_parsed.get("argument", "")
+    bear_probability = float(bear_parsed["p_yes"])
+    validate_probabilities([bear_probability])
+    bear_evidence = [str(e) for e in bear_parsed.get("key_evidence", [])]
 
-
-# %% [markdown]
-# ## Single-round driver
-#
-# One round runs bull then bear and checks whether their probabilities fall
-# within the declared consensus threshold.
-
-
-# %%
-def _run_debate_round(
-    llm,
-    round_num: int,
-    question: str,
-    agent_summaries: str,
-    aggregate_p_yes: float,
-    previous_bear: tuple[str, float] | None,
-    consensus_threshold: float,
-) -> tuple[DebateRound, TokenUsage]:
-    """Run one bull-to-bear round."""
-    prev_argument, prev_probability = previous_bear or (None, None)
-    bull_argument, bull_p, bull_evidence, bull_tokens = _run_bull_turn(
-        llm,
-        question,
-        agent_summaries,
-        aggregate_p_yes,
-        prev_argument,
-        prev_probability,
-    )
-    bear_argument, bear_p, bear_evidence, bear_tokens = _run_bear_turn(
-        llm, question, agent_summaries, aggregate_p_yes, bull_argument, bull_p
-    )
-
+    consensus = abs(bull_p - bear_probability) < consensus_threshold
     debate_round = DebateRound(
         round_number=round_num,
         bull_argument=bull_argument,
         bull_probability=bull_p,
         bear_argument=bear_argument,
-        bear_probability=bear_p,
-        consensus_reached=abs(bull_p - bear_p) < consensus_threshold,
+        bear_probability=bear_probability,
+        consensus_reached=consensus,
         bull_key_evidence=bull_evidence,
         bear_key_evidence=bear_evidence,
     )
-    return debate_round, bull_tokens + bear_tokens
-
-
-# %% [markdown]
-# ## Multi-round driver
-#
-# The driver carries the latest bear position into the next bull prompt and
-# stops once the declared consensus rule fires.
-
-
-# %%
-def _conduct_debate(
-    llm,
-    question: str,
-    agent_summaries: str,
-    aggregate_p_yes: float,
-    max_rounds: int,
-    consensus_threshold: float,
-) -> tuple[DebateArtifact, TokenUsage]:
-    rounds: list[DebateRound] = []
-    tokens = TokenUsage()
-    previous_bear: tuple[str, float] | None = None
-    for round_num in range(1, max_rounds + 1):
-        round_result, round_tokens = _run_debate_round(
-            llm,
-            round_num,
-            question,
-            agent_summaries,
-            aggregate_p_yes,
-            previous_bear,
-            consensus_threshold,
-        )
-        rounds.append(round_result)
-        tokens = tokens + round_tokens
-        if round_result.consensus_reached:
-            break
-        previous_bear = (round_result.bear_argument, round_result.bear_probability)
-    last = rounds[-1]
-    return (
-        DebateArtifact(
-            rounds=rounds,
-            bull_final_probability=last.bull_probability,
-            bear_final_probability=last.bear_probability,
-            consensus_reached=last.consensus_reached,
-            early_termination=last.consensus_reached and len(rounds) < max_rounds,
-            token_usage=tokens,
-        ),
-        tokens,
-    )
+    return debate_round, round_tokens
 
 
 # %% [markdown]
@@ -389,42 +274,66 @@ class DebateAgent:
         aggregate_p_yes: float,
     ) -> DebateArtifact:
         """Run the debate. Returns a DebateArtifact with full transcript."""
-        artifact, self.token_usage = _conduct_debate(
-            self.llm,
-            question,
-            agent_summaries,
-            aggregate_p_yes,
-            self.max_rounds,
-            self.consensus_threshold,
+        self.token_usage = TokenUsage()
+        rounds: list[DebateRound] = []
+        prev_bear_argument: str | None = None
+        prev_bear_probability: float | None = None
+
+        for round_num in range(1, self.max_rounds + 1):
+            debate_round, round_tokens = _run_debate_round(
+                self.llm,
+                round_num,
+                question,
+                agent_summaries,
+                aggregate_p_yes,
+                prev_bear_argument,
+                prev_bear_probability,
+                self.consensus_threshold,
+            )
+            self.token_usage = self.token_usage + round_tokens
+            rounds.append(debate_round)
+            if debate_round.consensus_reached:
+                break
+            prev_bear_argument = debate_round.bear_argument
+            prev_bear_probability = debate_round.bear_probability
+
+        final_bull = rounds[-1].bull_probability if rounds else None
+        final_bear = rounds[-1].bear_probability if rounds else None
+        consensus_reached = rounds[-1].consensus_reached if rounds else False
+
+        return DebateArtifact(
+            rounds=rounds,
+            bull_final_probability=final_bull,
+            bear_final_probability=final_bear,
+            consensus_reached=consensus_reached,
+            early_termination=consensus_reached and len(rounds) < self.max_rounds,
+            token_usage=self.token_usage,
         )
-        return artifact
 
 
 # %% [markdown]
 # ## Setup: Run Research Agents
 #
-# The research agents from
-# [`06_multi_agent_research`](06_multi_agent_research.ipynb) run first, to establish the
-# baseline estimates the debate stress-tests. This time they run on the pinned contested
-# question, where they are expected to disagree.
+# We first run the research agents from NB06 to establish baseline probability
+# estimates that the debate will stress-test — this time on the pinned contested
+# question, where the agents are expected to disagree.
 
 # %%
 artifacts: list[AgentForecastArtifact] = []
 
 if RUN_LIVE:
     llm = create_llm_client(LLM_PROVIDER)
-    search = create_search_client(LLM_PROVIDER)
+    search = create_search_client()
     question = get_chapter_contested_question()
     provider_name = llm.model_name
-    captured_on = date.today().isoformat()
 
-    # Run N agents, each under its own tracer, so that every prompt sent and every raw
-    # response is captured and attributed to the agent that made it.
+    # Run N agents, each under its own tracer so the full conversation — every
+    # prompt sent and every raw response — is captured and attributed per agent.
     agent_tracers = []
     for i in range(N_AGENTS):
         tracer = trace_llm(llm, label=f"agent_{i}")
         agent = ResearchAgent(llm=tracer, search=search, agent_id=f"agent_{i}", max_steps=MAX_STEPS)
-        artifacts.append(agent.run(question, market_price=question.current_market_price))
+        artifacts.append(agent.run(question, market_price=None))
         agent_tracers.append(tracer)
 else:
     # Replay: reload the pinned trace and rehydrate the agent panel and debate.
@@ -432,32 +341,40 @@ else:
     question = pinned_run.question_obj()
     provider_name = pinned_run.provider
     artifacts = pinned_run.agent_artifacts()
-    captured_on = datetime.fromisoformat(pinned_run.created_at).date().isoformat()
 
 artifacts.sort(key=lambda a: a.agent_id)
-answered = [a for a in artifacts if a.forecast_produced]
-if not answered:
-    raise RuntimeError("no research agent produced a forecast; there is nothing to debate")
-panel_probabilities = [a.p_yes for a in answered]
-aggregate = neyman_extremize(panel_probabilities, base=0.5, correlation=NEYMAN_CORRELATION)
+forecast_artifacts = [a for a in artifacts if a.p_yes is not None]
+if not forecast_artifacts:
+    run = RunTrace.capture(
+        notebook="07_adversarial_debate",
+        provider=provider_name,
+        question=question,
+        agents=artifacts,
+        status="abstained",
+        llm_calls=merge_calls(*agent_tracers),
+    )
+    raise RuntimeError(f"All researchers abstained. Diagnostic trace: {run.save()}")
+probs = [a.p_yes for a in forecast_artifacts]
+aggregate = neyman_extremize(probs, base=0.5, correlation=0.3)
 
-mode = "live" if RUN_LIVE else f"replay of a capture recorded {captured_on}"
-print(f"Mode:         {mode}")
+print(f"Mode:         {'LIVE' if RUN_LIVE else 'REPLAY (pinned 2026-06-09 trace)'}")
 print(f"Provider:     {provider_name}")
 print(f"Question:     {question.question}")
-print(f"Market p_yes: {question.current_market_price:.1%}\n")
+print(f"Market p_yes: {question.current_market_price}\n")
 print("Pre-debate agent estimates:")
-for a in answered:
-    print(f"  {a.agent_id}: p_yes={a.p_yes:.2f}, confidence={a.confidence:.2f}")
-print(f"\nAggregate: {aggregate.extremized_probability:.2f}")
+for a in artifacts:
+    print(f"  {a.agent_id}: p_yes={a.p_yes}, confidence={a.confidence:.2f}")
+print(f"\nAggregate (Neyman ρ=0.3): {aggregate.extremized_probability:.2f}")
 
 # %% [markdown]
-# ### Where the agents started
+# ### Pre-debate agent timelines
 #
-# Before any argument, here is each research agent's full captured run: every query, the
-# documents it retrieved, and its untruncated rationale, rendered by the same `show_agents`
-# helper used in [`06_multi_agent_research`](06_multi_agent_research.ipynb). The agents enter
-# this debate already disagreeing, and the timelines say which evidence pulled each one where.
+# Before the debate stress-tests them, here is the full captured run for each
+# research agent — every query, the documents retrieved, and the untruncated
+# rationale — rendered by the same `show_agents` observability helper used in
+# NB06. On this contested question the agents enter the debate already
+# disagreeing; the timelines show *which* evidence pulled each one toward its
+# starting probability.
 
 # %%
 print(show_agents(artifacts))
@@ -468,24 +385,12 @@ print(show_agents(artifacts))
 # The `DebateAgent` makes real LLM calls for each round. The bull and bear
 # prompts include the agent summaries so both sides argue from the same
 # evidence base.
-#
-# Both debaters are anchored on the research panel's aggregate, which the cell below reads off
-# the `AggregationResult`. That field is `None` when there was nothing to aggregate, and the
-# fallback to the plain mean is meant for exactly that case. Testing it with `or` would also
-# fall through on a probability of zero, which is a different thing entirely: `neyman_extremize`
-# cannot return one today, because it clamps just inside the unit interval, but that is a
-# property of one clamp rather than of the field. Testing against `None` says what is meant
-# whatever the clamp does next.
 
 # %%
-agg_p = (
-    aggregate.extremized_probability
-    if aggregate.extremized_probability is not None
-    else aggregate.raw_probability
-)
+agg_p = aggregate.extremized_probability or aggregate.raw_probability
 
 if RUN_LIVE:
-    agent_summaries = "\n\n---\n\n".join(format_agent_summary(a) for a in artifacts)
+    agent_summaries = "\n\n---\n\n".join(format_agent_summary(a) for a in forecast_artifacts)
     debate_tracer = trace_llm(llm, label="debate")
     debate = DebateAgent(
         llm=debate_tracer,
@@ -528,164 +433,117 @@ rounds_df = pl.DataFrame(
 rounds_df
 
 # %% [markdown]
-# The table gives the shape of the debate and the transcript below gives its substance.
-# `show_debate_transcript` prints each round in full: both sides' complete arguments and the
-# key evidence they cited, with nothing truncated. The table says whether the gap stayed open;
-# only the transcript says what reasoning each side used to hold its ground. It is the debate
-# counterpart to the panel's per-agent timelines.
+# The table above is the *shape* of the debate; the transcript below is its
+# *substance*. `show_debate_transcript` prints each round in full — both sides'
+# complete arguments and the key evidence they cited, with nothing truncated —
+# so the reader can see not just that the gap stayed open but the reasoning each
+# side used to hold its ground. This is the debate counterpart to NB06's
+# per-agent timelines: the same auditing discipline applied to the adversarial
+# stage.
 
 # %%
 print(show_debate_transcript(result))
 
 # %% [markdown]
-# ## The Gap Across Rounds
+# ## Visualizing Probability Trajectory
 #
-# One figure answers the question the whole notebook is about: does adversarial pressure close
-# the distance between the two sides, or does it leave them where they started? The shaded band
-# is the disagreement itself, and the dotted line is the aggregate the research agents reached
-# before either debater said anything.
+# This figure tracks the bull-bear gap across rounds: whether it narrows as each
+# side takes on the other's strongest arguments, or holds when the disagreement
+# is genuine.
 
 # %%
-rounds_x = [r.round_number for r in result.rounds]
-bull_probs = [r.bull_probability for r in result.rounds]
-bear_probs = [r.bear_probability for r in result.rounds]
-midpoints = [(b + r) / 2 for b, r in zip(bull_probs, bear_probs, strict=False)]
-gaps = [abs(bull - bear) for bull, bear in zip(bull_probs, bear_probs, strict=True)]
-change = gaps[-1] - gaps[0]
-direction = "narrows" if change < -0.01 else "widens" if change > 0.01 else "holds"
+if len(result.rounds) >= 2:
+    rounds_x = [r.round_number for r in result.rounds]
+    bull_probs = [r.bull_probability for r in result.rounds]
+    bear_probs = [r.bear_probability for r in result.rounds]
+    midpoints = [(b + r) / 2 for b, r in zip(bull_probs, bear_probs, strict=False)]
 
-fig, ax = plt.subplots()
-ax.plot(
-    rounds_x, bull_probs, "^-", color=COLORS["positive"], markersize=8, label="Bull", linewidth=2
-)
-ax.plot(
-    rounds_x, bear_probs, "v-", color=COLORS["negative"], markersize=8, label="Bear", linewidth=2
-)
-ax.plot(rounds_x, midpoints, "o--", color=COLORS["neutral"], markersize=5, label="Midpoint")
-ax.fill_between(rounds_x, bull_probs, bear_probs, alpha=0.15, color=COLORS["blue_light"])
-# The aggregate is a reference line rather than a series, so it is annotated in place; the
-# three series are direct-labelled at their right ends, which keeps a legend off the data.
-ax.axhline(agg_p, color=COLORS["blue"], linestyle=":")
-ax.annotate(
-    "Pre-debate aggregate",
-    xy=(rounds_x[0], agg_p),
-    xytext=(0, -12),
-    textcoords="offset points",
-    color=COLORS["blue"],
-    fontsize=9,
-)
-ax.set_xlabel("Debate round")
-ax.set_ylabel("Probability of yes")
-ax.set_xticks(rounds_x)
-ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
-add_message_title(
-    ax,
-    "Bull and bear probabilities by debate round",
-    subtitle="Shaded band is the disagreement between the two sides",
-)
-y_min = min(bear_probs + bull_probs + [agg_p])
-y_max = max(bear_probs + bull_probs + [agg_p])
-pad = max(0.05, (y_max - y_min) * 0.15)
-ax.set_ylim(max(0.0, y_min - pad), min(1.0, y_max + pad))
-label_line_ends(ax)
-show_with_alt(
-    fig,
-    "Line chart over the debate rounds, one point per round. The bull line runs along the top "
-    "and the bear line along the bottom, each direct-labelled at its right end. The shaded "
-    f"band between them {direction} from the first round to the last. A dashed midpoint line "
-    "sits between the two, above a dotted line marking the pre-debate aggregate.",
-)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(rounds_x, bull_probs, "g^-", markersize=10, label="Bull", linewidth=2)
+    ax.plot(rounds_x, bear_probs, "rv-", markersize=10, label="Bear", linewidth=2)
+    ax.plot(rounds_x, midpoints, "ko--", markersize=6, label="Midpoint", alpha=0.6)
+
+    ax.fill_between(rounds_x, bull_probs, bear_probs, alpha=0.15, color="gray")
+
+    ax.axhline(
+        agg_p,
+        color="blue",
+        linestyle=":",
+        alpha=0.5,
+        label=f"Pre-debate aggregate ({agg_p:.2f})",
+    )
+
+    ax.set_xlabel("Debate Round")
+    ax.set_ylabel("Probability")
+    ax.set_title("Bull-Bear Probability Trajectory")
+    ax.legend(loc="best")
+    y_min = min(bear_probs + bull_probs + [agg_p])
+    y_max = max(bear_probs + bull_probs + [agg_p])
+    pad = max(0.05, (y_max - y_min) * 0.15)
+    ax.set_ylim(max(0.0, y_min - pad), min(1.0, y_max + pad))
+    fig.tight_layout()
+    fig.show()
 
 # %% [markdown]
-# A closing gap is the productive case: each side gives ground on the other's strongest point,
-# and the final midpoint carries a reconciliation that averaging the research agents could not
-# have produced. A gap that stays the same width means nothing was reconciled, whether or not
-# both sides moved - they can drift together, which shifts the midpoint while leaving the
-# disagreement exactly as wide as it was.
-#
-# So the midpoint on its own says nothing about how much the two sides disagree. A pair of
-# forecasts far apart and a pair close together have the same midpoint whenever they are
-# centred on the same point. Disagreement is the gap, which is what the shaded band draws, and
-# a midpoint reported without it hides how much of the question is unsettled.
+# **Interpretation**: The plot tracks the bull-bear gap across rounds.
+# Agreement shows convergence within this discussion; it does not establish
+# accuracy, evidence quality, or calibrated confidence. The captured run
+# keeps a wide gap across all three rounds, so no consensus update was reached.
 
 # %% [markdown]
-# ## Folding the Debate Back In
+# ## Post-Debate Probability
 #
-# The debate produces a midpoint. Turning that into a forecast means deciding how much of it
-# to believe relative to the aggregate the research agents produced, and there is no fitted
-# answer to that: `DEBATE_WEIGHT` is a stated convention. It is set low because the aggregate
-# rests on three independent evidence-gathering runs while the midpoint rests on two prompts
-# arguing from summaries of them, so the debate adjusts the aggregate rather than replacing it.
-#
-# A number produced this way is only as good as the debate behind it, which is what the next
-# section checks before anyone uses it.
+# The following 70/30 blend is an illustrative aggregation choice applied to this
+# saved debate. It is not the AIA paper's rule and is not used by the repaired
+# capstone, which uses a debate consensus when one is reached.
 
 # %%
 pre_debate = agg_p
 debate_midpoint = (result.bull_final_probability + result.bear_final_probability) / 2
-blended = (1 - DEBATE_WEIGHT) * pre_debate + DEBATE_WEIGHT * debate_midpoint
 
-print(f"Pre-debate aggregate: {pre_debate:.2f}")
-print(f"Debate midpoint:      {debate_midpoint:.2f}")
-print(f"Blended:              {blended:.2f}")
-print(f"Shift from debate:    {blended - pre_debate:+.2f}")
+blended = 0.7 * pre_debate + 0.3 * debate_midpoint
+
+print(f"Pre-debate aggregate:  {pre_debate:.2f}")
+print(f"Debate midpoint:       {debate_midpoint:.2f}")
+print(f"Blended (70/30):       {blended:.2f}")
+print(f"Shift from debate:     {blended - pre_debate:+.2f}")
 
 if result.consensus_reached:
-    print("\nThe two sides converged within the consensus threshold.")
+    print("\nDebate reached consensus; accuracy remains untested.")
 else:
-    print("\nNo consensus: the blended value carries the open disagreement with it.")
+    print("\nNo consensus was reached in this run.")
 
 # %% [markdown]
-# ## Did the Debate Earn Its Cost?
+# ## When Does Debate Add Value?
 #
-# Two conditions have to hold for the answer to be yes, and they are different questions.
-#
-# The panel has to have disagreed in the first place: debate applied to three agents already
-# within a point of each other confirms what was known and bills for it.
-# `MIN_PANEL_DISAGREEMENT` is the width below which it is not worth starting.
-#
-# And the debate has to have moved something. The right thing to look at is the gap between
-# the two sides across rounds, not the shift in the blend: the blend is the pre-debate
-# aggregate mixed with the midpoint at a fixed weight, so its movement is that weight times
-# the distance between the midpoint and the aggregate, and it says nothing about whether the
-# debate itself went anywhere. A gap that closes is the debate working. A gap that holds means
-# both sides finished where they started, whatever the blend then does to the aggregate.
+# Decision rule used by the cell below: run debate when pre-debate agent
+# disagreement exceeds 15 percentage points and the resulting blend shifts the
+# aggregate by more than 3 percentage points. Below those thresholds, debate
+# spends tokens without changing the forecast.
 
 # %%
-panel_disagreement = max(panel_probabilities) - min(panel_probabilities)
-gap_change = gaps[-1] - gaps[0]
-midpoint_move = midpoints[-1] - midpoints[0]
+agent_range = max(probs) - min(probs)
+debate_shift = abs(blended - pre_debate)
 
-print(f"Panel disagreement before debate:   {panel_disagreement:.2f}")
-print(f"Bull-bear gap, first to last round: {gaps[0]:.2f} -> {gaps[-1]:.2f}")
-print(f"Midpoint, first to last round:      {midpoints[0]:.2f} -> {midpoints[-1]:.2f}")
-print(f"Net midpoint move:                  {midpoint_move:+.2f}")
-if panel_disagreement < MIN_PANEL_DISAGREEMENT:
-    print("\nThe panel had already agreed; the debate was not worth starting.")
-elif gap_change < -MIN_GAP_CLOSURE:
-    print(
-        "\nDisagreement is narrower at the end than at the start. Whether it narrowed "
-        "steadily or moved around on the way is in the per-round table above."
-    )
-elif gap_change > MIN_GAP_CLOSURE:
-    print(
-        "\nDisagreement is wider at the end than at the start. The per-round table says "
-        "whether it widened throughout or only in the final round."
-    )
+print(f"Agent disagreement: {agent_range:.2f} ({agent_range:.0%})")
+print(f"Debate probability shift: {debate_shift:.2f} ({debate_shift:.0%})")
+
+if agent_range > 0.15 and debate_shift > 0.03:
+    print("→ Debate was productive (high disagreement, meaningful shift)")
+elif agent_range < 0.05:
+    print("→ Debate was low-value (agents already agreed)")
 else:
-    print(
-        "\nDisagreement ends within the tolerance of where it started, so the debate "
-        "reconciled nothing on net. The midpoint line says whether the two sides moved at "
-        "all, and the aggregate should be reported with the open gap beside it."
-    )
+    print("→ Debate had marginal impact")
+
 # %% [markdown]
 # ## Persisting the Full Run Trace
 #
-# The same record as the panel notebook keeps, now covering both stages. `RunTrace` bundles
-# the question, the research-agent artifacts, the complete debate transcript, and the raw
-# model conversation for every research and debate call (captured by the per-agent and debate
-# `TracingLLMClient`s) into one JSON record under `forecast_traces/`. Reload it to replay
-# exactly what each debater was shown and how it responded, round by round.
+# The same auditing discipline as NB06, now covering both stages. `RunTrace`
+# bundles the question, the research-agent artifacts, the complete debate
+# transcript, and the raw model conversation for every research and debate call
+# — captured by the per-agent and debate `TracingLLMClient`s — into one JSON
+# record under `forecast_traces/`. Reload it to replay exactly what each
+# debater was shown and how it responded, round by round.
 
 # %%
 if RUN_LIVE:
@@ -725,10 +583,10 @@ else:
 # %% [markdown]
 # ## Replaying the Debate Calls
 #
-# The raw audit view for the debate: every bull and bear prompt, including the opposing
-# side's previous argument that is fed back in each round, next to the untruncated JSON each
-# debater returned. The transcript and the trajectory figure above are both derived from
-# exactly these responses.
+# The raw audit view for the debate: every bull and bear prompt — including the
+# opposing side's previous argument that gets fed back in each round — next to
+# the untruncated JSON each debater returned. The transcript and trajectory
+# figure above are both derived from exactly these responses.
 
 # %%
 debate_calls = [c for c in llm_calls if c.label == "debate"]
@@ -737,30 +595,22 @@ print(replay_llm_calls(debate_calls, content_chars=700))
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Debate is a diagnostic before it is an aggregator.** Whether the gap closes tells you
-#    something the average cannot: closing means the disagreement was informational and one
-#    side had evidence the other had not weighed; holding means the two sides read the same
-#    evidence and drew different conclusions from it. Only the first is a case for updating.
-# 2. **A midpoint that does not move is a result.** Blending an unchanged midpoint into the
-#    aggregate produces a number that looks updated and is not, which is worse than reporting
-#    the aggregate and the open gap side by side.
-# 3. **Adversarial roles are a prompt, not a mechanism.** Both debaters are the same model told
-#    to argue opposite sides from the same evidence, so a narrowing gap is two prompts
-#    converging rather than two analysts persuading each other. It is a cheap stress test and
-#    not an independent second opinion.
-# 4. **Terminate on the gap, not on the round count.** Once the two sides are within the
-#    consensus threshold there is nothing left to argue, and every further round is paid for.
-# 5. **Debate only earns its cost where the panel already disagrees.** Running it on a panel
-#    that agreed spends tokens to confirm the agreement.
+# 1. **Trajectory shape is the signal**: A narrowing bull-bear gap shows
+#    information being incorporated; a flat or widening gap means the debate
+#    has not surfaced new evidence and is noise. The chapter trace shown here
+#    illustrates the latter — the gap stays flat across all three rounds
+#    (bull and bear both lock in their first-round position), which is the
+#    honest demonstration of why a single short debate is not sufficient when
+#    the two sides have already committed to their priors.
+# 2. **Midpoint ≠ average**: The debate midpoint captures adversarial stress-testing
+#    that simple agent averaging misses
+# 3. **Consensus gating**: Early termination when the gap closes below threshold
+#    saves token budget without losing information
+# 4. **Debate adds most value when agents disagree** — if they're already
+#    aligned, debate is a waste of tokens
 #
-# **Known limitations of what is built here.** One capture, one question, three rounds: nothing
-# establishes that the gap would behave this way again. The bull and bear see agent summaries
-# rather than the underlying evidence, so neither can check a claim the other makes. The blend
-# weight is a stated convention rather than a fitted parameter, and no scoring anywhere
-# establishes that a blended forecast scores better than the aggregate it adjusts.
-#
-# **Next**: [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) wires the research,
-# aggregation, debate and supervisor stages into one runnable pipeline.
+# **Next**: [`forecasting_pipeline`](08_forecasting_pipeline.ipynb) — wire everything together into the full
+# agent → aggregation → debate → supervisor pipeline.
 #
 # **Book**: Section 24.7 discusses the debate pattern in the context of Bridgewater's
 # AIA system and prediction market design.

@@ -8,14 +8,27 @@ from __future__ import annotations
 
 import os
 import time
-import warnings
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 from agent_schemas import SearchResult
+
+
+def eligible_results(results: list[SearchResult], cutoff: date | None = None) -> list[SearchResult]:
+    usable = []
+    for result in results:
+        url = urlparse(result.url or "")
+        if url.scheme not in {"http", "https"} or not url.hostname or not result.snippet:
+            continue
+        published = _parse_published_date(result.published or "")
+        if cutoff is not None and (published is None or published >= cutoff):
+            continue
+        usable.append(result)
+    return usable
+
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -76,9 +89,6 @@ class TavilySearchClient:
             "include_answer": False,
             "include_raw_content": False,
         }
-        if cutoff_date:
-            payload["days"] = 90
-
         with httpx.Client(timeout=30.0) as client:
             resp = client.post("https://api.tavily.com/search", json=payload)
             resp.raise_for_status()
@@ -109,14 +119,15 @@ class TavilySearchClient:
         return results
 
     def _filter_by_date(self, results: list[SearchResult], cutoff: date) -> list[SearchResult]:
-        """Remove results published after cutoff (prevents lookahead)."""
+        """Keep only results dated before cutoff (prevents lookahead).
+
+        An undated result may have been written after the cutoff, so it is dropped.
+        """
         filtered: list[SearchResult] = []
         for r in results:
-            if r.published:
-                pub = _parse_published_date(r.published)
-                if pub and pub >= cutoff:
-                    continue  # Future result -- skip
-            filtered.append(r)
+            pub = _parse_published_date(r.published) if r.published else None
+            if pub is not None and pub < cutoff:
+                filtered.append(r)
         return filtered
 
     def _domain_allowed(self, url: str) -> bool:
@@ -133,7 +144,7 @@ class TavilySearchClient:
 
 
 # ---------------------------------------------------------------------------
-# Mock search (deterministic CI fallback)
+# Mock search (explicit synthetic fixtures)
 # ---------------------------------------------------------------------------
 
 
@@ -215,6 +226,13 @@ _MOCK_RESULTS: dict[str, list[SearchResult]] = {
 }
 
 
+# These records are synthetic; reserved domains prevent mistaking fixture URLs for sources.
+for _scenario, _records in _MOCK_RESULTS.items():
+    for _index, _result in enumerate(_records):
+        _result.title = f"Synthetic fixture: {_result.title}"
+        _result.url = f"https://example.org/{_scenario}-{_index}"
+
+
 class MockSearchClient:
     """Deterministic search client returning canned results for CI testing."""
 
@@ -233,57 +251,10 @@ class MockSearchClient:
                 results = keyword_results
                 break
 
-        # Apply cutoff date filtering (same logic as Tavily)
-        if cutoff_date:
-            filtered = []
-            for r in results:
-                if r.published:
-                    pub = _parse_published_date(r.published)
-                    if pub and pub >= cutoff_date:
-                        continue
-                filtered.append(r)
-            results = filtered
-
-        return results[:max_results]
+        return eligible_results(results, cutoff_date)[:max_results]
 
 
 # ---------------------------------------------------------------------------
-# Source policy
-# ---------------------------------------------------------------------------
-
-
-def _host_matches(host: str, domain: str) -> bool:
-    """True when `host` is `domain` or a subdomain of it."""
-    domain = domain.lower().lstrip(".")
-    return host == domain or host.endswith(f".{domain}")
-
-
-def apply_domain_policy(
-    items: list[SearchResult],
-    *,
-    allowed: set[str] | None = None,
-    blocked: set[str] | None = None,
-) -> list[SearchResult]:
-    """Drop results whose host is outside `allowed`, or inside `blocked`.
-
-    Matching is on the registered domain and its subdomains, with a leading
-    ``www.`` removed, so ``reuters.com`` covers ``www.reuters.com`` and
-    ``uk.reuters.com``. An empty or absent set is no constraint: the blocklist
-    is applied first, then the allowlist.
-    """
-    keep: list[SearchResult] = []
-    for result in items:
-        host = (urlparse(result.url).hostname or "").lower().removeprefix("www.")
-        if blocked and any(_host_matches(host, domain) for domain in blocked):
-            continue
-        if allowed and not any(_host_matches(host, domain) for domain in allowed):
-            continue
-        keep.append(result)
-    return keep
-
-
-# ---------------------------------------------------------------------------
-# Tool execution logging
 # Tool execution logging
 # ---------------------------------------------------------------------------
 
@@ -301,33 +272,34 @@ class ToolExecution:
 
 
 class ToolExecutor:
-    """Wraps a SearchClient with source policy and an execution log.
+    """Wraps a SearchClient with execution logging and domain policy.
 
-    The log records every call the agent made, independent of the agent's own
-    reasoning trace, so a run can be audited by what executed rather than by
-    what the model said it was doing.
-
-    ``allowed_domains`` and ``blocked_domains`` are applied to results after
-    retrieval: a host outside the allowlist, or inside the blocklist, is dropped
-    before the agent ever sees it, and the log entry records how many results
-    the policy removed.
+    Provides an audit trail of every search call, independent of the
+    agent's own trace -- captures what *actually* executed.
     """
 
     def __init__(
-        self,
-        search: SearchClient | None = None,
-        allowed_domains: set[str] | None = None,
-        blocked_domains: set[str] | None = None,
+        self, search: SearchClient | None = None, allowed_domains: set[str] | None = None
     ) -> None:
         self.search = search
         self.allowed_domains = allowed_domains or set()
-        self.blocked_domains = blocked_domains or set()
         self.execution_log: list[ToolExecution] = []
 
     def execute_search(
         self, query: str, max_results: int = 5, cutoff_date: date | None = None
     ) -> list[SearchResult]:
-        """Execute a search call, apply the source policy, and log the outcome."""
+        """Execute a search call with logging."""
+        if not isinstance(query, str) or not query.strip() or max_results < 1:
+            self.execution_log.append(
+                ToolExecution(
+                    tool_name="search",
+                    args={"query": query},
+                    status="blocked",
+                    duration_ms=0.0,
+                    result_preview="Invalid search arguments",
+                )
+            )
+            return []
         if self.search is None:
             self.execution_log.append(
                 ToolExecution(
@@ -338,22 +310,27 @@ class ToolExecutor:
 
         start = time.perf_counter()
         try:
-            retrieved = self.search.search(query, max_results, cutoff_date)
-            results = apply_domain_policy(
-                retrieved, allowed=self.allowed_domains, blocked=self.blocked_domains
+            results = eligible_results(
+                self.search.search(query, max_results, cutoff_date), cutoff_date
             )
-            n_blocked = len(retrieved) - len(results)
+            if self.allowed_domains:
+                results = [
+                    r
+                    for r in results
+                    if any(
+                        urlparse(r.url).hostname == domain
+                        or urlparse(r.url).hostname.endswith("." + domain)
+                        for domain in self.allowed_domains
+                    )
+                ]
             duration = (time.perf_counter() - start) * 1000
-            preview = f"{len(results)} results"
-            if n_blocked:
-                preview += f" ({n_blocked} blocked by source policy)"
             self.execution_log.append(
                 ToolExecution(
                     tool_name="search",
                     args={"query": query, "max_results": max_results},
                     status="success",
                     duration_ms=duration,
-                    result_preview=preview,
+                    result_preview=f"{len(results)} results",
                     provenance={"source": type(self.search).__name__},
                 )
             )
@@ -458,10 +435,11 @@ DEFAULT_ALLOWED_DOMAINS: set[str] = {
 def create_search_client(provider: str = "") -> SearchClient | None:
     """Create a search client. Returns None if no provider is available.
 
-    Set TAVILY_API_KEY in .env for real search. Returns MockSearchClient
-    for CI when no key is available.
+    Set TAVILY_API_KEY in .env for real search. Missing requested integrations raise an error; mocks require explicit selection.
     """
-    provider = provider or os.environ.get("SEARCH_PROVIDER", "")
+    provider = (provider or os.environ.get("SEARCH_PROVIDER", "")).strip().lower()
+    if provider not in {"", "none", "mock", "tavily"}:
+        raise ValueError(f"Unknown search provider: {provider!r}")
 
     if provider == "none":
         return None
@@ -473,16 +451,9 @@ def create_search_client(provider: str = "") -> SearchClient | None:
     if api_key:
         return TavilySearchClient(api_key=api_key)
 
-    if provider == "tavily":
-        warnings.warn("TAVILY_API_KEY not set. Using MockSearchClient.", stacklevel=2)
-        return MockSearchClient()
-
-    # Auto-detect: no Tavily key -> mock with warning
-    warnings.warn(
-        "No search provider detected. Using MockSearchClient. Set TAVILY_API_KEY in .env for real search.",
-        stacklevel=2,
+    raise RuntimeError(
+        "Search is unavailable. Configure TAVILY_API_KEY, or explicitly select mock/none for a teaching fixture or baseline."
     )
-    return MockSearchClient()
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +464,7 @@ def create_search_client(provider: str = "") -> SearchClient | None:
 def _parse_published_date(published: str) -> date | None:
     """Parse various date formats from published field.
 
-    Returns None for unparseable dates (fail-open: keep result).
+    Returns None for unparseable dates.
     """
     if not published:
         return None

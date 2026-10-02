@@ -74,6 +74,12 @@
 
 from __future__ import annotations
 
+import sys
+
+from utils.paths import get_chapter_dir
+
+sys.path.insert(0, str(get_chapter_dir(24)))
+
 import json
 import re
 
@@ -82,7 +88,6 @@ import polars as pl
 import research_operator as ro
 from IPython.display import Markdown, display
 
-from utils.paths import get_chapter_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt, zero_line
 
 # %% [markdown]

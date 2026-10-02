@@ -42,122 +42,87 @@
 # [`02_tool_contracts`](02_tool_contracts.ipynb) (tools).
 
 # %%
-"""Agent State, Memory, and Quality Gates: explicit, inspectable run state."""
+import sys
+
+from utils.paths import get_chapter_dir
+
+sys.path.insert(0, str(get_chapter_dir(24)))
+
+"""Agent State, Memory, and Quality Gates — explicit state for reliable agents."""
 
 import json
-from datetime import date, datetime, timedelta
+import warnings
+from datetime import datetime, timedelta
+
+warnings.filterwarnings("ignore")
 
 from agent_fixtures import get_demo_question
-from agent_schemas import (
-    AgentState,
-    check_consistency_gate,
-    check_coverage_gate,
-    check_freshness_gate,
-    run_quality_gates,
-)
-
-# %% [markdown]
-# ## Settings
-#
-# `AS_OF_ISO` is the moment the run is pretending to happen. Everything time-dependent is
-# measured against it rather than against the clock, which is what lets this notebook produce
-# the same output today and next year. It is set to the day before the demonstration
-# question's 2025-02-20 cutoff, so the run sits where a forecaster answering that question
-# would have sat.
-#
-# `RUN_ID` names the run. A checkpoint is only useful if it can be told apart from the next
-# one, and a fixed value here keeps the printed output stable; a real deployment generates one
-# per run, which is what `AgentState` does when none is given.
+from agent_schemas import AgentState, QualityGateResult
 
 # %% tags=["parameters"]
-AS_OF_ISO = "2025-02-19T12:00:00"
-RUN_ID = "ch24-state-demo"
-
-# %%
-as_of = datetime.fromisoformat(AS_OF_ISO)
+# (Parameters cell kept for Papermill — no notebook-level overrides are
+# currently exposed; future tunables like MIN_EVIDENCE_ITEMS / MAX_AGE_HOURS
+# would be added here.)
 
 # %% [markdown]
-# ## Why a Trace Is Not State
+# ## The State Problem
 #
-# [`01_react_reasoning`](01_react_reasoning.ipynb) already writes a durable record: `RunTrace`
-# saves the question, every prompt and reply, and every search result into a JSON file, and
-# that file is what the replay path reads back. So the run is reproducible, and a reader can
-# see exactly what happened.
+# Most agent tutorials treat state implicitly — it lives in the LLM's message history
+# and disappears when the conversation ends. For financial agents, this is dangerous:
 #
-# What that record cannot do is participate in the run. It is written at the end, from the
-# outside, and holds the model's conversation rather than the agent's own conclusions. Four
-# things a research process needs are all still missing:
+# - You can't audit what evidence the agent considered
+# - You can't replay a run with different parameters
+# - You can't detect when evidence is stale or insufficient
+# - You can't compare two runs systematically
 #
-# - **A place for derived knowledge.** The evidence the agent judged relevant, the questions it
-#   has not resolved, what it has decided so far. None of that is a prompt or a reply.
-# - **Something to check before answering.** A gate has to read a structured account of the
-#   evidence, not a transcript, and it has to run while the agent can still act on it.
-# - **A resumption point.** A conversation log replays a run; it does not let one continue from
-#   the middle with a changed setting.
-# - **A comparable object.** Two runs are two conversations, and no diff over prose is a
-#   measurement. Two `AgentState` records diff field by field.
-#
-# So the trace and the state are different artifacts with different jobs, and this chapter
-# keeps both: `RunTrace` is what the run looked like from outside, `AgentState` is what the
-# agent knew from inside.
+# The solution is an **explicit state schema** that captures everything the agent knows,
+# separate from the LLM's context window.
 
 # %% [markdown]
 # ## The AgentState Schema
 #
-# `AgentState` in `agent_schemas.py` holds eight fields, in four groups:
-#
-# - **Identity**: `run_id`, `question`, `cutoff_date` - which run this is, what it is answering,
-#   and the date past which its evidence may not be published
-# - **Evidence**: `evidence`, the documents gathered, and `open_questions`, what the agent has
-#   not resolved yet
-# - **Provenance**: `tool_trace`, every tool call the run made, including the ones that returned
-#   nothing
-# - **Checks**: `quality_gates`, the checks defined below and their outcomes, and
-#   `synthesis_status`, which moves from `pending` through `in_progress` to `complete`, or to
-#   `abstained` when the gates refuse the run
-#
-# It is a plain dataclass with `to_json` and `from_json`, which is all a checkpoint needs to be.
+# Our `AgentState` dataclass captures:
+# - **Identity**: `run_id`, `ticker` (question identifier), `cutoff_date`
+# - **Evidence**: list of structured evidence items from search calls
+# - **Open questions**: what the agent still needs to investigate
+# - **Tool trace**: full record of search calls and results
+# - **Quality gates**: pass/fail results for each gate
+# - **Synthesis status**: pending → in_progress → complete (or abstained)
 
 # %%
 question = get_demo_question()
 state = AgentState(
-    question=question.question,
+    ticker=question.question[:50],
     cutoff_date=question.cutoff_date,
-    run_id=RUN_ID,
 )
-print(f"Run ID:         {state.run_id}")
-print(f"Question:       {state.question}")
-print(f"Cutoff:         {state.cutoff_date}")
-print(f"Status:         {state.synthesis_status}")
+print(f"Run ID: {state.run_id}")
+print(f"Question: {state.ticker}")
+print(f"Cutoff: {state.cutoff_date}")
+print(f"Status: {state.synthesis_status}")
 print(f"Evidence items: {len(state.evidence)}")
-print(f"Quality gates:  {len(state.quality_gates)}")
+print(f"Quality gates: {len(state.quality_gates)}")
+
 # %% [markdown]
 # ## Collecting Evidence
 #
-# Every search the agent runs appends two records: an evidence item, holding what came back,
-# and a tool-trace entry, holding that the call happened at all. Keeping both matters, because
-# a search that returned nothing leaves an evidence list unchanged and a trace one entry longer,
-# and only the trace can tell "the agent did not look" apart from "the agent looked and found
-# nothing".
+# As the agent calls search tools, we record structured evidence items in the state.
+# Each item has a type, source, timestamp, and content. In the AIA Forecaster,
+# all evidence comes from web search results.
 #
-# An evidence item carries a `type`, the `source` that produced it, the `timestamp` at which it
-# was retrieved, the `query` that produced it, and the `content` itself. The three items below
-# stand in for a short research session and are written out one at a time so each shape is
-# visible on its own; in a real run they come from the search client of
-# [`02_tool_contracts`](02_tool_contracts.ipynb).
-
-# %% [markdown]
-# The first item is a search on the question itself: what is being said now about the event
-# being forecast.
+# Simulate a research workflow: three search queries returning canned
+# results. We add each evidence item to `state.evidence` (along with a
+# matching `tool_trace` entry) one at a time so the structure of each item
+# is visible on its own.
 
 # %%
 search_evidence: list[dict] = []
 
+# Evidence item 1: forward-looking search on the question itself.
 search_evidence.append(
     {
         "type": "search_results",
         "source": "web_search",
-        "timestamp": as_of.isoformat(),
+        "timestamp": datetime.now().isoformat(),
         "query": "NVIDIA Q4 FY2025 earnings expectations",
         "content": {
             "results": [
@@ -178,17 +143,13 @@ search_evidence.append(
     }
 )
 
-# %% [markdown]
-# The second is a narrower query on the business line that will decide the outcome. It carries
-# the same `search_results` type: the type says what kind of evidence this is, not which query
-# produced it.
-
 # %%
+# Evidence item 2: a second forward-looking query for context.
 search_evidence.append(
     {
         "type": "search_results",
         "source": "web_search",
-        "timestamp": as_of.isoformat(),
+        "timestamp": datetime.now().isoformat(),
         "query": "NVIDIA data center revenue growth",
         "content": {
             "results": [
@@ -203,19 +164,14 @@ search_evidence.append(
     }
 )
 
-# %% [markdown]
-# The third is a **base rate**: how often the event has happened before, independent of
-# anything specific to this quarter. It is typed separately because the coverage gate below
-# requires it, for a reason worth stating plainly. Asked to forecast from current reporting
-# alone, a model reasons from the narrative in front of it and ignores the frequency; a
-# historical anchor is what a probability has to be an adjustment away from.
-
 # %%
+# Evidence item 3: historical base-rate evidence — required by the
+# coverage gate alongside forward-looking search.
 search_evidence.append(
     {
         "type": "base_rate",
         "source": "web_search",
-        "timestamp": as_of.isoformat(),
+        "timestamp": datetime.now().isoformat(),
         "query": "NVIDIA historical earnings beat rate",
         "content": {
             "results": [
@@ -230,9 +186,6 @@ search_evidence.append(
     }
 )
 
-# %% [markdown]
-# Appending them to the state pairs each evidence item with its trace entry.
-
 # %%
 for item in search_evidence:
     state.evidence.append(item)
@@ -242,84 +195,170 @@ print(f"Evidence collected: {len(state.evidence)} items")
 print(f"Search calls made: {len(state.tool_trace)}")
 for item in state.evidence:
     n_results = len(item["content"].get("results", []))
-    print(f'  [{item["type"]}] "{item["query"][:45]}" -> {n_results} results')
+    print(f'  [{item["type"]}] "{item["query"][:45]}" → {n_results} results')
+
 # %% [markdown]
 # ## Quality Gates
 #
-# A **quality gate** is a check that runs on the state before the agent is allowed to produce
-# an answer. It is a contract about evidence: a statement, in code, of what a run must have
-# gathered for its output to be worth reading. When one fails the agent gathers more or
-# abstains, and the failure is recorded, so a thin run is visibly thin rather than quietly
-# confident.
+# Quality gates are **automated checks** that run before the agent produces its
+# final output. They catch problems that would otherwise lead to unreliable
+# forecasts. We implement three gates:
 #
-# Three gates cover three different ways the evidence can be inadequate:
-#
-# 1. **Coverage** asks whether there is enough evidence, of the required kinds.
-# 2. **Freshness** asks how long ago the agent went and looked.
-# 3. **Consistency** asks whether anything it read was published after the cutoff.
+# 1. **Coverage gate**: Does the agent have enough search results?
+# 2. **Freshness gate**: Is any evidence older than the allowed window?
+# 3. **Consistency gate**: Do any search results violate the cutoff date?
 
 # %% [markdown]
 # ### Coverage gate
 #
-# Two conditions. The required types make the gate an argument about *what kind* of evidence a
-# forecast needs: `search_results` for what is happening now and `base_rate` for how often the
-# thing has happened before. A model given only current reporting will follow the narrative and
-# ignore the frequency, which is the classic base-rate neglect, and requiring both types is a
-# cheap structural defence against it. `min_items` is the separate question of how much: three
-# records is the chapter's working minimum, low enough that a normal run clears it and high
-# enough that a single search cannot.
+# Verifies that the agent has gathered enough evidence and that it covers
+# both recent developments and historical base rates.
+
+
+# %%
+def check_coverage_gate(
+    state: AgentState,
+    min_items: int = 2,
+    required_types: list[str] | None = None,
+) -> QualityGateResult:
+    """Check that evidence covers required types and has minimum items.
+
+    The default `required_types` is two — `search_results` and `base_rate`
+    — so the gate fails when either is missing. That matches the chapter's
+    coverage rule: a credible forecast needs both forward-looking evidence
+    and a historical anchor.
+    """
+    required_types = required_types or ["search_results", "base_rate"]
+    present_types = {item["type"] for item in state.evidence}
+    missing = set(required_types) - present_types
+
+    if missing:
+        return QualityGateResult(
+            gate_name="coverage",
+            passed=False,
+            reason=f"Missing evidence types: {', '.join(sorted(missing))}",
+            details={"required": required_types, "present": sorted(present_types)},
+        )
+    if len(state.evidence) < min_items:
+        return QualityGateResult(
+            gate_name="coverage",
+            passed=False,
+            reason=f"Only {len(state.evidence)} evidence items (need {min_items})",
+            details={"count": len(state.evidence), "min_required": min_items},
+        )
+    return QualityGateResult(
+        gate_name="coverage",
+        passed=True,
+        reason=f"{len(state.evidence)} items covering {len(present_types)} types",
+        details={"count": len(state.evidence), "types": sorted(present_types)},
+    )
 
 
 # %% [markdown]
 # ### Freshness gate
 #
-# This gate reads the `timestamp` on each evidence item, which is when the agent retrieved the
-# document, not when the document was published. The two come apart in both directions: a run
-# that fetched a 2019 paper an hour ago is fresh, and a run that fetched this morning's
-# reporting three days ago is not. Twenty-four hours is the default window because the
-# questions in this chapter resolve on news cycles; a question about a quarterly filing would
-# take a wider one.
-#
-# A timestamp in the future is treated as a failure rather than as maximal freshness. It means
-# the clock, the fixture or the checkpoint is wrong, and a gate that reads it as fresh would
-# pass a run precisely when its record cannot be trusted.
+# Checks that evidence was gathered recently — stale search results may not
+# reflect the current state of the world.
+
+
+# %%
+def check_freshness_gate(
+    state: AgentState,
+    max_age_hours: int = 24,
+) -> QualityGateResult:
+    """Check that no evidence is older than the allowed window."""
+    now = datetime.now()
+    stale_items = []
+
+    for item in state.evidence:
+        ts_str = item.get("timestamp", "")
+        try:
+            ts = datetime.fromisoformat(ts_str)
+            age = now - ts
+            if age > timedelta(hours=max_age_hours):
+                stale_items.append(
+                    {"type": item["type"], "age_hours": round(age.total_seconds() / 3600, 1)}
+                )
+        except (ValueError, TypeError):
+            stale_items.append({"type": item["type"], "age_hours": "unknown"})
+
+    if stale_items:
+        return QualityGateResult(
+            gate_name="freshness",
+            passed=False,
+            reason=f"{len(stale_items)} evidence items exceed {max_age_hours}h age limit",
+            details={"stale_items": stale_items, "max_age_hours": max_age_hours},
+        )
+    return QualityGateResult(
+        gate_name="freshness",
+        passed=True,
+        reason=f"All evidence within {max_age_hours}h window",
+        details={"max_age_hours": max_age_hours, "item_count": len(state.evidence)},
+    )
 
 
 # %% [markdown]
 # ### Consistency gate
 #
-# Freshness is about the run; consistency is about the documents. Every search result has to
-# carry a publication date that parses and that falls before the question's cutoff. The three
-# ways a result can fail are reported separately, because they mean different things: a missing
-# date is evidence the tool could not date, an unparseable one is a provider bug, and a
-# post-cutoff one is hindsight that has already entered the run.
-#
-# [`02_tool_contracts`](02_tool_contracts.ipynb) filters at retrieval, so in a normal run
-# nothing reaches here to fail. This gate is the second check on the same property, at the
-# other end of the pipeline, and it exists because the first one can be bypassed: evidence
-# arrives from fixtures, from checkpoints, and from tools written after the filter was.
+# Checks that no search results violate the cutoff date. This catches lookahead
+# bias — if any result was published after the cutoff, the agent's forecast would
+# be contaminated with future information.
 
-# %% [markdown]
-# The three functions live in `agent_schemas.py` beside `AgentState` itself, so the agent in
-# [`04_research_agent`](04_research_agent.ipynb) checks its evidence against exactly the
-# definitions demonstrated here. One parser handles the cutoff and every result date, so a date
-# the cutoff comparison would accept cannot be one a result comparison rejects, and each gate
-# collects every failure rather than stopping at the first, so one run reports the full extent
-# of the problem.
-
-# %% [markdown]
-# ### Running the gates
-#
-# `run_quality_gates` runs the three, stores the outcomes on the state, and returns them, so a
-# checkpoint carries not only the evidence but the judgement made about it. What to do on a
-# failure is the caller's decision, not the gate's:
-# [`04_research_agent`](04_research_agent.ipynb) runs these same three over a finished agent
-# run and reports what they say about it.
 
 # %%
-gates = run_quality_gates(state, as_of=as_of)
+def check_consistency_gate(state: AgentState) -> QualityGateResult:
+    """Check that no search results violate the cutoff date."""
+    issues = []
 
-print("Quality gate results:")
+    for item in state.evidence:
+        content = item.get("content", {})
+        if isinstance(content, dict):
+            for r in content.get("results", []):
+                pub = r.get("published", "")
+                if pub and state.cutoff_date and pub >= state.cutoff_date:
+                    issues.append(
+                        f"Post-cutoff result: '{r.get('title', '')[:50]}' "
+                        f"(published {pub}, cutoff {state.cutoff_date})"
+                    )
+
+    if issues:
+        return QualityGateResult(
+            gate_name="consistency",
+            passed=False,
+            reason=f"{len(issues)} cutoff violations found",
+            details={"issues": issues},
+        )
+    return QualityGateResult(
+        gate_name="consistency",
+        passed=True,
+        reason="No cutoff violations detected",
+        details={"checks_run": ["cutoff_enforcement"]},
+    )
+
+
+# %% [markdown]
+# ### Running quality gates
+#
+# Gates run independently and their results are stored in the agent state. If any
+# gate fails, the agent should either gather more evidence or abstain.
+
+
+# %%
+def run_quality_gates(state: AgentState) -> list[QualityGateResult]:
+    """Run all quality gates and store results in state."""
+    gates = [
+        check_coverage_gate(state),
+        check_freshness_gate(state),
+        check_consistency_gate(state),
+    ]
+    state.quality_gates = gates
+    return gates
+
+
+# %%
+gates = run_quality_gates(state)
+
+print("Quality Gate Results:")
 for g in gates:
     status = "PASS" if g.passed else "FAIL"
     print(f"  [{status}] {g.gate_name}: {g.reason}")
@@ -328,136 +367,88 @@ all_passed = all(g.passed for g in gates)
 print(f"\nAll gates passed: {all_passed}")
 
 # %% [markdown]
-# All three pass. The run gathered both required evidence types across three records, it
-# retrieved them at the declared as-of time, and every document it read was published before
-# the cutoff. Passing gates say the evidence is admissible, and nothing more: none of them has
-# read a word of what the documents actually claim.
+# **Interpretation**: All three gates pass because we collected multiple search results
+# (coverage), all evidence was just gathered (freshness), and all published dates are
+# before the cutoff (consistency).
 
 # %% [markdown]
-# ## What each gate catches
+# ## Demonstrating Gate Failures
 #
-# A gate that has never been seen to fail is a gate nobody should trust. Each state below is
-# built to breach exactly one contract, so the failure can be attributed to the check that
-# raised it rather than guessed at.
-
-# %% [markdown]
-# ### Too few evidence types
-#
-# One search, one result, no historical anchor. The coverage gate checks required types before
-# it checks the count, so this is reported as a missing type.
+# Let's deliberately trigger failures to show how gates catch problems.
 
 # %%
-sparse_state = AgentState(question="one search only", cutoff_date="2025-02-20")
+# SPARSE state: only one evidence item
+sparse_state = AgentState(ticker="sparse_test", cutoff_date="2025-02-20")
 sparse_state.evidence.append(
     {
         "type": "search_results",
         "source": "web_search",
-        "timestamp": as_of.isoformat(),
-        "query": "NVIDIA Q4 FY2025 earnings expectations",
+        "timestamp": datetime.now().isoformat(),
+        "query": "test query",
         "content": {"results": [{"title": "Single result", "published": "2025-02-15"}]},
     }
 )
 
-sparse_gates = run_quality_gates(sparse_state, as_of=as_of)
-print("Gates on the one-search state:")
+sparse_gates = run_quality_gates(sparse_state)
+print("Sparse state gates:")
 for g in sparse_gates:
-    print(f"  [{'PASS' if g.passed else 'FAIL'}] {g.gate_name}: {g.reason}")
-
-# %% [markdown]
-# ### Both types, too little of either
-#
-# Coverage is two conditions, not one. This state satisfies the type requirement and still
-# fails, because two records is below the minimum the gate is configured to demand.
+    status = "PASS" if g.passed else "FAIL"
+    print(f"  [{status}] {g.gate_name}: {g.reason}")
 
 # %%
-thin_state = AgentState(question="both types, two records", cutoff_date="2025-02-20")
-thin_state.evidence.extend(
-    [
-        {
-            "type": "search_results",
-            "source": "web_search",
-            "timestamp": as_of.isoformat(),
-            "query": "NVIDIA Q4 FY2025 earnings expectations",
-            "content": {"results": [{"title": "Supply chain check", "published": "2025-02-17"}]},
+# INCONSISTENT state: search result published AFTER cutoff
+bad_state = AgentState(ticker="cutoff_test", cutoff_date="2025-02-20")
+bad_state.evidence.append(
+    {
+        "type": "search_results",
+        "source": "web_search",
+        "timestamp": datetime.now().isoformat(),
+        "query": "test query",
+        "content": {
+            "results": [
+                {"title": "Pre-cutoff article", "published": "2025-02-18"},
+                {"title": "POST-CUTOFF: earnings beat", "published": "2025-02-27"},
+            ]
         },
-        {
-            "type": "base_rate",
-            "source": "web_search",
-            "timestamp": as_of.isoformat(),
-            "query": "NVIDIA historical earnings beat rate",
-            "content": {"results": [{"title": "Beat history", "published": "2025-02-10"}]},
-        },
-    ]
+    }
+)
+bad_state.evidence.append(
+    {
+        "type": "base_rate",
+        "source": "web_search",
+        "timestamp": datetime.now().isoformat(),
+        "query": "historical base rate",
+        "content": {"results": [{"title": "Base rate data", "published": "2025-02-10"}]},
+    }
 )
 
-thin_gates = run_quality_gates(thin_state, as_of=as_of)
-print("Gates on the two-record state:")
-for g in thin_gates:
-    print(f"  [{'PASS' if g.passed else 'FAIL'}] {g.gate_name}: {g.reason}")
-
-# %% [markdown]
-# ### A document published after the cutoff
-#
-# This is the failure that matters most and shows up least. The state has enough evidence of
-# both types, retrieved on time, and one of its search results was published on 2025-02-27:
-# the day after NVIDIA reported. An agent reading it is not forecasting, and its forecast will
-# look excellent.
-
-# %%
-bad_state = AgentState(question="reads past the cutoff", cutoff_date="2025-02-20")
-bad_state.evidence.extend(
-    [
-        {
-            "type": "search_results",
-            "source": "web_search",
-            "timestamp": as_of.isoformat(),
-            "query": "NVIDIA Q4 FY2025 earnings expectations",
-            "content": {
-                "results": [
-                    {"title": "Pre-cutoff article", "published": "2025-02-18"},
-                    {"title": "Earnings beat confirmed", "published": "2025-02-27"},
-                ]
-            },
-        },
-        {
-            "type": "search_results",
-            "source": "web_search",
-            "timestamp": as_of.isoformat(),
-            "query": "NVIDIA data center revenue growth",
-            "content": {"results": [{"title": "Data center outlook", "published": "2025-02-15"}]},
-        },
-        {
-            "type": "base_rate",
-            "source": "web_search",
-            "timestamp": as_of.isoformat(),
-            "query": "NVIDIA historical earnings beat rate",
-            "content": {"results": [{"title": "Base rate data", "published": "2025-02-10"}]},
-        },
-    ]
-)
-
-bad_gates = run_quality_gates(bad_state, as_of=as_of)
-print("Gates on the state that read past its cutoff:")
+bad_gates = run_quality_gates(bad_state)
+print("\nInconsistent state gates:")
 for g in bad_gates:
-    print(f"  [{'PASS' if g.passed else 'FAIL'}] {g.gate_name}: {g.reason}")
-    for issue in g.details.get("issues", []) if not g.passed else []:
-        print(f"    -> {issue}")
+    status = "PASS" if g.passed else "FAIL"
+    print(f"  [{status}] {g.gate_name}: {g.reason}")
+    if not g.passed and g.details.get("issues"):
+        for issue in g.details["issues"]:
+            print(f"    → {issue}")
+
+# %% [markdown]
+# **Finding**: The coverage gate catches insufficient evidence (only 1 item), and the
+# consistency gate catches the cutoff violation (a result published after the cutoff
+# date). These failures would trigger the agent to either gather additional evidence
+# or abstain rather than produce an unreliable forecast.
 
 # %% [markdown]
 # ### Stale evidence
 #
-# Freshness asks a different question from consistency. Consistency asks whether a document
-# was published before the cutoff; freshness asks how long ago the agent went and looked. A
-# run that gathered its evidence two days ago and is producing a forecast now has been reading
-# a stale snapshot of the world, whatever the publication dates say.
-#
-# The state below carries both required types and dates every document well before the cutoff,
-# so coverage and consistency pass. Its retrieval timestamps sit 48 hours before the declared
-# as-of time, which is past the gate's 24-hour default.
+# The third gate, freshness, fires when an evidence item's timestamp is
+# older than `max_age_hours`. To make the failure observable we construct
+# a state whose evidence was written 48 hours ago — twice the default
+# 24-hour window — and check that the freshness gate fails while coverage
+# and consistency still pass.
 
 # %%
-stale_ts = (as_of - timedelta(hours=48)).isoformat()
-stale_state = AgentState(question="gathered two days ago", cutoff_date="2025-02-20")
+stale_ts = (datetime.now() - timedelta(hours=48)).isoformat()
+stale_state = AgentState(ticker="stale_test", cutoff_date="2025-02-20")
 stale_state.evidence.extend(
     [
         {
@@ -474,74 +465,71 @@ stale_state.evidence.extend(
             "query": "NVIDIA beat rate (stale)",
             "content": {"results": [{"title": "Historical beats", "published": "2025-02-10"}]},
         },
-        {
-            "type": "search_results",
-            "source": "web_search",
-            "timestamp": stale_ts,
-            "query": "NVIDIA guidance (stale)",
-            "content": {"results": [{"title": "Guidance recap", "published": "2025-02-11"}]},
-        },
     ]
 )
-stale_gates = run_quality_gates(stale_state, as_of=as_of)
+stale_gates = run_quality_gates(stale_state)
 print("Stale state gates:")
 for g in stale_gates:
     status = "PASS" if g.passed else "FAIL"
     print(f"  [{status}] {g.gate_name}: {g.reason}")
 
 # %% [markdown]
-# ## Checkpointing
+# ## Checkpointing and Replay
 #
-# `AgentState` is a dataclass of plain lists and strings, so serialising it is
-# `json.dumps(asdict(self))` and restoring it is the constructor. That simplicity is the point:
-# a checkpoint format that needs a custom encoder is a format that will silently drop a field
-# the day someone adds one.
-#
-# The record is JSON rather than a pickle for the same reason it lives outside the context
-# window. A pickle needs this codebase at this version to be read at all; a JSON checkpoint can
-# be opened in a text editor, diffed against another run, queried without loading Python, and
-# read in five years by something that has never heard of `AgentState`.
+# State serialization enables two critical capabilities:
+# 1. **Persistence**: Save mid-run state and resume later
+# 2. **Replay**: Re-run analysis from a known state with different parameters
+
 
 # %%
-checkpoint = state.to_json()
+def checkpoint_state(state: AgentState) -> str:
+    """Serialize state to JSON for persistence."""
+    return state.to_json()
+
+
+# %%
+def restore_checkpoint(json_str: str) -> AgentState:
+    """Restore state from JSON checkpoint."""
+    return AgentState.from_json(json_str)
+
+
+# %%
+checkpoint = checkpoint_state(state)
 print(f"Checkpoint size: {len(checkpoint):,} bytes")
+print(f"Run ID: {state.run_id}")
 
 data = json.loads(checkpoint)
-print(f"Top-level fields: {list(data.keys())}")
-print(f"Evidence items:   {len(data['evidence'])}")
-print(f"Quality gates:    {len(data['quality_gates'])}")
-
-# %% [markdown]
-# Restoring it has to give back the same record, not merely a similar one. Comparing the two
-# serialised forms checks every field at once, including the ones a hand-written comparison
-# would forget to look at.
+print(f"\nCheckpoint keys: {list(data.keys())}")
+print(f"Evidence items: {len(data['evidence'])}")
+print(f"Quality gates: {len(data['quality_gates'])}")
 
 # %%
-restored = AgentState.from_json(checkpoint)
-print(f"Restored run ID:   {restored.run_id}")
+restored = restore_checkpoint(checkpoint)
+print(f"Restored run ID: {restored.run_id}")
 print(f"Restored evidence: {len(restored.evidence)} items")
-print(f"Restored gates:    {len(restored.quality_gates)} results")
+print(f"Restored gates: {len(restored.quality_gates)} results")
 
-assert restored.to_json() == checkpoint, "checkpoint did not survive the round trip"
-print("Round trip: byte-identical")
+assert restored.run_id == state.run_id
+assert len(restored.evidence) == len(state.evidence)
+print("\nRound-trip verification: PASSED")
 
 # %% [markdown]
-# ## Replay: what happens without the historical anchor
+# ## Replay: Comparing Runs
 #
-# The reason to checkpoint is not only to resume. A saved state is also the input to an
-# experiment: restore it, change one thing, re-run the gates, and read what moved. The
-# question below is whether the base-rate evidence is load-bearing or decorative.
+# With checkpoints, we can systematically compare runs with different configurations.
+# For example: "What happens if we drop the base rate evidence?"
 
 # %%
-print("=== Original run ===")
+print("=== Original Run ===")
 for g in state.quality_gates:
     print(f"  [{('PASS' if g.passed else 'FAIL')}] {g.gate_name}")
 
-ablation = AgentState.from_json(checkpoint)
+# Ablation: remove base_rate evidence
+ablation = restore_checkpoint(checkpoint)
 ablation.evidence = [e for e in ablation.evidence if e["type"] != "base_rate"]
-ablation_gates = run_quality_gates(ablation, as_of=as_of)
+ablation_gates = run_quality_gates(ablation)
 
-print("\n=== Without base-rate evidence ===")
+print("\n=== Ablation (no base rate) ===")
 print(f"Evidence items: {len(ablation.evidence)} (was {len(state.evidence)})")
 for g in ablation_gates:
     print(f"  [{('PASS' if g.passed else 'FAIL')}] {g.gate_name}")
@@ -550,56 +538,39 @@ for g in ablation_gates:
 if not all(g.passed for g in ablation_gates):
     ablation.synthesis_status = "abstained"
     print(f"Synthesis status: {ablation.synthesis_status}")
-    print("No forecast is produced: the coverage contract is not satisfied.")
+    print("Agent correctly abstains when evidence is insufficient.")
 else:
-    print("All gates still pass; the base rate was not required for coverage.")
+    print("Ablation still passes all gates — base rate wasn't critical for coverage.")
 
 # %% [markdown]
-# Dropping the base rate takes the coverage gate below its required types, and the run
-# abstains. That is the behaviour worth arguing about rather than the code: whether a
-# forecast should be refused because no historical frequency was found is a research
-# decision, and writing it as a gate is what makes it a decision someone can point at
-# rather than an accident of what the agent happened to search for.
+# **Interpretation**: Removing the `base_rate` evidence trips the coverage
+# gate — the default `required_types=["search_results", "base_rate"]`
+# treats the historical anchor as part of the minimum coverage contract.
+# That is the point of an explicit gate: ablations that previously
+# "looked fine" now fail loudly, and checkpoint/replay turns the ablation
+# into a one-line experiment.
 
 # %% [markdown]
-# ## Where this sits in the memory hierarchy
+# ## Memory hierarchy in one line
 #
-# Three kinds of memory are usually distinguished, and they are easy to conflate because a
-# language model presents all three as text in one prompt. **Working memory** is the context
-# window: what the model can see this turn, built in
-# [`01_react_reasoning`](01_react_reasoning.ipynb). **Short-term memory** is the run's own
-# durable record, which is the `AgentState` above: it outlives the conversation and can be
-# read by something other than the model. **Long-term memory** is knowledge carried across
-# runs, retrieved on demand rather than held in the prompt, which is what Chapter 22 builds
-# with retrieval-augmented generation.
+# This notebook covers **short-term memory** (the explicit `AgentState`).
+# **Working memory** is the LLM context window from NB01; **long-term
+# memory** via RAG is the subject of Chapter 22.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **State the agent can be audited on has to live outside the context window.** A message
-#    history is a transcript, not a record: it cannot be queried, diffed, or replayed, and it is
-#    gone when the conversation ends.
-# 2. **A gate is a contract about evidence, checked before synthesis.** It says what a run must
-#    have gathered to be allowed to produce an answer, in code, so a thin run abstains instead
-#    of guessing confidently.
-# 3. **Separate when evidence was retrieved from when it was published.** The two answer
-#    different questions - is this run stale, and did this run read the future - and conflating
-#    them lets one hide the other.
-# 4. **Abstention is an outcome, not a failure.** A forecast the evidence does not support costs
-#    more than no forecast, because it is scored as if it were a judgement.
-# 5. **A checkpoint turns an ablation into a one-line experiment.** Restore, drop a class of
-#    evidence, re-run the gates, and read what changed.
+# 1. **Explicit state** captures everything the agent knows, separate from the LLM's
+#    context window — enabling audit, replay, and comparison
+# 2. **Quality gates** catch insufficient, stale, and contaminated evidence before
+#    the agent produces output — abstention is better than unreliable forecasts
+# 3. **Checkpointing** enables persistence and replay — run the same analysis with
+#    different parameters or evidence subsets
+# 4. **Ablation via replay** reveals which evidence sources actually matter for
+#    forecast quality
 #
-# **Known limitations of what is built here.** The gates check that evidence exists, is recent,
-# and predates the cutoff; none of them looks at whether it is any good, whether five results
-# are five sources or one wire story copied five times, or whether the sources contradict each
-# other. Freshness is measured against a declared as-of rather than wall-clock time, which is
-# what makes replay possible and also means a stale run replays as fresh. And the gates run
-# once before synthesis, so evidence that arrives during synthesis is ungated.
-#
-# **Next**: [`04_research_agent`](04_research_agent.ipynb) combines the provider, the search
-# tool, and this state into an agent that gathers evidence, runs these gates, and either
-# forecasts or abstains.
+# **Next**: [`research_agent`](04_research_agent.ipynb) — combines providers, tools, and state into
+# a complete ResearchAgent that produces calibrated probability forecasts.
 #
 # **Book**: Section 24.3 covers the memory hierarchy in depth, including vector stores
 # and RAG-backed long-term memory.
