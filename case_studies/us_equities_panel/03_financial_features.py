@@ -67,6 +67,7 @@ from ml4t.engineer.features.volatility import natr
 
 from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
 from case_studies.utils.coverage import assert_sessions_complete
+from case_studies.utils.feature_engineering import contiguous_run
 from data import load_us_equities
 from utils.artifact_specs import resolve_label_horizon
 from utils.paths import display_path, get_case_study_dir
@@ -230,7 +231,14 @@ sessions = (
     .with_columns(pl.col("session").cast(pl.Int64))
 )
 _archive_rows = raw_df.height
-raw_df = raw_df.join(sessions, on="timestamp", how="inner").sort(["symbol", "timestamp"])
+raw_df = (
+    raw_df.join(sessions, on="timestamp", how="inner")
+    .with_columns(contiguous_run("session", "symbol").alias("_run"))
+    .sort(["symbol", "timestamp"])
+)
+# Every per-symbol shift and window below runs within one stock and one unbroken run of its
+# sessions; Section 2 says why.
+SERIES = ["symbol", "_run"]
 print(
     f"{sessions.height:,} of {dates.height:,} dates in the archive are {CALENDAR} sessions; "
     f"the other {dates.height - sessions.height} carry stray prints and take "
@@ -267,7 +275,7 @@ print(
 
 # Compute base columns
 raw_df = raw_df.with_columns(
-    (pl.col("adj_close") / pl.col("adj_close").shift(1).over("symbol") - 1).alias("returns"),
+    (pl.col("adj_close") / pl.col("adj_close").shift(1).over(SERIES) - 1).alias("returns"),
     (pl.col("close") * pl.col("volume")).alias("dollar_volume"),
 )
 
@@ -307,13 +315,19 @@ print(f"Date range: {raw_df['timestamp'].min()} to {raw_df['timestamp'].max()}")
 # would not be the quantity the baseline scored - the two have to be the same signal for the
 # comparison to mean anything.
 #
-# The other windows on this page - the raw return horizons, the rolling volatilities, and the
-# library oscillators - still count the stock's own rows. What that costs is bounded and
-# one-directional: a stock that missed sessions inside the window has its feature measured
-# over a slightly longer stretch of calendar than the name says, which widens the window
-# rather than shifting it forward, and none of them is a quantity another stage recomputes
-# independently. Rewriting the library indicators to a dense session grid is a change to the
-# feature definitions rather than a correction to them, so it is not made here.
+# The other windows on this page - the one-session return, the raw return horizons, the
+# rolling volatilities, the library oscillators and the moving averages - count rows, and a
+# stock's rows are consecutive sessions only until it misses one. The archive carries 1,425
+# rows whose previous row for the same symbol is more than one session back: most are a
+# missed session or two, but some are months or years, and there the symbol is a ticker the
+# exchange handed to a different company. Over the symbol alone, WPP's first row after such a
+# gap reads as a one-day return of +742%, and every 252-row window reaching across it mixes two
+# companies' prices. The archive carries no security identifier to tell a reused ticker from a
+# long halt, so the only definition that is right in both cases is the one a session count
+# already implies: each window runs over `SERIES`, the symbol and its unbroken run of sessions
+# (`_run`, numbered from the session counter above). A return whose previous row is not the
+# previous session is null, a window that would span a gap returns nothing, and every window
+# warms up again after one.
 
 
 # %%
@@ -329,9 +343,7 @@ def compute_momentum_returns(data: pl.DataFrame) -> pl.DataFrame:
     data = data.sort(["symbol", "timestamp"])
     for h in MOMENTUM_HORIZONS:
         data = data.with_columns(
-            (pl.col("adj_close") / pl.col("adj_close").shift(h).over("symbol") - 1).alias(
-                f"ret_{h}d"
-            )
+            (pl.col("adj_close") / pl.col("adj_close").shift(h).over(SERIES) - 1).alias(f"ret_{h}d")
         )
     # Skip-month momentum (12-1): Jegadeesh-Titman (1993) construction, the return from
     # t-252 to t-21, both counted on the market's session list as `02_labels` counts them.
@@ -369,7 +381,7 @@ def compute_volatility_sharpe(data: pl.DataFrame) -> pl.DataFrame:
     """Volatility, vol ratios, Sharpe ratios, and momentum acceleration."""
     for h in VOLATILITY_HORIZONS:
         data = data.with_columns(
-            (pl.col("returns").rolling_std(h).over("symbol") * np.sqrt(252)).alias(f"vol_{h}d")
+            (pl.col("returns").rolling_std(h).over(SERIES) * np.sqrt(252)).alias(f"vol_{h}d")
         )
     data = data.with_columns(
         (pl.col("vol_21d") / pl.col("vol_63d").clip(lower_bound=1e-6))
@@ -412,26 +424,22 @@ def compute_volatility_sharpe(data: pl.DataFrame) -> pl.DataFrame:
 def compute_oscillators(data: pl.DataFrame) -> pl.DataFrame:
     """Technical oscillators: RSI, MACD, ADX, CCI, Stochastic, NATR."""
     data = data.with_columns(
-        rsi("adj_close", period=7).over("symbol").alias("rsi_7"),
-        rsi("adj_close", period=14).over("symbol").alias("rsi_14"),
+        rsi("adj_close", period=7).over(SERIES).alias("rsi_7"),
+        rsi("adj_close", period=14).over(SERIES).alias("rsi_14"),
     )
     data = data.with_columns(
-        (
-            macd("adj_close", fast_period=12, slow_period=26).over("symbol")
-            / pl.col("adj_close")
-            * 100
-        )
+        (macd("adj_close", fast_period=12, slow_period=26).over(SERIES) / pl.col("adj_close") * 100)
         .clip(lower_bound=-50.0, upper_bound=50.0)
         .alias("macd_pct")
     )
     data = data.with_columns(
-        adx("adj_high", "adj_low", "adj_close", period=14).over("symbol").alias("adx_14"),
-        cci("adj_high", "adj_low", "adj_close", period=20).over("symbol").alias("cci_20"),
+        adx("adj_high", "adj_low", "adj_close", period=14).over(SERIES).alias("adx_14"),
+        cci("adj_high", "adj_low", "adj_close", period=20).over(SERIES).alias("cci_20"),
         stochastic("adj_high", "adj_low", "adj_close", fastk_period=14)
-        .over("symbol")
+        .over(SERIES)
         .alias("stoch_k_14"),
         natr("adj_high", "adj_low", "adj_close", period=14)
-        .over("symbol")
+        .over(SERIES)
         .clip(upper_bound=100.0)
         .alias("natr_14"),
     )
@@ -450,14 +458,14 @@ def compute_trend_distance(data: pl.DataFrame) -> pl.DataFrame:
     """MA ratios and distance-from-extreme features."""
     for period in MA_HORIZONS:
         data = data.with_columns(
-            (pl.col("adj_close") / sma("adj_close", period=period).over("symbol")).alias(
+            (pl.col("adj_close") / sma("adj_close", period=period).over(SERIES)).alias(
                 f"sma_ratio_{period}"
             )
         )
     data = data.with_columns(
-        (pl.col("adj_close") / ema("adj_close", period=12).over("symbol")).alias("ema_ratio_12"),
-        (pl.col("adj_close") / ema("adj_close", period=26).over("symbol")).alias("ema_ratio_26"),
-        (pl.col("adj_close") / kama("adj_close", timeperiod=10).over("symbol")).alias(
+        (pl.col("adj_close") / ema("adj_close", period=12).over(SERIES)).alias("ema_ratio_12"),
+        (pl.col("adj_close") / ema("adj_close", period=26).over(SERIES)).alias("ema_ratio_26"),
+        (pl.col("adj_close") / kama("adj_close", timeperiod=10).over(SERIES)).alias(
             "kama_ratio_10"
         ),
     )
@@ -465,13 +473,13 @@ def compute_trend_distance(data: pl.DataFrame) -> pl.DataFrame:
     data = data.with_columns(
         (
             pl.col("adj_close")
-            / pl.col("adj_high").rolling_max(252).over("symbol").clip(lower_bound=1e-8)
+            / pl.col("adj_high").rolling_max(252).over(SERIES).clip(lower_bound=1e-8)
         )
         .clip(lower_bound=0.1, upper_bound=1.0)
         .alias("dist_from_52w_high"),
         (
             pl.col("adj_close")
-            / pl.col("adj_low").rolling_min(252).over("symbol").clip(lower_bound=1e-8)
+            / pl.col("adj_low").rolling_min(252).over(SERIES).clip(lower_bound=1e-8)
         )
         .clip(lower_bound=1.0, upper_bound=10.0)
         .alias("dist_from_52w_low"),
@@ -552,7 +560,7 @@ def compute_rolling_liquidity(data: pl.DataFrame) -> pl.DataFrame:
     data = data.with_columns(
         (pl.col("returns").abs() / (pl.col("dollar_volume") + 1))
         .rolling_mean(21)
-        .over("symbol")
+        .over(SERIES)
         .alias("amihud_illiq")
     )
     return data
@@ -677,7 +685,7 @@ def winsorize_features(
 # %% [markdown]
 # ## 6. Run Feature Pipeline
 #
-# Every per-symbol feature is a shift or a rolling window over `symbol`, and those
+# Every per-symbol feature is a shift or a rolling window over `SERIES`, and those
 # count rows. On the screened frame they would count *eligible* rows rather than
 # trading sessions, so a stock that drops below a threshold and recovers would
 # carry windows spanning the whole excursion: skip-month momentum would reach back
@@ -753,6 +761,7 @@ metadata_cols = {
     "adv_21d",
     "adv_covered",
     "session",
+    "_run",
     "amihud_illiq",
     # Corporate actions
     "split_ratio",

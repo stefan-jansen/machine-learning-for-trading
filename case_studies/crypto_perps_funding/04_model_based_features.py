@@ -764,7 +764,12 @@ def extract_symbol_garch(
     the schedule is the provenance, and the assertion after the loop checks it against
     ``refit_boundaries`` rather than against a fold.
     """
-    returns = close.pct_change().dropna()
+    # A return is kept only where the bar before it is one bar length back. The exchange
+    # published no bars for some contracts through two outages in 2022, and the change across
+    # one is days of movement, not one settlement's shock; the variance recursion would read it
+    # as the latter.
+    one_bar_back = close.index.to_series().diff() == pd.Timedelta(hours=BAR_HOURS)
+    returns = close.pct_change()[one_bar_back.to_numpy()].dropna()
     if len(returns) <= MIN_TRAIN_BARS:
         return pl.DataFrame(schema=GARCH_SCHEMA), None, []
     freeze_after = int((returns.index < holdout_start).sum())
@@ -1855,6 +1860,8 @@ render_quality_report(report)
 # so anything outside it is measured against what stage 03 actually offered. A fit needs rows to
 # estimate on, and a key whose window holds fewer than the burn-in requires could not have been
 # produced here whatever this stage did; a key that had them and carries no value is this stage's.
+# The first bar after each gap in the price bars is one of those: the change across a gap is not a
+# one-bar return, so the variance model is given none there and that bar carries no value.
 
 # %%
 ENTITY_COLS = "symbol" if isinstance("symbol", list) else ["symbol"]

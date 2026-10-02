@@ -155,6 +155,28 @@ def test_fails_loudly_on_invalid_input_or_boundary_return() -> None:
         validate_reconciled_returns(reconciled)
 
 
+def test_a_security_returning_to_its_ticker_is_refused() -> None:
+    """The boundary check is the half that can fail on a frame this module built.
+
+    Differencing within ``(symbol, sec_id)`` nulls a changeover only while each security
+    holds the ticker once. When the first security takes it back, its first return is taken
+    against its own last price before the other's tenure, and the row carries both a return
+    and a boundary.
+    """
+    start = date(2020, 1, 1)
+    prices = pl.DataFrame(
+        {
+            "timestamp": [start + timedelta(days=i) for i in range(6)],
+            "symbol": ["XYZ"] * 6,
+            "sec_id": [1, 1, 2, 2, 1, 1],
+            "close": [10.0, 10.5, 50.0, 51.0, 12.0, 12.5],
+            "adj_factor": [1.0] * 6,
+        }
+    )
+    with pytest.raises(ValueError, match="crosses a security identity"):
+        reconcile_underlying_log_returns(prices)
+
+
 # Every security-identity change in the shipped bars, by the ticker and session it
 # falls on. The file is tracked (``data/equities/market/sp500/daily_bars.parquet``,
 # redistributed by AlgoSeek's permission), so this set is fixed by construction rather

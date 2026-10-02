@@ -285,6 +285,12 @@ print(f"Constructed {', '.join(LABEL_NAMES)}")
 # rather than stated - a universe with delistings or trading halts would fail it, and the
 # horizons would then have to be expressed as durations with a tolerance instead.
 #
+# The third assertion recomputes every label a second way - joining each pair's close on the
+# session `horizon` places later on the panel's session list - and requires the two to agree,
+# nulls included. A shift that was not grouped by pair, or that stepped over a missing session,
+# produces a label the join does not, so this is the check that the shift is the return it is
+# named for rather than a restatement of how it was built.
+#
 # The calendar spans printed beneath are then descriptive rather than protective. They say
 # how much wall-clock time each horizon covers, which is not a fixed multiple: a five-session
 # return spans a week or more depending on where weekends and holidays fall inside it, and
@@ -293,6 +299,17 @@ print(f"Constructed {', '.join(LABEL_NAMES)}")
 # %%
 sessions_per_pair = labels_df.group_by("symbol").agg(pl.col("timestamp").n_unique().alias("n"))
 n_sessions = labels_df["timestamp"].n_unique()
+# The panel's session list, numbered once for every pair. Assertion 3 reads a label's closing
+# session off this list, not off the pair's own rows.
+numbered = labels_df.join(
+    labels_df.select("timestamp")
+    .unique()
+    .sort("timestamp")
+    .with_row_index("_session_n")
+    .with_columns(pl.col("_session_n").cast(pl.Int64)),
+    on="timestamp",
+    how="left",
+)
 
 # 1. Every pair quotes on every session, so a shift of h rows is a shift of h sessions.
 assert sessions_per_pair["n"].min() == n_sessions, "a pair is missing a session"
@@ -309,10 +326,22 @@ for label_name, horizon in HORIZONS.items():
     # 2. An incomplete forward window is null, never a value.
     assert tail[label_name].null_count() == tail.height, label_name
 
-    # 3. No label crosses a pair boundary: the labelled count equals the session count less
-    #    `horizon` rows per pair, which holds only if every window closed in its own pair.
-    expected = prices.height - horizon * prices["symbol"].n_unique()
-    assert labelled.height == expected, label_name
+    # 3. Each label is the same pair's return to the session `horizon` places later on the
+    #    panel's session list, computed here by a join rather than by the shift that built it:
+    #    a window that closed in another pair, or on the wrong session, disagrees with it.
+    ahead = numbered.select(
+        "symbol",
+        pl.col("_session_n") - horizon,
+        pl.col("close").alias("_close_ahead"),
+    ).rename({"_session_n": "_origin_n"})
+    joined = numbered.join(
+        ahead, left_on=["symbol", "_session_n"], right_on=["symbol", "_origin_n"], how="left"
+    ).with_columns((pl.col("_close_ahead") / pl.col("close") - 1).alias("_joined"))
+    disagree = joined.filter(
+        ~pl.col(label_name).eq_missing(pl.col("_joined"))
+        & ~((pl.col(label_name) - pl.col("_joined")).abs() < 1e-12).fill_null(False)
+    )
+    assert disagree.height == 0, f"{label_name}: {disagree.height} labels disagree with the join"
 
     # 4. No discrete label is derived from a null return - vacuous by dtype here, since
     #    this notebook writes continuous labels only.

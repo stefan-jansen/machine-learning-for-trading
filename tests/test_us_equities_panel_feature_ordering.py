@@ -92,6 +92,20 @@ def _load_notebook_functions(*wanted_names: str) -> dict[str, object]:
     return {name: namespace[name] for name in wanted_names}
 
 
+# `contiguous_run("session", "symbol")` from `case_studies.utils.feature_engineering`,
+# written out rather than imported: that module also holds the stage's plotting helpers,
+# so importing it pulls in `utils.config`, which wants a data directory on disk. The
+# notebook functions below are exec'd with nothing but numpy and polars in scope for the
+# same reason, and the fixture holds to it.
+CONTIGUOUS_RUN = (
+    (pl.col("session").diff().over("symbol", order_by="session") != 1)
+    .fill_null(False)
+    .cum_sum()
+    .over("symbol", order_by="session")
+    .cast(pl.UInt32)
+)
+
+
 @pytest.fixture
 def gapped_panel() -> pl.DataFrame:
     """Two stocks over 400 sessions; one leaves the eligible universe and returns.
@@ -150,7 +164,15 @@ def gapped_panel() -> pl.DataFrame:
                 "adv_21d": 1_000_000_000.0,
             }
         )
-    return pl.DataFrame(rows).sort(["symbol", "timestamp"])
+    # `_run` as the stage assigns it: on the complete series, before the screen, so a
+    # window never reaches across a session the symbol did not print. Both stocks print
+    # on every one of the 400 sessions, so each gets a single run and the orderings this
+    # module compares are unaffected - what the screen removes here is eligibility, not
+    # a quote. Matches 03_financial_features, which numbers runs on `raw_df` and filters
+    # afterwards.
+    return (
+        pl.DataFrame(rows).sort(["symbol", "timestamp"]).with_columns(CONTIGUOUS_RUN.alias("_run"))
+    )
 
 
 ELIGIBLE = (pl.col("close") > 5.0) & (pl.col("adv_21d") > 1_000_000)

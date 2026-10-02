@@ -21,29 +21,20 @@ PRICE_COLS = ("open", "high", "low", "close")
 
 
 def validate_reconciled_returns(frame: pl.DataFrame) -> None:
-    """Fail if a return crosses a security identity or violates adjusted-price arithmetic."""
-    required = {
-        "sec_id",
-        "adjusted_close",
-        "clean_log_return",
-        "identity_boundary",
-    }
+    """Fail if a return crosses a security identity boundary.
+
+    ``identity_boundary`` marks a row whose ``sec_id`` differs from the previous row of
+    its ticker, and ``clean_log_return`` is differenced within ``(symbol, sec_id)``. The
+    two disagree when a security returns to a ticker after another held it: the return
+    on its first row back is then taken against its last row before, across the other
+    security's tenure, and this refuses it.
+    """
+    required = {"sec_id", "clean_log_return", "identity_boundary"}
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(f"Reconciled returns missing columns: {sorted(missing)}")
     if frame.filter(pl.col("identity_boundary") & pl.col("clean_log_return").is_not_null()).height:
         raise ValueError("A return crosses a security identity boundary")
-
-    expected = pl.col("adjusted_close").log().diff().over(["symbol", "sec_id"])
-    checked = frame.with_columns(expected.alias("expected_log_return"))
-    violations = checked.filter(
-        ~(
-            pl.col("clean_log_return").eq_missing(pl.col("expected_log_return"))
-            | ((pl.col("clean_log_return") - pl.col("expected_log_return")).abs() <= 1e-12)
-        )
-    )
-    if not violations.is_empty():
-        raise ValueError(f"Adjusted-return identity violations: {violations.height}")
 
 
 def _validated(prices: pl.DataFrame) -> pl.DataFrame:

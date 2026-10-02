@@ -52,3 +52,23 @@ def daily_ic(
         "every one of them, which is what a feature or a target that is constant within the "
         "date produces"
     )
+
+
+def lagged_by_sessions(
+    panel: pl.DataFrame, column: str, lag: int, *, alias: str, sessions: pl.Series
+) -> pl.DataFrame:
+    """``panel`` with ``alias`` holding each symbol's ``column`` from ``lag`` sessions earlier.
+
+    ``sessions`` is the market's session list. The value is joined from the row dated exactly
+    ``lag`` entries earlier on that list, so a symbol that did not quote there gets a null rather
+    than whatever row it last carried: the options panel is sparse per symbol, and a shift over
+    its rows would reach back an unknown number of sessions.
+    """
+    number = sessions.sort().unique(maintain_order=True).to_frame("timestamp").with_row_index("_n")
+    numbered = panel.join(number, on="timestamp", how="left")
+    if numbered["_n"].null_count():
+        raise ValueError("the panel carries a date that is not on the session list")
+    source = numbered.select(
+        "symbol", (pl.col("_n") + lag).alias("_n"), pl.col(column).alias(alias)
+    )
+    return numbered.join(source, on=["symbol", "_n"], how="left", validate="m:1").drop("_n")

@@ -74,9 +74,11 @@ from case_studies.utils.artifact_quality import (
     quality_report,
     render_quality_report,
 )
+from case_studies.utils.coverage import absent_calendar_sessions
 from case_studies.utils.feature_engineering import (
     assert_values_agree,
     assign_families,
+    contiguous_run,
     families_from_config,
     family_coverage,
     plot_coverage_through_time,
@@ -135,6 +137,8 @@ DECISION_CYCLE = int(setup["labels"]["horizons"][setup["labels"]["primary"]].rst
 # cross-sectional statistic is taken over.
 PANEL_KEY = ["symbol", "timestamp"]
 SECURITY = "sec_id"
+# Every trailing window runs within one security and one unbroken stretch of its sessions.
+SERIES = [SECURITY, "_run"]
 WITHIN_DATE = "timestamp"
 
 print(
@@ -256,6 +260,14 @@ register_frame(FAMILIES).select(
 # declares, which is a stated tolerance for a thin quote rather than a claim that the level is
 # current.
 #
+# **The same holds for the security's own trading calendar.** A security occasionally has no bar
+# on a session the market held, so the row before a row is not always the session before it, and
+# a 252-row window would then reach back 253 sessions. `with_runs` numbers the panel's sessions and
+# splits each security's history wherever one is skipped, and every trailing window below is
+# taken over `SERIES`, the security and that stretch: a window that would span a skipped session
+# returns nothing, and it warms up again after it. The session list is the panel's own dates, so
+# the cell below first checks that it holds every exchange session in the window.
+#
 # **The universe is bounded before either frame is read, and the bound is the one
 # `setup.yaml::universe` declares.** `eligibility_rule` is `sp500_with_options`, and what makes a
 # name satisfy it is carrying an option surface, because the surface is what the ranking is read
@@ -345,21 +357,48 @@ pl.DataFrame(
 
 
 # %%
+def with_runs(bars: pl.DataFrame) -> pl.DataFrame:
+    """Number the panel's sessions, and each security's unbroken stretches of them."""
+    sessions = (
+        bars.select("timestamp")
+        .unique()
+        .sort("timestamp")
+        .with_row_index("_session")
+        .with_columns(pl.col("_session").cast(pl.Int64))
+    )
+    return (
+        bars.join(sessions, on="timestamp")
+        .with_columns(contiguous_run("_session", SECURITY).alias("_run"))
+        .sort([SECURITY, "timestamp"])
+    )
+
+
 def on_session_grid(bars: pl.DataFrame, surface: pl.DataFrame) -> pl.DataFrame:
     """The surface, reindexed onto the sessions each security actually traded."""
-    grid = bars.select(["symbol", SECURITY, "timestamp"])
+    grid = bars.select(["symbol", *SERIES, "timestamp"])
     return grid.join(surface, on=PANEL_KEY, how="left").sort([SECURITY, "timestamp"])
 
 
 def lag_surface(surface: pl.DataFrame) -> pl.DataFrame:
     """Shift every surface column by the declared lag, then carry it over a thin quote."""
     lagged = surface.with_columns(
-        pl.col(c).shift(IV_LAG).over(SECURITY).alias(c) for c in SURFACE_COLS
+        pl.col(c).shift(IV_LAG).over(SERIES).alias(c) for c in SURFACE_COLS
     )
     return lagged.with_columns(
-        pl.col(c).forward_fill(limit=W["iv_forward_fill"]).over(SECURITY).alias(c)
+        pl.col(c).forward_fill(limit=W["iv_forward_fill"]).over(SERIES).alias(c)
         for c in SURFACE_COLS
     )
+
+
+assert not absent_calendar_sessions(daily["timestamp"].unique().to_list(), calendar="NYSE"), (
+    "the share bars miss an exchange session, so their dates cannot number the sessions"
+)
+_stretches = with_runs(daily).select(SERIES).n_unique()
+print(
+    f"{_stretches - daily[SECURITY].n_unique()} skipped sessions split a security's history; "
+    f"the windows run over {_stretches:,} unbroken stretches of {daily[SECURITY].n_unique()} "
+    "securities"
+)
 
 
 # %% [markdown]
@@ -394,26 +433,24 @@ ZERO_FLOOR = 0.001
 
 
 def _zscore(column: str, window: int) -> pl.Expr:
-    """Trailing z-score of *column* over *window* sessions within one security."""
-    mean = pl.col(column).rolling_mean(window).over(SECURITY)
-    std = pl.col(column).rolling_std(window).over(SECURITY).clip(lower_bound=ZERO_FLOOR)
+    """Trailing z-score of *column* over *window* sessions within one stretch of a security."""
+    mean = pl.col(column).rolling_mean(window).over(SERIES)
+    std = pl.col(column).rolling_std(window).over(SERIES).clip(lower_bound=ZERO_FLOOR)
     return (pl.col(column) - mean) / std
 
 
 def surface_dynamics(surface: pl.DataFrame) -> pl.DataFrame:
     """Changes, momentum, z-scores and the trailing percentile of the lagged surface."""
     pct_window = W["iv_percentile"]
-    low = pl.col("iv_30_atm").rolling_min(pct_window).over(SECURITY)
-    high = pl.col("iv_30_atm").rolling_max(pct_window).over(SECURITY)
+    low = pl.col("iv_30_atm").rolling_min(pct_window).over(SERIES)
+    high = pl.col("iv_30_atm").rolling_max(pct_window).over(SERIES)
     return surface.with_columns(
         *[
-            (pl.col(c) - pl.col(c).shift(1).over(SECURITY)).alias(f"d_{c}")
+            (pl.col(c) - pl.col(c).shift(1).over(SERIES)).alias(f"d_{c}")
             for c in ("iv_30_atm", "skew_rr_30_25d", "term_ratio_atm")
         ],
         *[
-            (pl.col("iv_30_atm") - pl.col("iv_30_atm").shift(w).over(SECURITY)).alias(
-                f"iv_mom_{w}d"
-            )
+            (pl.col("iv_30_atm") - pl.col("iv_30_atm").shift(w).over(SERIES)).alias(f"iv_mom_{w}d")
             for w in W["iv_momentum"]
         ],
         *[_zscore("iv_30_atm", w).alias(f"iv_30_atm_z_{w}") for w in W["iv_zscore"]],
@@ -467,7 +504,7 @@ def realized_volatility(bars: pl.DataFrame) -> pl.DataFrame:
     short, long_ = W["realized_vol"]
     gk_window, vv_window, skew_window = W["garman_klass"], W["vol_of_vol"], W["realized_skew"]
     df = bars.with_columns(
-        pl.col("adj_close").pct_change().over(SECURITY).alias("_ret")
+        pl.col("adj_close").pct_change().over(SERIES).alias("_ret")
     ).with_columns(
         (
             0.5 * (pl.col("high") / pl.col("low")).log().pow(2)
@@ -476,27 +513,24 @@ def realized_volatility(bars: pl.DataFrame) -> pl.DataFrame:
     )
     df = df.with_columns(
         *[
-            (pl.col("_ret").rolling_std(w).over(SECURITY) * ANNUALIZE).alias(f"rv_{w}")
+            (pl.col("_ret").rolling_std(w).over(SERIES) * ANNUALIZE).alias(f"rv_{w}")
             for w in (short, long_)
         ],
         (
-            pl.col("_gk_session").rolling_mean(gk_window).over(SECURITY).clip(lower_bound=0.0)
+            pl.col("_gk_session").rolling_mean(gk_window).over(SERIES).clip(lower_bound=0.0)
             * setup["evaluation"]["periods_per_year"]
         )
         .sqrt()
         .alias(f"gk_vol_{gk_window}"),
     )
-    standardized = pl.col("_ret") / pl.col("_ret").rolling_std(skew_window).over(SECURITY).clip(
+    standardized = pl.col("_ret") / pl.col("_ret").rolling_std(skew_window).over(SERIES).clip(
         lower_bound=ZERO_FLOOR / 10
     )
     return df.with_columns(
-        pl.col(f"rv_{short}")
-        .rolling_std(vv_window)
-        .over(SECURITY)
-        .alias(f"vol_of_vol_{vv_window}"),
+        pl.col(f"rv_{short}").rolling_std(vv_window).over(SERIES).alias(f"vol_of_vol_{vv_window}"),
         standardized.pow(3)
         .rolling_mean(skew_window)
-        .over(SECURITY)
+        .over(SERIES)
         .alias(f"realized_skew_{skew_window}"),
     ).select(
         [
@@ -529,27 +563,24 @@ PRICE_FLOOR = 1e-8
 def equity_momentum(bars: pl.DataFrame) -> pl.DataFrame:
     """Multi-horizon returns, skip-month momentum and its volatility-scaled form."""
     ra_window = W["risk_adjusted"]
-    df = bars.select([*PANEL_KEY, SECURITY, "adj_close"]).with_columns(
-        pl.col("adj_close").pct_change().over(SECURITY).alias("_ret")
+    df = bars.select([*PANEL_KEY, *SERIES, "adj_close"]).with_columns(
+        pl.col("adj_close").pct_change().over(SERIES).alias("_ret")
     )
     df = df.with_columns(
         *[
             (
                 pl.col("adj_close")
-                / pl.col("adj_close").shift(w).over(SECURITY).clip(lower_bound=PRICE_FLOOR)
+                / pl.col("adj_close").shift(w).over(SERIES).clip(lower_bound=PRICE_FLOOR)
                 - 1
             ).alias(f"mom_{w}d")
             for w in W["momentum"]
         ],
         (
-            pl.col("adj_close").shift(W["skip_recent"]).over(SECURITY)
-            / pl.col("adj_close")
-            .shift(W["skip_start"])
-            .over(SECURITY)
-            .clip(lower_bound=PRICE_FLOOR)
+            pl.col("adj_close").shift(W["skip_recent"]).over(SERIES)
+            / pl.col("adj_close").shift(W["skip_start"]).over(SERIES).clip(lower_bound=PRICE_FLOOR)
             - 1
         ).alias("mom_skip_recent"),
-        (pl.col("_ret").rolling_std(ra_window).over(SECURITY) * ANNUALIZE).alias("_rv_ra"),
+        (pl.col("_ret").rolling_std(ra_window).over(SERIES) * ANNUALIZE).alias("_rv_ra"),
     )
     return df.with_columns(
         (
@@ -633,11 +664,13 @@ KEEP_IF_PRESENT = ["iv_30_atm", f"rv_{W['realized_vol'][0]}"]
 
 def assemble(bars: pl.DataFrame, surface: pl.DataFrame) -> pl.DataFrame:
     """Every trailing and contemporaneous family, on the security's session grid."""
+    bars = with_runs(bars)
     lagged = surface_dynamics(lag_surface(on_session_grid(bars, surface)))
     return (
         lagged.join(realized_volatility(bars), on=PANEL_KEY, how="left")
         .join(equity_momentum(bars), on=PANEL_KEY, how="left")
         .pipe(variance_premium)
+        .drop("_run")
     )
 
 
@@ -665,7 +698,8 @@ print(f"{built.height:,} rows carrying {len(feature_cols)} features in {len(FAMI
 # Four kinds of operation appear above. A **shift** reads one earlier row of the same security's
 # series, and it is what the surface lag is. A **rolling** window - every z-score, every realized
 # volatility, every trailing range and every return - ends at its own row and reads a fixed number
-# of that security's earlier rows. A **contemporaneous** difference - the variance premium - reads
+# of that security's earlier rows, inside one unbroken stretch of its sessions, so the number of
+# rows is the number of sessions. A **contemporaneous** difference - the variance premium - reads
 # two columns of the same row. A **cross-sectional** statistic - the eight percentiles - is taken
 # with `.over("timestamp")`, so it reads every name quoted on that date and nothing dated before
 # or after it.
@@ -777,9 +811,9 @@ print(
 register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "representation"])
 
 # %% [markdown] tags=["results"]
-# The matrix carries **45 features** on **481,184 rows** across **626 names**, from **2017-02-01**
+# The matrix carries **45 features** on **481,087 rows** across **626 names**, from **2017-02-01**
 # to **2021-12-31**. Keeping only the rows that carry both an implied and a realized volatility
-# dropped **151,418 name-sessions**, **23.9%** of the sessions the shares traded. Those are the
+# dropped **151,515 name-sessions**, **24.0%** of the sessions the shares traded. Those are the
 # sessions on which a name had no readable implied volatility even after the one-session delay and
 # the five-session carry forward, plus the month of warmup the realized-volatility window costs at
 # the start of each security's series. Past the warmup boundary at **2018-02-01** the thinnest
@@ -1173,13 +1207,13 @@ if over.height:
 # %% [markdown]
 # ### Sign-off
 #
-# **Coverage is 76.0% - 481,184 of the 629,444 keys the five labels declare - and it is the
+# **Coverage is 76.0% - 481,087 of the 629,444 keys the five labels declare - and it is the
 # number a declaration was needed for.** A quarter of the universe absent is either the extract
-# or a defect, and the percentage cannot say which. The classification does. 136,482 of the
-# 151,210 missing keys are interior, inside a security's own quoted range, which no window length
+# or a defect, and the percentage cannot say which. The classification does. 136,472 of the
+# 151,303 missing keys are interior, inside a security's own quoted range, which no window length
 # explains; the check above then asks the only question that settles them, and asks it at the lag
 # the matrix reads rather than at the session itself. **The surface carries a usable
-# `iv_30_atm` one session earlier for 143 of the 136,482.** Every other interior key has no
+# `iv_30_atm` one session earlier for 150 of the 136,472.** Every other interior key has no
 # source row to build a feature from.
 #
 # So the shortfall is the licensed extract, not this stage: a forward return needs a price and
@@ -1189,19 +1223,19 @@ if over.height:
 # leaderboard, with no way to tell a narrow universe from a weak model - and because it is lost to
 # every family at once, before any of them is fitted, so no model stage can recover one of them.
 #
-# **At the front, 609 securities pay the 21-session budget and 312 pay more, 2,171 sessions
+# **At the front, 613 securities pay the 21-session budget and 314 pay more, 2,180 sessions
 # between them.** The budget is the 20-session realized volatility plus the one-session surface
-# lag, and for 311 of those 312 the surface's first quote arrives after the price panel opens for
+# lag, and for 312 of those 314 the surface's first quote arrives after the price panel opens for
 # that name, which no window length was ever going to cover. **The residual is 139 keys** - 16
 # where the security has no feature row at all and 123 after its last - or 0.02% of the universe.
 #
-# **2,950 keys carry a feature row and no label**, across 588 symbols and the whole sample. These
+# **2,946 keys carry a feature row and no label**, across 588 symbols and the whole sample. These
 # are the mirror case - a surface quoted on a session the label file does not cover - and at 0.6%
 # of the matrix they are carried rather than dropped, because a feature row with no label is
 # simply never joined.
 #
-# **`term_ratio_z_63` is null on 96.2% of rows, and that is worse than it looks.** Of the 207,567
-# rows where its input `term_ratio_atm` is present, 189,439 carry no z-score. The window is the
+# **`term_ratio_z_63` is null on 96.2% of rows, and that is worse than it looks.** Of the 207,526
+# rows where its input `term_ratio_atm` is present, 189,398 carry no z-score. The window is the
 # reason: a 63-session standardization needs 63 observations of a column that is itself 56.9%
 # null, and a rolling window over a sparse series almost never fills. The column is kept because
 # where it does resolve it is the standardized quantity the model stages want, but a reader should
@@ -1210,8 +1244,9 @@ if over.height:
 #
 # **The remaining null flags are the option-derived columns, and they are expected.** A measure
 # taken between two expiries needs both to solve, so `term_ratio_atm`, `term_convexity` and
-# `term_slope_far_atm` sit near half. `mom_252d` and `mom_skip_recent` are at 20.9% because a
-# 252-session window cannot fill for a name with less than a year of history in the sample. How a
+# `term_slope_far_atm` sit near half. `mom_252d` and `mom_skip_recent` are at 21.1% because a
+# 252-session window cannot fill for a name with less than a year of unbroken history in the
+# sample. How a
 # model treats a missing value is a modelling choice, made in the model stages and not here.
 #
 # **Tails.** The four heavy-tail flags are all on *changes*: `d_iv_30_atm`, `d_skew_rr_30_25d`,
