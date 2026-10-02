@@ -23,11 +23,10 @@
 # the strongest case for yes and another the strongest case for no, show each the other's
 # argument, and watch what happens to the distance between them over a few rounds.
 #
-# The distance is the whole output. If it closes, each side had evidence the other had not
-# weighed and the debate produced something the average could not. If it stays open, both sides
-# read the same evidence and reached opposite conclusions, and the midpoint reports how wide
-# the disagreement is rather than a sharper forecast. Those two cases look identical in a single
-# blended number, which is why this notebook draws the trajectory before it computes one.
+# The probability gap and transcript show how the two positions change.
+# Convergence can reflect new evidence, persuasion or shared error. Inspect
+# the arguments and sources; the gap alone cannot establish accuracy or
+# whether debate improves on the mean.
 #
 # **Learning Objectives**:
 # - Run a multi-round debate in which each side argues against the other's previous position
@@ -36,8 +35,8 @@
 # - Read the gap trajectory to tell a debate that moved something from one that did not
 # - Fold a debate midpoint back into an aggregate under a stated weight, and say what that
 #   weight is a claim about
-# - Decide whether a debate was worth running, from the panel's disagreement and the gap, not
-#   from the movement of a blend that moves by construction
+# - Inspect disagreement, probability shifts and call cost, then specify the resolved
+#   outcomes and matched comparisons needed to judge forecasting value
 #
 # **Book Reference**: Chapter 24, Section 24.7 (Multi-Agent Forecasting Systems -
 # Debate Pattern)
@@ -539,12 +538,11 @@ else:
     print("\nNo consensus was reached in this run.")
 
 # %% [markdown]
-# ## When Does Debate Add Value?
+# ## Probability changes and debate cost
 #
-# Decision rule used by the cell below: run debate when pre-debate agent
-# disagreement exceeds 15 percentage points and the resulting blend shifts the
-# aggregate by more than 3 percentage points. Below those thresholds, debate
-# spends tokens without changing the forecast.
+# The cell below reports pre-debate disagreement and the shift under our
+# chosen blend. These are descriptive diagnostics. Accuracy and incremental
+# value require resolved outcomes and comparable runs with and without debate.
 
 # %%
 agent_range = max(probs) - min(probs)
@@ -554,11 +552,11 @@ print(f"Agent disagreement: {agent_range:.2f} ({agent_range:.0%})")
 print(f"Debate probability shift: {debate_shift:.2f} ({debate_shift:.0%})")
 
 if agent_range > 0.15 and debate_shift > 0.03:
-    print("→ Debate was productive (high disagreement, meaningful shift)")
+    print("→ High disagreement and a probability shift; accuracy is untested")
 elif agent_range < 0.05:
-    print("→ Debate was low-value (agents already agreed)")
+    print("→ Agents already agreed; examine whether debate adds evidence")
 else:
-    print("→ Debate had marginal impact")
+    print("→ A small probability shift under this blend")
 
 # %% [markdown]
 # ## Persisting the Full Run Trace

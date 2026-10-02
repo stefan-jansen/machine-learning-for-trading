@@ -557,3 +557,32 @@ RunTrace.save = lambda self, directory=None: original_save(self, TRACE_DIRECTORY
     assert capture["status"] == "failed" and capture["final_probability"] is None
     assert len(capture["llm_calls"]) == 3
     assert json.loads(capture["llm_calls"][-1]["response"])["p_yes"] == 2
+
+
+def test_malformed_supervisor_response_retains_completed_usage(tmp_path):
+    import json
+
+    from agent_observability import trace_llm
+
+    class MalformedSupervisor(SyntheticPipelineClient):
+        def complete_with_usage(self, messages, json_mode=True):
+            raw, usage = super().complete_with_usage(messages, json_mode)
+            if (
+                "supervisor" in messages[-1].content.lower()
+                and "step 1:" in messages[-1].content.lower()
+            ):
+                raw = json.dumps({"disagreements": [], "queries": None})
+            return raw, usage
+
+    tracer = trace_llm(MalformedSupervisor(), label="synthetic-malformed-supervisor")
+    result = _pipeline_classes()["AIAForecaster"](
+        tracer, SyntheticPipelineSearch(), n_agents=1, max_steps=1, debate_rounds=0
+    ).forecast(ForecastQuestion("Synthetic malformed response?"))
+    assert result.status == "failed" and result.final_probability is None
+    assert result.supervisor.token_usage.total_tokens == 15
+    assert result.total_token_usage.total_tokens == 45
+    run = RunTrace.from_result(
+        result, notebook="fixture", provider=tracer.model_name, llm_calls=tracer.calls
+    )
+    replay = RunTrace.load(run.save(tmp_path)).forecast_result()
+    assert replay.total_token_usage.total_tokens == 45

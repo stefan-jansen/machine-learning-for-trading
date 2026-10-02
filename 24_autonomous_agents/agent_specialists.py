@@ -235,6 +235,7 @@ def _supervisor_identify_disagreements(
     llm,
     agent_summaries: str,
     max_queries: int,
+    artifact: SupervisorArtifact,
 ) -> tuple[list[str], list[str], TokenUsage]:
     """Phase 1: LLM call asking for disagreements and clarifying queries."""
     prompt = SUPERVISOR_DISAGREEMENTS_PROMPT.format(
@@ -243,6 +244,7 @@ def _supervisor_identify_disagreements(
     raw, tokens = llm.complete_with_usage(
         [ChatMessage(role="user", content=prompt)], json_mode=True
     )
+    artifact.token_usage = artifact.token_usage + tokens
     parsed = parse_json(raw)
     disagreements = [str(x) for x in parsed.get("disagreements", [])][:20]
     queries = [str(x) for x in parsed.get("queries", [])][:max_queries]
@@ -287,6 +289,7 @@ def _supervisor_finalize(
     question: str,
     agent_summaries: str,
     search_results: dict[str, list[SearchResult]],
+    artifact: SupervisorArtifact,
 ) -> tuple[float | None, str | None, str | None, TokenUsage]:
     """Phase 3: LLM call asking for final p_yes / confidence / rationale."""
     evidence_text = _format_supervisor_evidence(search_results)
@@ -298,6 +301,7 @@ def _supervisor_finalize(
     raw, tokens = llm.complete_with_usage(
         [ChatMessage(role="user", content=prompt)], json_mode=True
     )
+    artifact.token_usage = artifact.token_usage + tokens
     parsed = parse_json(raw)
     confidence = str(parsed.get("confidence", "")).lower()
     rationale = parsed.get("rationale")
@@ -344,7 +348,7 @@ class SupervisorAgent:
         self.token_usage = TokenUsage()
         self.artifact = SupervisorArtifact()
         disagreements, queries, t1 = _supervisor_identify_disagreements(
-            self.llm, agent_summaries, self.max_queries
+            self.llm, agent_summaries, self.max_queries, self.artifact
         )
         self.token_usage = self.token_usage + t1
         self.artifact.token_usage = self.token_usage
@@ -358,7 +362,7 @@ class SupervisorAgent:
         self.artifact.search_results = search_results
 
         p_yes, confidence, rationale, t2 = _supervisor_finalize(
-            self.llm, question, agent_summaries, search_results
+            self.llm, question, agent_summaries, search_results, self.artifact
         )
         self.token_usage = self.token_usage + t2
 
