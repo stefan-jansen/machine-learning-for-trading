@@ -72,7 +72,7 @@ from agent_tools import ToolExecutor, create_search_client, format_search_result
 RUN_LIVE = False
 PINNED_TRACE = "01_react_reasoning_20260615T191047Z_04eb6e7c603d.json"
 
-LLM_PROVIDER = ""  # blank = read .env (LLM_PROVIDER); "mock" forces mock
+LLM_PROVIDER = ""  # Blank reads .env; "mock" selects a synthetic fixture
 MAX_STEPS = 6
 
 # %% [markdown]

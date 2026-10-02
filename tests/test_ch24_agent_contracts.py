@@ -245,12 +245,12 @@ def test_trace_save_failure_does_not_leave_a_partial_record(tmp_path, monkeypatc
     assert list(tmp_path.iterdir()) == []
 
 
-def _pipeline_classes():
+def _pipeline_classes(notebook_name="08_forecasting_pipeline.ipynb"):
     import ast
     import json
 
     notebook_root = REPO_ROOT / "24_autonomous_agents"
-    notebook = json.loads((notebook_root / "08_forecasting_pipeline.ipynb").read_text())
+    notebook = json.loads((notebook_root / notebook_name).read_text())
     definitions = []
     for cell in notebook["cells"]:
         if cell["cell_type"] != "code":
@@ -264,7 +264,12 @@ def _pipeline_classes():
                 definitions.append(node)
     namespace = {}
     exec(
-        compile(ast.Module(body=definitions, type_ignores=[]), str(notebook_root), "exec"),
+        compile(
+            ast.Module(body=definitions, type_ignores=[]),
+            str(notebook_root),
+            "exec",
+            dont_inherit=True,
+        ),
         namespace,
     )
     return namespace
@@ -586,3 +591,35 @@ def test_malformed_supervisor_response_retains_completed_usage(tmp_path):
     )
     replay = RunTrace.load(run.save(tmp_path)).forecast_result()
     assert replay.total_token_usage.total_tokens == 45
+
+
+@pytest.mark.parametrize("pipeline_name", ["native_sdk_pipeline", "langgraph_pipeline"])
+def test_framework_failure_preserves_completed_artifacts(tmp_path, pipeline_name):
+    import json
+
+    from agent_observability import trace_llm
+
+    class MalformedSupervisor(SyntheticPipelineClient):
+        def complete_with_usage(self, messages, json_mode=True):
+            raw, usage = super().complete_with_usage(messages, json_mode)
+            if (
+                "supervisor" in messages[-1].content.lower()
+                and "step 1:" in messages[-1].content.lower()
+            ):
+                raw = json.dumps({"disagreements": [], "queries": None})
+            return raw, usage
+
+    namespace = _pipeline_classes("10_framework_comparison.ipynb")
+    namespace.update(N_AGENTS=1, MAX_STEPS=1, DEBATE_ROUNDS=1, SUPERVISOR_QUERIES=1)
+    tracer = trace_llm(MalformedSupervisor(), label="synthetic-malformed-supervisor")
+    result = namespace[pipeline_name](
+        ForecastQuestion("Synthetic malformed response?"), tracer, SyntheticPipelineSearch()
+    )
+    assert result.status == "failed" and result.final_probability is None
+    assert result.debate.token_usage.total_tokens == 30
+    assert result.supervisor.token_usage.total_tokens == 15
+    assert result.total_token_usage.total_tokens == 75
+    run = RunTrace.from_result(
+        result, notebook="fixture", provider=tracer.model_name, llm_calls=tracer.calls
+    )
+    assert RunTrace.load(run.save(tmp_path)).forecast_result().total_token_usage.total_tokens == 75

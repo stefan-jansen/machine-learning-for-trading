@@ -51,11 +51,13 @@ from agent_schemas import AggregationResult, ForecastQuestion, ForecastResult
 from agent_specialists import DebateAgent, SupervisorAgent
 from agent_tools import create_search_client
 
+# %% tags=["parameters"]
 RUN_LIVE = False
 LLM_PROVIDER = ""
 N_AGENTS = 3
 MAX_STEPS = 5
 DEBATE_ROUNDS = 2
+SUPERVISOR_QUERIES = 2
 PINNED_TRACES = {
     "Native Python": "10_framework_comparison_20260609T150909Z_ba1855847f4c.json",
     "LangGraph": "10_framework_comparison_20260609T151202Z_c8cba3007562.json",
@@ -109,17 +111,27 @@ def summaries(state):
 
 
 def debate_node(state, llm):
-    debate = DebateAgent(llm, max_rounds=DEBATE_ROUNDS).run(
-        state["question"].question, summaries(state), state["aggregation"].raw_probability
-    )
+    agent = DebateAgent(llm, max_rounds=DEBATE_ROUNDS)
+    try:
+        debate = agent.run(
+            state["question"].question, summaries(state), state["aggregation"].raw_probability
+        )
+    finally:
+        state["debate"] = agent.artifact
     return {"debate": debate}
 
 
 def supervise_node(state, llm, search):
     q = state["question"]
-    sup = SupervisorAgent(llm, search, max_queries=2).run(
-        q.question, summaries(state), date.fromisoformat(q.cutoff_date) if q.cutoff_date else None
-    )
+    agent = SupervisorAgent(llm, search, max_queries=SUPERVISOR_QUERIES)
+    try:
+        sup = agent.run(
+            q.question,
+            summaries(state),
+            date.fromisoformat(q.cutoff_date) if q.cutoff_date else None,
+        )
+    finally:
+        state["supervisor"] = agent.artifact
     probability = state["aggregation"].raw_probability
     debate = state["debate"]
     if debate.consensus_reached:
@@ -274,6 +286,8 @@ if RUN_LIVE:
                 "variant": label,
                 "n_agents": N_AGENTS,
                 "max_steps": MAX_STEPS,
+                "debate_rounds": DEBATE_ROUNDS,
+                "supervisor_queries": SUPERVISOR_QUERIES,
                 "statistical_correction_a": math.sqrt(3),
             },
             llm_calls=tracer.calls,

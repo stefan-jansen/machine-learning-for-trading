@@ -104,7 +104,7 @@ PINNED_TRACES = [
     "08_forecasting_pipeline_20260609T142158Z_24e083e7fe54.json",  # rate hike (contested)
 ]
 
-LLM_PROVIDER = ""  # blank = read .env (LLM_PROVIDER); "mock" forces mock
+LLM_PROVIDER = ""  # Blank reads .env; "mock" selects a synthetic fixture
 N_AGENTS = 3
 DEBATE_ROUNDS = 3
 MAX_STEPS = 5

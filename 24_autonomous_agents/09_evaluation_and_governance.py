@@ -74,7 +74,7 @@ from agent_tools import ToolExecutor, create_search_client
 RUN_LIVE = False
 PINNED_TRACE = "09_legacy_panel_20260615T191431Z_d5030378899c.json"
 
-LLM_PROVIDER = ""  # blank = read .env (LLM_PROVIDER); "mock" forces mock
+LLM_PROVIDER = ""  # Blank reads .env; "mock" selects a synthetic fixture
 N_AGENTS = 3
 MAX_STEPS = 5
 

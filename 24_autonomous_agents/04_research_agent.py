@@ -94,7 +94,7 @@ from agent_tools import (
 RUN_LIVE = False
 PINNED_TRACE = "04_research_agent_20260609T141730Z_b694ab4d0453.json"
 
-LLM_PROVIDER = ""  # blank = read .env (LLM_PROVIDER); "mock" forces mock
+LLM_PROVIDER = ""  # Blank reads .env; "mock" selects a synthetic fixture
 MAX_STEPS = 5
 MAX_SEARCH_RESULTS = 5
 
