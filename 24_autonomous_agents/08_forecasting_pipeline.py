@@ -241,6 +241,8 @@ def _supervisor_finalize(
     confidence = str(parsed.get("confidence", "")).lower()
     rationale = parsed.get("rationale")
     try:
+        if isinstance(parsed["p_yes"], bool):
+            raise ValueError("Probability must be a number, not a boolean")
         p_yes = float(parsed["p_yes"])
         validate_probabilities([p_yes])
         references = re.findall(r"https?://[^\s|]+", agent_summaries + "\n" + evidence_text)
@@ -288,29 +290,31 @@ class SupervisorAgent:
     ) -> SupervisorArtifact:
         """Run supervisor reconciliation. Returns SupervisorArtifact."""
         self.token_usage = TokenUsage()
+        self.artifact = SupervisorArtifact()
         disagreements, queries, t1 = _supervisor_identify_disagreements(
             self.llm, agent_summaries, self.max_queries
         )
         self.token_usage = self.token_usage + t1
+        self.artifact.token_usage = self.token_usage
+        self.artifact.disagreements = disagreements
+        self.artifact.queries = queries
 
         search_results = _supervisor_run_searches(
             self.search, queries, self.max_search_results, cutoff_date
         )
+
+        self.artifact.search_results = search_results
 
         p_yes, confidence, rationale, t2 = _supervisor_finalize(
             self.llm, question, agent_summaries, search_results
         )
         self.token_usage = self.token_usage + t2
 
-        return SupervisorArtifact(
-            disagreements=disagreements,
-            queries=queries,
-            search_results=search_results,
-            p_yes=p_yes,
-            confidence=confidence,
-            rationale=str(rationale) if rationale is not None else None,
-            token_usage=self.token_usage,
-        )
+        self.artifact.p_yes = p_yes
+        self.artifact.confidence = confidence
+        self.artifact.rationale = rationale
+        self.artifact.token_usage = self.token_usage
+        return self.artifact
 
 
 # %% [markdown]
@@ -400,10 +404,11 @@ def _run_pipeline_debate(
     aggregate_p_yes: float,
     debate_rounds: int,
     consensus_threshold: float,
+    artifact: DebateArtifact | None = None,
 ) -> DebateArtifact:
     """Phase 3: run bull/bear debate rounds against the pre-debate aggregate."""
-    token_usage = TokenUsage()
-    rounds: list[DebateRound] = []
+    artifact = artifact if artifact is not None else DebateArtifact()
+    rounds = artifact.rounds
     bear_argument: str | None = None
     bear_probability: float | None = None
 
@@ -424,9 +429,11 @@ def _run_pipeline_debate(
         bull_raw, bull_tokens = llm.complete_with_usage(
             [ChatMessage(role="user", content=bull_prompt)], json_mode=True
         )
-        token_usage = token_usage + bull_tokens
+        artifact.token_usage = artifact.token_usage + bull_tokens
         bull_parsed = parse_json(bull_raw)
         bull_argument = bull_parsed.get("argument", "")
+        if isinstance(bull_parsed["p_yes"], bool):
+            raise ValueError("Probability must be a number, not a boolean")
         bull_p = float(bull_parsed["p_yes"])
         validate_probabilities([bull_p])
         bull_evidence = [str(e) for e in bull_parsed.get("key_evidence", [])]
@@ -441,9 +448,11 @@ def _run_pipeline_debate(
         bear_raw, bear_tokens = llm.complete_with_usage(
             [ChatMessage(role="user", content=bear_prompt)], json_mode=True
         )
-        token_usage = token_usage + bear_tokens
+        artifact.token_usage = artifact.token_usage + bear_tokens
         bear_parsed = parse_json(bear_raw)
         bear_argument = bear_parsed.get("argument", "")
+        if isinstance(bear_parsed["p_yes"], bool):
+            raise ValueError("Probability must be a number, not a boolean")
         bear_probability = float(bear_parsed["p_yes"])
         validate_probabilities([bear_probability])
         bear_evidence = [str(e) for e in bear_parsed.get("key_evidence", [])]
@@ -461,21 +470,14 @@ def _run_pipeline_debate(
                 bear_key_evidence=bear_evidence,
             )
         )
+        artifact.bull_final_probability = bull_p
+        artifact.bear_final_probability = bear_probability
+        artifact.consensus_reached = consensus
+        artifact.early_termination = consensus and len(rounds) < debate_rounds
         if consensus:
             break
 
-    final_bull = rounds[-1].bull_probability if rounds else None
-    final_bear = rounds[-1].bear_probability if rounds else None
-    return DebateArtifact(
-        rounds=rounds,
-        bull_final_probability=final_bull,
-        bear_final_probability=final_bear,
-        consensus_reached=rounds[-1].consensus_reached if rounds else False,
-        early_termination=(
-            rounds[-1].consensus_reached and len(rounds) < debate_rounds if rounds else False
-        ),
-        token_usage=token_usage,
-    )
+    return artifact
 
 
 def _blend_final_probability(
@@ -559,9 +561,11 @@ class AIAForecaster:
         # Optional teaching adaptation: debate. An invalid stage leaves a failed attempt.
         debate_artifact = None
         supervisor_artifact = None
+        supervisor = None
         try:
             post_debate = agg_p
             if self.debate_rounds:
+                debate_artifact = DebateArtifact()
                 debate_artifact = _run_pipeline_debate(
                     self.llm,
                     question.question,
@@ -569,6 +573,7 @@ class AIAForecaster:
                     agg_p,
                     self.debate_rounds,
                     self.consensus_threshold,
+                    artifact=debate_artifact,
                 )
                 total_tokens = total_tokens + debate_artifact.token_usage
                 if debate_artifact.consensus_reached:
@@ -577,18 +582,27 @@ class AIAForecaster:
                         + debate_artifact.bear_final_probability
                     ) / 2
 
-            supervisor_artifact = SupervisorAgent(
+            supervisor = SupervisorAgent(
                 llm=self.llm,
                 search=self.search,
                 max_queries=3,
-            ).run(question=question.question, agent_summaries=agent_summaries, cutoff_date=cutoff)
+            )
+            supervisor_artifact = supervisor.run(
+                question=question.question, agent_summaries=agent_summaries, cutoff_date=cutoff
+            )
             total_tokens = total_tokens + supervisor_artifact.token_usage
         except Exception as exc:
+            supervisor_artifact = supervisor.artifact if supervisor is not None else None
+            total_tokens = TokenUsage()
+            for artifact in [*artifacts, debate_artifact, supervisor_artifact]:
+                if artifact is not None:
+                    total_tokens = total_tokens + artifact.token_usage
             return ForecastResult(
                 question=question,
                 agents=artifacts,
                 aggregation=aggregation,
                 debate=debate_artifact,
+                supervisor=supervisor_artifact,
                 status="failed",
                 failure_reason=str(exc),
                 total_token_usage=total_tokens,

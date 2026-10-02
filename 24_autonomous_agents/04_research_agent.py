@@ -444,6 +444,8 @@ class ResearchAgent:
                 break
             if action_type == "forecast":
                 try:
+                    if isinstance(action["p_yes"], bool):
+                        raise ValueError("Probability must be a number, not a boolean")
                     candidate = float(action["p_yes"])
                     validate_probabilities([candidate])
                 except (KeyError, TypeError, ValueError):

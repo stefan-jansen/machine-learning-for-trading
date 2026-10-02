@@ -185,12 +185,13 @@ fig.show()
 # %% [markdown]
 # ## Disagreement: When Forecasters Diverge
 #
-# Neyman extremization also handles disagreement. When forecasters are spread around
-# the base rate, the aggregate stays close to 50%.
+# This formula uses the mean, agent count and assumed error correlation.
+# Dispersion of the probabilities does not enter it. Equal means produce
+# equal aggregates when count, base rate and correlation are held fixed.
 
 # %%
 # Scenario: specialists disagree
-divergent = [0.72, 0.58, 0.65]
+divergent = [0.30, 0.90, 0.93]
 result_divergent = neyman_extremize(divergent, base=0.5, correlation=0.3)
 
 print(f"Specialist probabilities: {divergent}")
@@ -209,9 +210,9 @@ print(f"Simple mean: {sum(tight) / len(tight):.2f}")
 print(f"Neyman (ρ=0.3): {result_tight.extremized_probability:.2f}")
 
 # %% [markdown]
-# **Finding**: Neyman extremization amplifies consensus — when all three forecasters
-# are near 71%, the aggregate pushes to 79%. But when they disagree (0.58 vs 0.72),
-# the aggregate only reaches 71%, reflecting the uncertainty.
+# **Finding:** Both panels average 71% and produce the same extremized probability.
+# The large disagreement in the first panel is useful to inspect separately;
+# this mean-based formula does not reduce conviction in response to it.
 
 # %% [markdown]
 # ## Platt Scaling: Post-Hoc Calibration
@@ -444,27 +445,21 @@ fig.tight_layout()
 fig.show()
 
 # %% [markdown]
-# **Finding**: At $\rho=0.3$ (a working assumption for LLM agents using overlapping
-# sources), the effective $N$ saturates around 5-6 agents in this analytical curve.
-# Adding a 7th or 8th agent provides marginal information benefit but doubles token
-# cost. The AIA Forecaster paper (Schoenegger et al., 2024) reports diminishing
-# returns past ~3 specialists in their production setting; that recommendation is
-# not measured in this notebook, but the diversity-factor curve above is consistent
-# with the same diminishing-returns shape.
+# **Finding:** With $n_{\text{eff}} = n / (1 + (n-1)\rho)$ and $\rho=0.3$, ten agents have effective $N\approx2.70$. The limit as $n$ grows is $1/\rho\approx3.33$. This is an analytical consequence of the assumed correlation, not a measured property of our models. Additional agents increase calls roughly in proportion to count; this curve alone cannot select an optimal team size.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Simple averaging is wrong**: It ignores the informational value of agreement
-# 2. **Neyman extremization** formalizes "agreement = stronger conviction" via the
-#    diversity factor $d = \sqrt{n / (1 + (n-1)\rho)}$
+# 1. **The arithmetic mean is a baseline**; extremization adds assumptions about
+#    shared information and error correlation that require evaluation.
+# 2. **Neyman extremization** scales the mean around a base rate using
+#    $d = \sqrt{n / (1 + (n-1)\rho)}$; probability dispersion is not an input.
 # 3. **Weighted Neyman** accounts for heterogeneous confidence via the Herfindahl
 #    index, preventing over-extremization when one agent dominates
 # 4. **Correlation is the binding constraint**: At $\rho=0.5$, going from 3 to 8
 #    agents barely moves the aggregate
-# 5. **Effective N saturates**: in the analytical diversity-factor curve at
-#    $\rho=0.3$, $n_{\text{eff}}$ plateaus near 5-6 agents; the AIA Forecaster paper
-#    reports a similar plateau in production at ~3 specialists
+# 5. **Effective N approaches $1/\rho$**: at $\rho=0.3$ the analytical limit
+#    is about 3.33, without implying a measured optimal agent count.
 # 6. **Log-odds extremization** and `find_optimal_d` provide principled per-model
 #    calibration tuned on resolved forecasts (tuning quality scales with the size
 #    of the resolved-forecast panel)

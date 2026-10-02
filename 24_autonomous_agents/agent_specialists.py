@@ -63,6 +63,7 @@ def _run_debate_round(
     prev_bear_argument: str | None,
     prev_bear_probability: float | None,
     consensus_threshold: float,
+    artifact: DebateArtifact,
 ) -> tuple[DebateRound, TokenUsage]:
     """Run one bull→bear round. Returns (DebateRound, round_token_usage)."""
     round_tokens = TokenUsage()
@@ -86,8 +87,11 @@ def _run_debate_round(
         [ChatMessage(role="user", content=bull_prompt)], json_mode=True
     )
     round_tokens = round_tokens + bull_tokens
+    artifact.token_usage = artifact.token_usage + bull_tokens
     bull_parsed = parse_json(bull_raw)
     bull_argument = bull_parsed.get("argument", "")
+    if isinstance(bull_parsed["p_yes"], bool):
+        raise ValueError("Probability must be a number, not a boolean")
     bull_p = float(bull_parsed["p_yes"])
     validate_probabilities([bull_p])
     bull_evidence = [str(e) for e in bull_parsed.get("key_evidence", [])]
@@ -103,8 +107,11 @@ def _run_debate_round(
         [ChatMessage(role="user", content=bear_prompt)], json_mode=True
     )
     round_tokens = round_tokens + bear_tokens
+    artifact.token_usage = artifact.token_usage + bear_tokens
     bear_parsed = parse_json(bear_raw)
     bear_argument = bear_parsed.get("argument", "")
+    if isinstance(bear_parsed["p_yes"], bool):
+        raise ValueError("Probability must be a number, not a boolean")
     bear_probability = float(bear_parsed["p_yes"])
     validate_probabilities([bear_probability])
     bear_evidence = [str(e) for e in bear_parsed.get("key_evidence", [])]
@@ -145,7 +152,8 @@ class DebateAgent:
     ) -> DebateArtifact:
         """Run the debate. Returns a DebateArtifact with full transcript."""
         self.token_usage = TokenUsage()
-        rounds: list[DebateRound] = []
+        self.artifact = DebateArtifact()
+        rounds = self.artifact.rounds
         prev_bear_argument: str | None = None
         prev_bear_probability: float | None = None
 
@@ -159,6 +167,7 @@ class DebateAgent:
                 prev_bear_argument,
                 prev_bear_probability,
                 self.consensus_threshold,
+                self.artifact,
             )
             self.token_usage = self.token_usage + round_tokens
             rounds.append(debate_round)
@@ -293,6 +302,8 @@ def _supervisor_finalize(
     confidence = str(parsed.get("confidence", "")).lower()
     rationale = parsed.get("rationale")
     try:
+        if isinstance(parsed["p_yes"], bool):
+            raise ValueError("Probability must be a number, not a boolean")
         p_yes = float(parsed["p_yes"])
         validate_probabilities([p_yes])
         references = re.findall(r"https?://[^\s|]+", agent_summaries + "\n" + evidence_text)
@@ -331,26 +342,28 @@ class SupervisorAgent:
     ) -> SupervisorArtifact:
         """Run supervisor reconciliation. Returns SupervisorArtifact."""
         self.token_usage = TokenUsage()
+        self.artifact = SupervisorArtifact()
         disagreements, queries, t1 = _supervisor_identify_disagreements(
             self.llm, agent_summaries, self.max_queries
         )
         self.token_usage = self.token_usage + t1
+        self.artifact.token_usage = self.token_usage
+        self.artifact.disagreements = disagreements
+        self.artifact.queries = queries
 
         search_results = _supervisor_run_searches(
             self.search, queries, self.max_search_results, cutoff_date
         )
+
+        self.artifact.search_results = search_results
 
         p_yes, confidence, rationale, t2 = _supervisor_finalize(
             self.llm, question, agent_summaries, search_results
         )
         self.token_usage = self.token_usage + t2
 
-        return SupervisorArtifact(
-            disagreements=disagreements,
-            queries=queries,
-            search_results=search_results,
-            p_yes=p_yes,
-            confidence=confidence,
-            rationale=str(rationale) if rationale is not None else None,
-            token_usage=self.token_usage,
-        )
+        self.artifact.p_yes = p_yes
+        self.artifact.confidence = confidence
+        self.artifact.rationale = rationale
+        self.artifact.token_usage = self.token_usage
+        return self.artifact

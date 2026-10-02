@@ -20,7 +20,7 @@ from agent_schemas import AggregationResult
 def validate_probabilities(values: Sequence[float]) -> None:
     if len(values) == 0:
         raise ValueError("At least one probability is required")
-    if any(not math.isfinite(p) or not 0 <= p <= 1 for p in values):
+    if any(isinstance(p, bool) or not math.isfinite(p) or not 0 <= p <= 1 for p in values):
         raise ValueError("Probabilities must be finite and in [0, 1]")
 
 

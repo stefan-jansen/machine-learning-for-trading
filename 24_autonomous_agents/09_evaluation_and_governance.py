@@ -221,60 +221,63 @@ else:
 # measure outperformance of a historical market baseline.
 
 # %%
-model_brier = brier_score(predictions, outcomes)
-model_log = log_score(predictions, outcomes)
-model_ece = expected_calibration_error(predictions, outcomes)
-model_sharp = sharpness(predictions)
+if predictions:
+    model_brier = brier_score(predictions, outcomes)
+    model_log = log_score(predictions, outcomes)
+    model_ece = expected_calibration_error(predictions, outcomes)
+    model_sharp = sharpness(predictions)
 
-market_brier = brier_score(market_prices, outcomes)
-market_log = log_score(market_prices, outcomes)
-market_ece = expected_calibration_error(market_prices, outcomes)
-market_sharp = sharpness(market_prices)
+    market_brier = brier_score(market_prices, outcomes)
+    market_log = log_score(market_prices, outcomes)
+    market_ece = expected_calibration_error(market_prices, outcomes)
+    market_sharp = sharpness(market_prices)
 
-metrics_df = pl.DataFrame(
-    [
-        {
-            "metric": "Brier score (lower is better)",
-            "saved forecast": round(model_brier, 4),
-            "illustrative prices": round(market_brier, 4),
-        },
-        {
-            "metric": "Log score (lower is better)",
-            "saved forecast": round(model_log, 4),
-            "illustrative prices": round(market_log, 4),
-        },
-        {
-            "metric": "ECE (lower is better)",
-            "saved forecast": round(model_ece, 4),
-            "illustrative prices": round(market_ece, 4),
-        },
-        {
-            "metric": "Sharpness (higher is better)",
-            "saved forecast": round(model_sharp, 4),
-            "illustrative prices": round(market_sharp, 4),
-        },
-    ]
-)
-print(metrics_df)
+    metrics_df = pl.DataFrame(
+        [
+            {
+                "metric": "Brier score (lower is better)",
+                "saved forecast": round(model_brier, 4),
+                "illustrative prices": round(market_brier, 4),
+            },
+            {
+                "metric": "Log score (lower is better)",
+                "saved forecast": round(model_log, 4),
+                "illustrative prices": round(market_log, 4),
+            },
+            {
+                "metric": "ECE (lower is better)",
+                "saved forecast": round(model_ece, 4),
+                "illustrative prices": round(market_ece, 4),
+            },
+            {
+                "metric": "Sharpness (higher is better)",
+                "saved forecast": round(model_sharp, 4),
+                "illustrative prices": round(market_sharp, 4),
+            },
+        ]
+    )
+    print(metrics_df)
 
-# A point estimate on 10 questions invites a ranking the data cannot support,
-# so bootstrap the Brier score and the *paired* saved forecast-minus-market gap.
-m_lo, m_hi = brier_ci(predictions, outcomes)
-k_lo, k_hi = brier_ci(market_prices, outcomes)
-d_lo, d_hi = brier_diff_ci(predictions, market_prices, outcomes)
+    # A point estimate on 10 questions invites a ranking the data cannot support,
+    # so bootstrap the Brier score and the *paired* saved forecast-minus-market gap.
+    m_lo, m_hi = brier_ci(predictions, outcomes)
+    k_lo, k_hi = brier_ci(market_prices, outcomes)
+    d_lo, d_hi = brier_diff_ci(predictions, market_prices, outcomes)
 
-print(f"\nBrier, 95% bootstrap CI over the {len(outcomes)} questions:")
-print(f"  saved forecast  {model_brier:.3f}  [{m_lo:.3f}, {m_hi:.3f}]")
-print(f"  illustrative{market_brier:.3f}  [{k_lo:.3f}, {k_hi:.3f}]")
-print(
-    f"  saved forecast - illustrative {model_brier - market_brier:+.3f}  [{d_lo:+.3f}, {d_hi:+.3f}]"
-)
-print(
-    "\n  -> the gap's interval "
-    + ("CONTAINS 0" if d_lo <= 0 <= d_hi else "excludes 0")
-    + ": exploratory interval "
-    + ("overlaps zero." if d_lo <= 0 <= d_hi else "excludes zero, without establishing skill.")
-)
+    print(f"\nBrier, 95% bootstrap CI over the {len(outcomes)} questions:")
+    print(f"  saved forecast  {model_brier:.3f}  [{m_lo:.3f}, {m_hi:.3f}]")
+    print(f"  illustrative{market_brier:.3f}  [{k_lo:.3f}, {k_hi:.3f}]")
+    print(
+        f"  saved forecast - illustrative {model_brier - market_brier:+.3f}  [{d_lo:+.3f}, {d_hi:+.3f}]"
+    )
+    print(
+        "\n  -> the gap's interval "
+        + ("CONTAINS 0" if d_lo <= 0 <= d_hi else "excludes 0")
+        + ": exploratory interval "
+        + ("overlaps zero." if d_lo <= 0 <= d_hi else "excludes zero, without establishing skill.")
+    )
+else:
+    print("No accepted resolved forecasts; scores are unavailable.")
 
 # %% [markdown]
 # Bootstrap intervals resample these questions in pairs. They illustrate the
@@ -289,37 +292,40 @@ print(
 # A perfectly calibrated forecaster lies on the diagonal.
 
 # %%
-bins = reliability_bins(predictions, outcomes, n_bins=4)
+if predictions:
+    bins = reliability_bins(predictions, outcomes, n_bins=4)
 
-fig, ax = plt.subplots(figsize=(7, 6))
+    fig, ax = plt.subplots(figsize=(7, 6))
 
-if bins:
-    avg_pred = [b["avg_predicted"] for b in bins]
-    avg_obs = [b["avg_observed"] for b in bins]
-    counts = [b["count"] for b in bins]
+    if bins:
+        avg_pred = [b["avg_predicted"] for b in bins]
+        avg_obs = [b["avg_observed"] for b in bins]
+        counts = [b["count"] for b in bins]
 
-    ax.bar(avg_pred, avg_obs, width=0.12, alpha=0.6, label="Pipeline", color="steelblue")
-    ax.plot([0, 1], [0, 1], "k--", alpha=0.4, label="Perfect calibration")
+        ax.bar(avg_pred, avg_obs, width=0.12, alpha=0.6, label="Saved records", color="steelblue")
+        ax.plot([0, 1], [0, 1], "k--", alpha=0.4, label="Perfect calibration")
 
-    for p, o, c in zip(avg_pred, avg_obs, counts, strict=False):
-        ax.annotate(
-            f"n={c}",
-            (p, o),
-            textcoords="offset points",
-            xytext=(0, 10),
-            ha="center",
-            fontsize=9,
-        )
+        for p, o, c in zip(avg_pred, avg_obs, counts, strict=False):
+            ax.annotate(
+                f"n={c}",
+                (p, o),
+                textcoords="offset points",
+                xytext=(0, 10),
+                ha="center",
+                fontsize=9,
+            )
 
-ax.set_xlabel("Predicted Probability")
-ax.set_ylabel("Observed Frequency")
-ax.set_title("Reliability Curve (Calibration)")
-ax.legend()
-ax.set_xlim(-0.05, 1.05)
-ax.set_ylim(-0.05, 1.05)
-ax.set_aspect("equal")
-fig.tight_layout()
-fig.show()
+    ax.set_xlabel("Predicted Probability")
+    ax.set_ylabel("Observed Frequency")
+    ax.set_title("Reliability Curve (Calibration)")
+    ax.legend()
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_aspect("equal")
+    fig.tight_layout()
+    fig.show()
+else:
+    print("No accepted resolved forecasts; reliability plot skipped.")
 
 # %% [markdown]
 # ## Fit on earlier questions; evaluate later questions
@@ -333,17 +339,23 @@ fig.show()
 ordered = sorted(range(len(scored_results)), key=lambda i: scored_results[i].question.cutoff_date)
 split = len(ordered) // 2
 train_idx, test_idx = ordered[:split], ordered[split:]
-cal_result = find_optimal_d([predictions[i] for i in train_idx], [outcomes[i] for i in train_idx])
-test_predictions = [predictions[i] for i in test_idx]
-test_outcomes = [outcomes[i] for i in test_idx]
-calibrated_preds = [logodds_extremize(p, cal_result.optimal_d) for p in test_predictions]
-print(
-    f"Fit d={cal_result.optimal_d:.3f} on {len(train_idx)} earlier questions; evaluate {len(test_idx)} later questions"
-)
-print(
-    f"Held-out Brier: raw={brier_score(test_predictions, test_outcomes):.4f}; "
-    f"fitted scaling={brier_score(calibrated_preds, test_outcomes):.4f}"
-)
+cal_result = None
+if train_idx and test_idx:
+    cal_result = find_optimal_d(
+        [predictions[i] for i in train_idx], [outcomes[i] for i in train_idx]
+    )
+    test_predictions = [predictions[i] for i in test_idx]
+    test_outcomes = [outcomes[i] for i in test_idx]
+    calibrated_preds = [logodds_extremize(p, cal_result.optimal_d) for p in test_predictions]
+    print(
+        f"Fit d={cal_result.optimal_d:.3f} on {len(train_idx)} earlier questions; evaluate {len(test_idx)} later questions"
+    )
+    print(
+        f"Held-out Brier: raw={brier_score(test_predictions, test_outcomes):.4f}; "
+        f"fitted scaling={brier_score(calibrated_preds, test_outcomes):.4f}"
+    )
+else:
+    print("Calibration skipped: need nonempty earlier and later samples.")
 
 # %% [markdown]
 # Interpret the held-out scores as a method demonstration. More data does not
@@ -357,50 +369,55 @@ print(
 # new matched runs with the same questions, evidence and budgets.
 
 # %%
-test_results = [scored_results[i] for i in test_idx]
-mean_only = [
-    sum(a.p_yes for a in r.agents if a.p_yes is not None)
-    / sum(a.p_yes is not None for a in r.agents)
-    for r in test_results
-]
-single_agent = [next(a.p_yes for a in r.agents if a.p_yes is not None) for r in test_results]
-configs = {
-    "Saved final": test_predictions,
-    "Mean of saved agents": mean_only,
-    "First saved researcher": single_agent,
-    "Fixed sqrt(3) scaling": [logodds_extremize(p, math.sqrt(3)) for p in test_predictions],
-    "Fitted on earlier questions": calibrated_preds,
-    "Illustrative prices": [market_prices[i] for i in test_idx],
-}
+configs = {}
+if cal_result is not None:
+    test_results = [scored_results[i] for i in test_idx]
+    mean_only = [
+        sum(a.p_yes for a in r.agents if a.p_yes is not None)
+        / sum(a.p_yes is not None for a in r.agents)
+        for r in test_results
+    ]
+    single_agent = [next(a.p_yes for a in r.agents if a.p_yes is not None) for r in test_results]
+    configs = {
+        "Saved final": test_predictions,
+        "Mean of saved agents": mean_only,
+        "First saved researcher": single_agent,
+        "Fixed sqrt(3) scaling": [logodds_extremize(p, math.sqrt(3)) for p in test_predictions],
+        "Fitted on earlier questions": calibrated_preds,
+        "Illustrative prices": [market_prices[i] for i in test_idx],
+    }
 
 # %%
-sensitivity_df = pl.DataFrame(
-    [
-        {
-            "config": name,
-            "brier": round(brier_score(preds, test_outcomes), 3),
-            "ci_lo": round(brier_ci(preds, test_outcomes)[0], 3),
-            "ci_hi": round(brier_ci(preds, test_outcomes)[1], 3),
-            "log": round(log_score(preds, test_outcomes), 3),
-            "ece": round(expected_calibration_error(preds, test_outcomes), 3),
-            "sharpness": round(sharpness(preds), 3),
-        }
-        for name, preds in configs.items()
-    ]
-)
-print(sensitivity_df)
+if configs:
+    sensitivity_df = pl.DataFrame(
+        [
+            {
+                "config": name,
+                "brier": round(brier_score(preds, test_outcomes), 3),
+                "ci_lo": round(brier_ci(preds, test_outcomes)[0], 3),
+                "ci_hi": round(brier_ci(preds, test_outcomes)[1], 3),
+                "log": round(log_score(preds, test_outcomes), 3),
+                "ece": round(expected_calibration_error(preds, test_outcomes), 3),
+                "sharpness": round(sharpness(preds), 3),
+            }
+            for name, preds in configs.items()
+        ]
+    )
+    print(sensitivity_df)
 
-# The ranking question is a *paired* comparison against the reference config,
-# so difference each row against "Saved final" on the same resampled panel.
-reference = configs["Saved final"]
-print("\nPaired difference vs 'Saved final' (negative = that row scores better):")
-for name, preds in configs.items():
-    if name == "Saved final":
-        continue
-    delta = brier_score(preds, test_outcomes) - brier_score(reference, test_outcomes)
-    lo, hi = brier_diff_ci(preds, reference, test_outcomes)
-    verdict = "interval overlaps zero" if lo <= 0 <= hi else "interval excludes zero"
-    print(f"  {name:<16} {delta:+.3f}  [{lo:+.3f}, {hi:+.3f}]  {verdict}")
+    # The ranking question is a *paired* comparison against the reference config,
+    # so difference each row against "Saved final" on the same resampled panel.
+    reference = configs["Saved final"]
+    print("\nPaired difference vs 'Saved final' (negative = that row scores better):")
+    for name, preds in configs.items():
+        if name == "Saved final":
+            continue
+        delta = brier_score(preds, test_outcomes) - brier_score(reference, test_outcomes)
+        lo, hi = brier_diff_ci(preds, reference, test_outcomes)
+        verdict = "interval overlaps zero" if lo <= 0 <= hi else "interval excludes zero"
+        print(f"  {name:<16} {delta:+.3f}  [{lo:+.3f}, {hi:+.3f}]  {verdict}")
+else:
+    print("No held-out comparison; at least two accepted forecasts are required.")
 
 # %% [markdown]
 # Each row uses the same held-out outcomes. Means and the first researcher reuse

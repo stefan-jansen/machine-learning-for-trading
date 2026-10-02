@@ -241,10 +241,9 @@ def _init_react_session(
 # Each iteration: the LLM decides what to do (search or forecast), we
 # execute it, and feed the observation back. The loop terminates when the
 # agent issues a `forecast` action or hits the step limit. The `p_yes`
-# value is clamped to [0, 1] before being returned — well-behaved LLMs
-# stay in range, but the clamp documents the invariant the rest of the
-# chapter relies on (aggregation, calibration, the strategy layer all
-# assume probabilities live on the unit interval).
+# value must be a finite number in [0, 1], with a rationale identifying
+# retained evidence. Invalid or unsupported output is rejected. The budget
+# can end with abstention rather than a probability.
 
 
 # %%
@@ -304,6 +303,8 @@ def run_react_agent(
         try:
             if kind != "forecast":
                 raise ValueError("Invalid action or exhausted search budget")
+            if isinstance(action["p_yes"], bool):
+                raise ValueError("Probability must be a number, not a boolean")
             probability = float(action["p_yes"])
             validate_probabilities([probability])
             rationale = action.get("rationale")
@@ -348,6 +349,9 @@ else:
         artifact.traces,
         artifact.token_usage,
     )
+    if not any(t.action == "forecast" for t in traces):
+        p_yes = None
+        rationale = "No forecast action in this capture; the saved 0.5 is a legacy sentinel"
     search_name = pinned_run.params.get("search_client", "replay (pinned trace)")
     print(f"Search: {search_name}\n")
     print(f"Question: {question.question}\n")
@@ -358,7 +362,7 @@ else:
             print(f"  Step {t.step}: forecast → p_yes={p_yes:.2f}")
 
 # %%
-print("--- Forecast ---")
+print("--- Forecast ---" if p_yes is not None else "--- Abstention ---")
 print(f"p(YES) = {p_yes}")
 print(f"Rationale: {rationale}")
 print(f"Tokens: {tokens.total_tokens:,}")

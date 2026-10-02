@@ -59,7 +59,7 @@ def test_scores_and_paired_intervals_use_corresponding_outcomes():
     assert math.isfinite(metrics.log_score([0, 1], [1, 0]))
 
 
-@pytest.mark.parametrize("probabilities", [[], [math.nan], [math.inf], [-1], [2]])
+@pytest.mark.parametrize("probabilities", [[], [True], [False], [math.nan], [math.inf], [-1], [2]])
 def test_aggregation_rejects_invalid_probability_sets(probabilities):
     with pytest.raises(ValueError):
         metrics.neyman_extremize(probabilities)
@@ -139,6 +139,8 @@ def test_budget_limited_synthesis_uses_retained_evidence():
     "response",
     [
         "not JSON",
+        '{"action":"forecast","p_yes":true,"rationale":"Recorded source"}',
+        '{"action":"forecast","p_yes":false,"rationale":"Recorded source"}',
         "[]",
         '{"action":"forecast","p_yes":2,"rationale":"Recorded source"}',
         '{"action":"forecast","p_yes":0.7,"rationale":"Unlinked assertion"}',
@@ -320,6 +322,8 @@ class SyntheticPipelineSearch:
         ("high", 0.7, 0.7),
         ("medium", 0.7, 0.6),
         ("high", 1.2, 0.6),
+        ("high", True, 0.6),
+        ("high", False, 0.6),
     ],
 )
 def test_composed_notebook_executes_high_only_supervisor_and_fixed_correction(
@@ -382,3 +386,174 @@ def test_recovered_panel_preserves_probabilities_and_corrects_scores():
     assert metrics.brier_score(
         [r["final_p"] for _, r in scored], [q.resolved_outcome for q, _ in scored]
     ) == pytest.approx(0.0001)
+
+
+@pytest.mark.parametrize("stage", ["debate", "supervisor"])
+def test_failed_reconciliation_keeps_completed_call_usage(stage):
+    class LaterFailure(SyntheticPipelineClient):
+        bears = 0
+
+        def complete_with_usage(self, messages, json_mode=True):
+            import json
+
+            prompt = messages[-1].content.lower()
+            if stage == "supervisor" and "supervisor" in prompt and "step 1:" not in prompt:
+                raise OSError("Synthetic final supervisor failure")
+            if "bear debater" in prompt:
+                self.bears += 1
+                if stage == "debate" and self.bears == 2:
+                    raise OSError("Synthetic second-round failure")
+                raw, usage = super().complete_with_usage(messages, json_mode)
+                data = json.loads(raw)
+                data["p_yes"] = 0.4
+                return json.dumps(data), usage
+            return super().complete_with_usage(messages, json_mode)
+
+    result = _pipeline_classes()["AIAForecaster"](
+        LaterFailure(),
+        SyntheticPipelineSearch(),
+        n_agents=1,
+        max_steps=1,
+        debate_rounds=2,
+        consensus_threshold=0.01,
+    ).forecast(ForecastQuestion("Synthetic failure?"))
+    assert result.status == "failed" and result.final_probability is None
+    assert result.debate and result.debate.rounds
+    assert result.total_token_usage.total_tokens == (75 if stage == "debate" else 105)
+    if stage == "supervisor":
+        assert result.supervisor and result.supervisor.token_usage.total_tokens == 15
+
+
+EVALUATION_NOTEBOOK = REPO_ROOT / "24_autonomous_agents/09_evaluation_and_governance.ipynb"
+DEBATE_NOTEBOOK = REPO_ROOT / "24_autonomous_agents/07_adversarial_debate.ipynb"
+PROVIDER_MODULE = "agent_providers"
+SCHEMA_MODULE = "agent_schemas"
+NOTEBOOK_CWD = REPO_ROOT
+
+
+def _execute_notebook_fixture(path, setup, final_check=""):
+    import nbformat
+    from nbclient import NotebookClient
+
+    notebook = nbformat.read(path, as_version=4)
+    parameters = next(
+        i for i, c in enumerate(notebook.cells) if "parameters" in c.metadata.get("tags", [])
+    )
+    notebook.cells.insert(parameters + 1, nbformat.v4.new_code_cell(setup))
+    if final_check:
+        notebook.cells.append(nbformat.v4.new_code_cell(final_check))
+    client = NotebookClient(
+        notebook,
+        timeout=120,
+        kernel_name="python3",
+        resources={"metadata": {"path": str(NOTEBOOK_CWD)}},
+    )
+    client.create_kernel_manager()
+    client.km.kernel_spec.argv[0] = sys.executable
+    client.execute()
+    return notebook
+
+
+@pytest.mark.parametrize("accepted_count", [0, 1])
+def test_sparse_live_panel_finishes_and_preserves_every_attempt(tmp_path, accepted_count):
+    import json
+
+    setup = (
+        """
+import socket
+from SCHEMA_MODULE import SearchResult
+def no_network(self, address):
+    raise AssertionError("Failure fixture must not access the network")
+socket.socket.connect = no_network
+class SparsePanelModel:
+    model_name = "synthetic-sparse-panel-test"
+    questions = 0
+    def complete_with_usage(self, messages, json_mode=True):
+        if any(m.role == "tool" for m in messages):
+            response = {"action": "forecast", "p_yes": 0.6,
+                        "rationale": "https://fixture.example/evidence"}
+        else:
+            self.questions += 1
+            response = ({"action": "search", "query": "fixture"}
+                        if self.questions <= ACCEPTED_COUNT
+                        else {"action": "abstain", "rationale": "Synthetic missing evidence"})
+        from PROVIDER_MODULE import TokenUsage
+        return json.dumps(response), TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15)
+class FixtureSearch:
+    def search(self, query, max_results=5, cutoff_date=None):
+        return [SearchResult("Synthetic evidence", "https://fixture.example/evidence",
+                             "Synthetic failure fixture", "2024-01-01")]
+RUN_LIVE = True
+N_AGENTS = 1
+MAX_STEPS = 1
+create_llm_client = lambda *args, **kwargs: SparsePanelModel()
+create_search_client = lambda *args, **kwargs: FixtureSearch()
+original_save = RunTrace.save
+RunTrace.save = lambda self, directory=None: original_save(self, TRACE_DIRECTORY)
+""".replace("ACCEPTED_COUNT", str(accepted_count))
+        .replace("PROVIDER_MODULE", PROVIDER_MODULE)
+        .replace("SCHEMA_MODULE", SCHEMA_MODULE)
+        .replace("TRACE_DIRECTORY", repr(str(tmp_path)))
+    )
+    _execute_notebook_fixture(
+        EVALUATION_NOTEBOOK,
+        setup,
+        f"assert len(scored_results) == {accepted_count}\nassert not configs\nassert warden.calls == 2",
+    )
+    captures = list(tmp_path.glob("*.json"))
+    assert len(captures) == 1
+    panel = json.loads(captures[0].read_text())["params"]["panel"]
+    assert len(panel) == 10
+    assert sum(r["status"] == "accepted" for r in panel) == accepted_count
+    assert sum(r["status"] == "abstained" for r in panel) == 8 - accepted_count
+    assert all(r["agents"][0]["messages"] for r in panel if r["status"] != "excluded_known_outcome")
+
+
+def test_invalid_live_debate_is_saved_before_notebook_stops(tmp_path):
+    import json
+
+    from nbclient.exceptions import CellExecutionError
+
+    setup = (
+        """
+import json
+import socket
+from SCHEMA_MODULE import SearchResult
+def no_network(self, address):
+    raise AssertionError("Failure fixture must not access the network")
+socket.socket.connect = no_network
+class InvalidDebateModel:
+    model_name = "synthetic-invalid-debate-test"
+    def complete_with_usage(self, messages, json_mode=True):
+        if "bull debater" in messages[-1].content.lower():
+            response = {"p_yes": 2, "argument": "Invalid synthetic probability"}
+        elif any(m.role == "tool" for m in messages):
+            response = {"action": "forecast", "p_yes": 0.6,
+                        "rationale": "https://fixture.example/evidence"}
+        else:
+            response = {"action": "search", "query": "fixture"}
+        from PROVIDER_MODULE import TokenUsage
+        return json.dumps(response), TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15)
+class FixtureSearch:
+    def search(self, query, max_results=5, cutoff_date=None):
+        return [SearchResult("Synthetic evidence", "https://fixture.example/evidence",
+                             "Synthetic failure fixture", "2024-01-01")]
+RUN_LIVE = True
+N_AGENTS = 1
+MAX_STEPS = 1
+create_llm_client = lambda *args, **kwargs: InvalidDebateModel()
+create_search_client = lambda *args, **kwargs: FixtureSearch()
+original_save = RunTrace.save
+RunTrace.save = lambda self, directory=None: original_save(self, TRACE_DIRECTORY)
+""".replace("PROVIDER_MODULE", PROVIDER_MODULE)
+        .replace("SCHEMA_MODULE", SCHEMA_MODULE)
+        .replace("TRACE_DIRECTORY", repr(str(tmp_path)))
+    )
+    with pytest.raises(CellExecutionError, match="probabilit"):
+        _execute_notebook_fixture(DEBATE_NOTEBOOK, setup)
+    captures = list(tmp_path.glob("*.json"))
+    assert len(captures) == 1
+    capture = json.loads(captures[0].read_text())
+    assert capture["status"] == "failed" and capture["final_probability"] is None
+    assert len(capture["llm_calls"]) == 3
+    assert json.loads(capture["llm_calls"][-1]["response"])["p_yes"] == 2
