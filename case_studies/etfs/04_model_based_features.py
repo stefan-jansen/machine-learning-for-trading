@@ -1499,10 +1499,10 @@ print(
 # ### What the burn-in costs
 #
 # A model-based feature legitimately starts after the estimation window that produced it, so the
-# leading gap is reported rather than asserted away. It is reported here because it used to be
-# invisible: `sequence_dataset` turns a null feature into `0.0`, which after normalization is the
-# feature's mean, so rows missing a feature were fitted as average observations and nothing
-# raised. The same geometry goes into the digest sidecar, so a later stage can compare against
+# leading gap is reported rather than asserted away. Reporting it is what makes it visible:
+# `sequence_dataset` turns a null feature into `0.0`, which after normalization is the feature's
+# mean, so a row missing a feature would be fitted as an average observation and nothing would
+# raise. The same geometry goes into the digest sidecar, so a later stage can compare against
 # it instead of measuring it again by hand.
 #
 # The distribution summaries beside the coverage are restricted to the development history: a

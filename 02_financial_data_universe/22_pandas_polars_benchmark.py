@@ -924,9 +924,9 @@ join_results.append(r)
 
 # %% [markdown]
 # The cell below asks pandas whether it has a native anti-join rather than inferring it
-# from the major version. The branch that used to be guarded by that version check ran
-# the indicator merge in both arms, so the notebook claimed to exercise a feature it
-# never called.
+# from the major version. A version check can be wrong about the installed pandas, and
+# when it is, the indicator merge runs in both arms and the notebook claims to exercise a
+# feature it never called.
 
 # %%
 try:
@@ -1203,10 +1203,10 @@ string_results = []
 # ### H1: String Contains
 #
 # The needle is chosen from the symbols that exist rather than written as a literal.
-# The literal this used to use was `SYM_0`, and the generator names symbols `SYM_000`
-# upwards: at ten symbols and at a hundred, every symbol in the panel begins `SYM_0`,
-# so the filter selected all of them and the operation was a full scan under a
-# predicate that could not be false. Picking the digit whose share of the symbols is
+# A literal such as `SYM_0` does not discriminate here: the generator names symbols
+# `SYM_000` upwards, so at ten symbols and at a hundred every symbol in the panel begins
+# `SYM_0`, the filter selects all of them, and the operation is a full scan under a
+# predicate that cannot be false. Picking the digit whose share of the symbols is
 # closest to `STRING_MATCH_TARGET_SHARE` gives a substring search that discriminates at
 # any symbol count, and the cell prints the share it got.
 
@@ -1299,11 +1299,11 @@ results.extend(string_results)
 # parity, and swapping the libraries inverts it, which is what a summary of ratios has
 # to do.
 #
-# It does not put the memory measurements in the same table as the timings. Those rows
-# used to be concatenated in, carrying megabytes in the `pandas_time` and
-# `polars_time` columns with a comment saying so, after which they were counted in the
-# mean speedup, counted in the tally of operations each library won, drawn into the
-# speedup histogram, and plotted on the seconds-against-seconds scatter.
+# It does not put the memory measurements in the same table as the timings. Concatenated
+# in, those rows carry megabytes in the `pandas_time` and `polars_time` columns, and a
+# comment saying so does not stop them being counted in the mean speedup, counted in the
+# tally of operations each library won, drawn into the speedup histogram, and plotted on
+# the seconds-against-seconds scatter.
 
 # %%
 print("\n" + "=" * 70)

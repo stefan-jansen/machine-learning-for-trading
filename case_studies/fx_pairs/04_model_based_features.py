@@ -1835,13 +1835,13 @@ print(
 # feature values rather than over the raw file bytes, so re-running the notebook and
 # producing the same numbers leaves it where it was, while a changed fit moves it.
 #
-# The record names what the values were built from. That is now the price file alone. Under
-# the old arrangement it also named the label file, because the label file decided the fold
-# boundaries and the fold boundaries decided the fits; the schedule reads no label, so
-# naming one here would record a dependency that no longer exists.
+# The record names what the values were built from, and that is the price file alone. Naming
+# the label file as well would record a dependency that does not exist: a label file matters
+# where it decides the fold boundaries and the boundaries decide the fits, and this schedule
+# reads no label.
 #
-# What goes in beside it is the schedule itself, which is the thing a reader needs in order
-# to know what an emitted value means and the thing the artifact could not previously say.
+# What goes in beside it is the schedule itself, which is what a reader needs in order to know
+# what an emitted value means.
 
 # %% tags=[]
 output_path = FEATURES_DIR / "model_based.parquet"

@@ -94,9 +94,9 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 # `preview_reductions`, which a canonical request may not carry; the resolved spec records
 # `max_samples: 0` accordingly. The preset still declares one because six case-study DML stages
 # have not migrated to this path and read it as their own default. What that changes for this
-# notebook is the size of the analysis: the cap used to be spent on the most recent whole decision
-# months that fit under it, so the estimate was computed on the last two years of the panel rather
-# than on all of it.
+# notebook is the size of the analysis: under a cap, the estimate is computed on the most recent
+# whole decision months that fit beneath it - the last two years of the panel - rather than on all
+# of it.
 
 # %%
 label = LABEL or primary_label(study)
@@ -184,14 +184,14 @@ design
 # because guessing which element of a window list a column was built from puts a wrong number
 # behind a right-looking one.
 #
-# **An earlier version of this notebook sized the block from the label buffer**, which is one
-# month here, and permuted a twelve-month momentum measure in one-month blocks. That is close
-# enough to an independent shuffle of momentum against time that the p-value it produced does not
-# mean what it reads as, and the refutation it registered was weaker than it looked. That version
-# also registered through a wrapper that wrote no `identity_version`, which
-# `current_causal_identities` requires, so its rows resolve for nobody. Both are fixed by
-# resolving the request here rather than assembling the call by hand: the block and the identity
-# are decided in shared code, once, for every case study that runs DML.
+# **Sizing the block from the label buffer instead would under-size it.** The buffer is one month
+# here, and permuting a twelve-month momentum measure in one-month blocks is close enough to an
+# independent shuffle of momentum against time that the p-value does not mean what it reads as,
+# and the refutation registered under it would be weaker than it looks. Assembling the
+# registration call by hand has the same character: a wrapper that writes no `identity_version`,
+# which `current_causal_identities` requires, leaves rows that resolve for nobody. Resolving the
+# request here avoids both - the block and the identity are decided in shared code, once, for
+# every case study that runs DML.
 #
 # The observed cadence is recorded as well, which is what lets a hole in a firm's history end a
 # block rather than be permuted across.

@@ -376,10 +376,10 @@ HOLDOUT_TRAINING_HASH = training_hash_from_spec(HOLDOUT_SPEC)
 # unchanged this is an idempotent replay, because the derivation is deterministic and the
 # training identity covers it, so the same identity comes back and nothing is in any bucket.
 #
-# This case study reached 2026-09-14 with no such check and 253 backtest rows registered in
-# the five days after its own holdout was spent. Its rank-1 did not move, so nothing was
-# refused and nothing was wrong - but nothing here would have stopped a second evaluation
-# either, which is the state `fx_pairs` was in a week earlier.
+# What makes the check worth running is that backtests keep being registered after a holdout
+# has been spent. None of them has to move the rank-1, and while it does not move this replay
+# is idempotent; without the check, the one time it does move there is nothing standing between
+# that and a second evaluation.
 RETIRED_GENERATIONS = refuse_a_second_look(
     holdout_generations_to_retire(
         CASE_DIR,

@@ -533,8 +533,8 @@ ax.fill_between(
 ax.set_ylim(0, None)
 ax.set_xlabel("Date")
 ax.set_ylabel("Eligible ETFs quoting")
-# Computed rather than asserted: on the corrected eligibility screen no date falls short, and a
-# subtitle promising a shaded region the figure does not draw is what this sentence used to be.
+# Computed rather than asserted: no date falls short under this eligibility screen, so a subtitle
+# written as a literal would promise a shaded region the figure does not draw.
 _short = int((counts < min_obs).sum())
 add_message_title(
     ax,

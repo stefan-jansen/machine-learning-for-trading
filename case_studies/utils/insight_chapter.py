@@ -1257,13 +1257,13 @@ frame, which is cheaper than two schemas.
 """
 
 
-# The pairing of a regression label with the binary direction label it is scored against
-# used to be a hand-written literal in each chapter that draws the cross-evaluation. It
-# shrank without saying so: `us_firm_characteristics: [("fwd_ret_1m", "fwd_class_1m")]`
-# was dropped from Chapter 12's copy by the 2026-07-31 chapter-tree restore and kept in
-# Chapter 11's, so one chapter published four rows and the other three while both
-# reported a full count of their own literal. A literal cannot report what is missing
-# from it, so the pairs are discovered and the skips are named.
+# The pairing of a regression label with the binary direction label it is scored against is
+# discovered rather than written as a hand-kept literal in each chapter that draws the
+# cross-evaluation. A literal shrinks without saying so: drop
+# `us_firm_characteristics: [("fwd_ret_1m", "fwd_class_1m")]` from one chapter's copy and keep
+# it in another's, and one chapter publishes four rows and the other three while both report a
+# full count of their own literal. A literal cannot report what is missing from it, so the
+# pairs are discovered and the skips are named.
 
 
 def _binary_label_domain(case_study: str, label: str) -> set[int] | None:

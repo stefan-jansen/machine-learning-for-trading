@@ -159,10 +159,10 @@ if not cost_grid:
 # rows for the configuration it selected. It also refuses a configuration whose equity reached zero,
 # whose Sharpe would be computed on a balance that no longer exists.
 #
-# This replaces a per-label loop that ran a cost grid for each label off the pre-overlay
-# allocation results. That was wrong twice over: there is one strategy, not one per label,
-# and it read the stage before risk management, so the ladder priced the pre-overlay winner
-# rather than the configuration that is actually shipped.
+# A per-label loop running a cost grid off the pre-overlay allocation results would price
+# something else twice over: there is one strategy, not one per label, and the stage before risk
+# management holds the pre-overlay winner rather than the configuration that is actually
+# shipped.
 carrier = resolve_solvent_carrier("cme_futures")
 strategy = json.loads(carrier["spec_json"])["strategy"]
 selected_label = carrier["label"]

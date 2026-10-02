@@ -273,9 +273,9 @@ catalog.group_by("family", "label").agg(
 # The cell below reads the decision times out of the prediction sets, locates each one on the
 # panel's settlement index, and reports how far apart consecutive decisions are.
 #
-# **It reports rather than adjudicates, and the reason is that the only thing it could adjudicate
-# was wrong.** It used to require the advance to equal `step` exactly. Of the two directions that
-# reading refuses, one is unreachable and the other is not this cell's to judge:
+# **It reports rather than adjudicates, because the one thing it could adjudicate is not worth
+# asserting.** Requiring the advance to equal `step` exactly refuses two directions, one of them
+# unreachable and the other not this cell's to judge:
 #
 # - *Closer together than `step`* is the direction that would corrupt a result, because two
 #   positions whose holding periods overlap count the same return twice. It cannot occur here.

@@ -1573,9 +1573,9 @@ del labels_keys, temporal_keys, joined
 # 2. **A fold tag baked in at this stage can only be one label's.** The window a row is tagged
 #    under has to come from some label's split, and this case study configures four whose
 #    horizons differ, so their splits disagree about where training ends. Emitting the union of
-#    the four - which the previous version of this cell did - keeps every label covered, but it
-#    also means the tag is not any single label's geometry. Leaving the tag out entirely is what
-#    makes each label's own boundaries the only thing that selects its rows.
+#    the four keeps every label covered, but it also means the tag is not any single label's
+#    geometry. Leaving the tag out entirely is what makes each label's own boundaries the only
+#    thing that selects its rows.
 #
 # The features are stored as `Float32`. They are stored values, not accumulators: every one was
 # computed in double precision and is written once, so the only error is representation, bounded

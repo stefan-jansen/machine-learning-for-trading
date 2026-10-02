@@ -637,46 +637,45 @@ def _date_lit(value) -> pl.Expr:
 # The periods do not bound this model. It re-estimates every `ARIMA_REFIT_FREQ` sessions on
 # everything up to that point, so a forecast for a session is made by weights fitted only on
 # earlier ones, whether or not a period boundary happens to sit nearby. That is the schedule
-# section A describes, and the hidden Markov model in C.3 is on one too - so the forecasts
-# are no longer replicated onto anything. One value per product and session goes into the
-# file.
+# section A describes, and the hidden Markov model in C.3 is on one too, so no forecast is
+# replicated onto anything. One value per product and session goes into the file.
 #
-# Cutting the walk per period bought nothing and cost two things. The cross-validation call
-# it used took one `n_windows` for every series and validated it against the shortest, so one
-# call per period meant one walk length per period, and RTY, listed 2017-07-10, was the
-# shortest eligible series in all five. Every other product was truncated to RTY's length,
-# the forecasts landed at the end of each window, and every period's ARIMA began in 2018
-# whatever its window was - including the period that opens in 2015. The last period's
-# training rows ended up 99.87% empty of a feature its fits declared they were using. The
-# second cost is quieter: the burn-in year was paid once per period rather than once.
+# Cutting the walk per period buys nothing and costs two things. The cross-validation call takes
+# one `n_windows` for every series and validates it against the shortest, so one call per period
+# means one walk length per period, and RTY, listed 2017-07-10, is the shortest eligible series
+# in all five. Every other product would be truncated to RTY's length, the forecasts would land
+# at the end of each window, and every period's ARIMA would begin in 2018 whatever its window
+# was - including the period that opens in 2015. The last period's training rows would be 99.87%
+# empty of a feature its fits declared they were using. The second cost is quieter: the burn-in
+# year would be paid once per period rather than once.
 #
-# Carry is not thin early. It is 99.3% non-null across all thirty products back to 2011; the
-# gap was the call shape.
+# Carry is not thin early. It is 99.3% non-null across all thirty products back to 2011; the gap
+# would be the call shape.
 #
-# One walk per product is also **cheaper than what it replaces**, which is not the usual
-# direction for a correctness fix. The five periods overlap - the most recent spans 2015 to
-# 2023, the oldest 2011 to 2019 - so the per-period design forecast the same product-dates up
-# to five times and kept one. On this panel: 86,204 forecasts against 123,870.
+# One walk per product is also **cheaper than a walk per period**. The five periods overlap - the
+# most recent spans 2015 to 2023, the oldest 2011 to 2019 - so forecasting per period repeats the
+# same product-dates up to five times and keeps one. On this panel: 86,204 forecasts against
+# 123,870.
 
 # %% [markdown]
-# ### The order is declared, and it used to be searched for
+# ### The order is declared, not searched for
 #
-# Until this notebook was standardized the order was chosen automatically at every refit, by
-# a stepwise search that picked whichever `(p, d, q)` scored best on the history available at
-# that point. It is now read from `setup.yaml`, and since that is a change to the model
-# rather than to the code around it, here is the measurement behind it.
+# The order is read from `setup.yaml` rather than chosen automatically at every refit by a
+# stepwise search over whichever `(p, d, q)` scores best on the history available at that
+# point. That is a choice about the model rather than about the code around it, so here is the
+# measurement behind it.
 #
 # Sampling eight refit cutoffs on each of the 30 eligible products - 240 order searches - the
-# automatic selection returned **34 distinct orders**, and **no product held a single order
-# across its own walk**. The most common, `(2,0,1)`, took 11.7% of the searches and `(2,0,2)`
-# 10.4%; the steadiest product spent 6 of its 8 cutoffs on one order and the rest moved more
+# automatic selection returns **34 distinct orders**, and **no product holds a single order
+# across its own walk**. The most common, `(2,0,1)`, takes 11.7% of the searches and `(2,0,2)`
+# 10.4%; the steadiest product spends 6 of its 8 cutoffs on one order and the rest move more
 # than that.
 #
 # An order that changes almost every month, on an expanding window of the same series, is the
 # information criterion tracking the sample rather than structure being found. It also makes
 # `arima_carry_forecast` a different quantity in every block, which is the property that
 # breaks a comparison across chapters: two products' forecasts, or the same product's in two
-# periods, were not made by the same model.
+# periods, would not be made by the same model.
 #
 # `(2,0,1)` is the modal selection, and the more parsimonious of the two orders that are
 # indistinguishable from each other. The differencing is not a search result at all: carry is
@@ -724,10 +723,9 @@ def _arima_one_product(payload: tuple[str, np.ndarray, np.ndarray, int]) -> pl.D
 
 
 # %% [markdown]
-# One walk, where there used to be two. The old shape cut its input at `HOLDOUT_START` and
-# then ran a second walk across the holdout with refitting switched off, because the first
-# emitted nothing inside the holdout and a holdout evaluation downstream needs a value on
-# every one of those sessions.
+# One walk, not two. A walk cut at `HOLDOUT_START` emits nothing inside the holdout, and a
+# holdout evaluation downstream needs a value on every one of those sessions, so that shape
+# needs a second walk across the holdout with refitting switched off.
 #
 # `freeze_after` is that distinction expressed once. The walk runs over the whole series,
 # holdout sessions included, and past the last pre-holdout session it stops re-estimating and
@@ -1360,10 +1358,10 @@ def hmm_apply(fitted: tuple[GaussianHMM, np.ndarray], prefix: np.ndarray) -> np.
 
 
 # %% [markdown]
-# The seed is a constant rather than a per-block draw. It used to be `SEED + fold_idx`, one
-# seed per period, which made the five fits independent draws; there is no period to index
-# now, and a seed that moved with the block index would make consecutive estimates differ
-# for a reason that is not the data.
+# The seed is a constant rather than a per-block draw. `SEED + fold_idx`, one seed per period,
+# would make the fits independent draws; there is no period to index here, and a seed that moved
+# with the block index would make consecutive estimates differ for a reason that is not the
+# data.
 
 # %%
 hmm_series = portfolio_carry_full.sort("timestamp")
@@ -1880,16 +1878,16 @@ if len(hmm_param_df) > 0:
 # join then attaches each family where it has a value and leaves an empty cell where it does
 # not, so nothing is invented and no row is dropped for lack of a feature.
 #
-# The grid used to be repeated once per period, and the key carried the period number, so a
-# model training on one period received the features estimated on that period's training
-# sessions. Every fitted value here is now bounded by its own estimation block instead, and
-# it is the same value whichever period later selects the row - so the grid is written once
-# and the key is `(timestamp, product, position)`.
+# The grid is written once and keyed `(timestamp, product, position)`. Repeating it once per
+# period, with the period number in the key, would hand a model training on one period the
+# features estimated on that period's training sessions. Every fitted value here is bounded by
+# its own estimation block instead, and it is the same value whichever period later selects the
+# row.
 #
-# **The upper bound has to be stated now, and under the old design it did not.** A period
-# bounded its own rows, so the artifact reached no further than the last period's evaluation
-# window whatever the price file held. The walks run over each entity's whole history
-# instead, so the grid would otherwise extend to the end of the price file - and a session
+# **The upper bound has to be stated, and a per-period grid would not need it.** A period bounds
+# its own rows, so such an artifact reaches no further than the last period's evaluation window
+# whatever the price file holds. The walks run over each entity's whole history instead, so the
+# grid would otherwise extend to the end of the price file - and a session
 # past `holdout_end` is one no stage in this case study evaluates, carrying a feature value
 # from an estimate frozen before the holdout opened. On this panel the two dates coincide
 # and the filter removes nothing, which is exactly why it is a filter and an assertion
@@ -2068,7 +2066,7 @@ holdout_counts
 # The fingerprint is what makes the record useful rather than decorative. A registry that
 # notes only which feature *names* a model was trained on cannot tell two training runs
 # apart when the names are identical and the values are not - which is exactly the
-# situation after a bug in this notebook is fixed. Two runs whose values differ get
+# situation after the code that computes them changes. Two runs whose values differ get
 # different fingerprints even when the row count and the column names match, so a
 # training run downstream can record which version of the features it read.
 #
@@ -2076,10 +2074,9 @@ holdout_counts
 # recomputes carry from them. This notebook reads no other case study file for a feature
 # value, and the record says so.
 #
-# What goes in beside it is the estimation schedule. It replaces the fold geometry the
-# sidecar used to carry, and it is the thing a reader needs in order to know what an
-# emitted value means: the fold geometry answered "which window is period 3", a question
-# the file no longer poses.
+# What goes in beside it is the estimation schedule, which is what a reader needs in order to
+# know what an emitted value means. A fold geometry in its place would answer "which window is
+# period 3", a question this file does not pose.
 
 # %%
 output_path = FEATURES_DIR / "model_based.parquet"

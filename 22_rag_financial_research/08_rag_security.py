@@ -312,9 +312,8 @@ def has_injection_signal(text: str) -> bool:
 # Neither policy may look at `case.answerable`. That field is the fixture's own
 # record of whether trusted evidence exists, and a policy that reads it is
 # being told the answer: its abstention rate becomes a lookup, and the
-# comparison measures nothing. An earlier version of this notebook had both
-# policies reading it, which is the single easiest way to make a defense
-# evaluation look good.
+# comparison measures nothing. Letting a policy read it is the single easiest
+# way to make a defense evaluation look good.
 #
 # What each may see is the retrieved chunks and their trust flags, which is
 # what a real policy has.

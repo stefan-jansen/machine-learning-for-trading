@@ -43,14 +43,12 @@
 #
 # **The checkpoint schedule is phased, and all of it is published.** Training runs an
 # unconditional stage and then a conditional one, and `case_studies/config/sdf/sdf.yaml` declares
-# saves inside each. An earlier version of this notebook fixed the last of them in advance,
-# showed that a different checkpoint scored better on validation, and reported the fixed one
-# anyway. That is the right instinct about the trap - picking the checkpoint with the best
-# validation IC is choosing after seeing the answer - but the wrong remedy, because it discards
-# models the case study paid to train and leaves the choice to be made again, undocumented,
-# downstream. Publishing the whole schedule lets [`14_backtest`](14_backtest.ipynb) select on
-# validation backtest Sharpe with every candidate visible and the rule stated. **Selection happens
-# there, not here.**
+# saves inside each. Fixing the last of them in advance would be the right instinct about the
+# trap - picking the checkpoint with the best validation IC is choosing after seeing the answer -
+# and the wrong remedy, because it discards models the case study paid to train and leaves the
+# choice to be made again, undocumented, downstream. Publishing the whole schedule lets
+# [`14_backtest`](14_backtest.ipynb) select on validation backtest Sharpe with every candidate
+# visible and the rule stated. **Selection happens there, not here.**
 #
 # **Learning objectives.** By the end of this notebook you will be able to:
 #

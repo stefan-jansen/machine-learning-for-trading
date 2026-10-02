@@ -45,14 +45,14 @@
 # the locked registry (`case_studies/etfs/run_log/registry.db`).
 #
 # **Scope**: no training and no re-backtesting. It does write two derived tables,
-# `cohort_metrics` and `backtest_paired_metrics`, and that is a deliberate change from the
-# read-only scope this notebook used to declare.
+# `cohort_metrics` and `backtest_paired_metrics`, which is deliberate rather than a read-only
+# scope.
 #
 # Both tables are derived from backtests that already exist - selection-bias statistics over the
 # cohorts, and paired-bootstrap comparisons between registered return series. Nothing is refitted
-# and no backtest is added. They were previously produced by a chapter-20 notebook looping over
-# every case study, which made a case study's own strategy analysis unreadable until a later
-# chapter had been run, and left both tables empty for any reader working the case study in order.
+# and no backtest is added. Producing them in a chapter-20 notebook looping over every case study
+# would make a case study's own strategy analysis unreadable until a later chapter had been run,
+# and leave both tables empty for any reader working the case study in order.
 # A stage that cannot be read without running a chapter that comes after it is not a stage. So the
 # notebook that has every stage in front of it produces them, and re-running it recomputes only
 # what is missing.

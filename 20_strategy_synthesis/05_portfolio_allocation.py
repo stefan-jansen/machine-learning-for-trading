@@ -582,7 +582,7 @@ else:
 # equal weight, so the uplift does not depend on which one was chosen. "Narrow"
 # means only one or two exceed the baseline, so the improvement is the choice.
 # "None" means no alternative beat equal weight at all, which is a different
-# result again and was previously reported as "narrow". This matters for Ch20:
+# result again and not a narrow one. This matters for Ch20:
 # broad uplift
 # is more trustworthy as a real improvement; narrow uplift could be
 # selection bias.

@@ -423,10 +423,10 @@ with pl.Config(tbl_rows=insolvency.height):
 # it dominates whatever it is averaged with - but the Sharpe is no more meaningful, and
 # ranking allocators on it would be ranking them on arithmetic none of them performed.
 #
-# An earlier version of this cell averaged over every run and disclosed that it had. That
-# is not a smaller version of this fix: a note under a table does not make the number in
-# it mean anything, and a reader following the method rather than the caveat would
-# reproduce the ranking. Where a run cannot be measured, it is counted, not averaged.
+# Averaging over every run and disclosing it under the table would not do instead: a note
+# does not make the number above it mean anything, and a reader following the method
+# rather than the caveat would reproduce the ranking. Where a run cannot be measured, it
+# is counted, not averaged.
 #
 # `insolvent` is therefore the column to read first. An allocator whose average is taken
 # over the few paths that survived is not being compared on the same footing as one whose

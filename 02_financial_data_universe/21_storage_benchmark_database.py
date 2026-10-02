@@ -1041,7 +1041,7 @@ else:
 # QuestDB ingests over ILP, which acknowledges before the rows are queryable. The WAL
 # commit is therefore polled *inside* the timed region, so QuestDB's write ends where
 # PostgreSQL's does: when the data can be read back. A fixed sleep outside the timed
-# call, which is what this used to do, charges QuestDB nothing for durability.
+# call charges QuestDB nothing for durability.
 #
 # The panel is handed to `Sender.dataframe` as a block, so QuestDB pays no per-row
 # Python cost and does not appear in the client-side table.
