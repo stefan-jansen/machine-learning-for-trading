@@ -106,8 +106,8 @@ DISPLAY_NAMES = {
 BLURBS = {
     "research-to-production": "Take one research idea from a question to a costed, "
     "monitored strategy, with the evidence trail that makes the result checkable.",
-    "agent-engineering": "Build a multi-agent forecasting system whose reasoning is "
-    "auditable end to end.",
+    "agent-engineering": "Go from agent fundamentals to a live multi-agent system, "
+    "with an evaluation harness that says whether it works.",
     "loop-engineering": "Get reliable work out of coding agents: harness design, "
     "verification, and recovery from a bad run.",
     "ml4t-foundations": "Build the ML for Trading pipeline yourself, end to end, and "
