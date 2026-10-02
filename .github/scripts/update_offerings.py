@@ -9,10 +9,15 @@ So the offerings are not written by hand. The public instructor profile at
 https://maven.com/stefan-jansen embeds the schedule as JSON in its Next.js
 payload, needs no authentication, and is the same record the Maven pages
 themselves render. This script reads it, drops everything already past, and
-rewrites two marked regions of README.md:
+rewrites one marked region of README.md:
 
-    <!-- offerings:next start --> ... <!-- offerings:next end -->
     <!-- offerings:all start -->  ... <!-- offerings:all end -->
+
+There used to be a second region, a one-line "Next free session" callout under the
+intro. A cron that runs daily cannot keep a callout about a session that starts at
+11:00 ET honest: it reads as "next" for about twenty hours after it has happened,
+which it did on the Sep 30 session. The courses section carries the same sessions
+with their dates attached, where a past one is visibly past.
 
 Nothing outside those markers is touched, so the file stays hand-edited
 everywhere else.
@@ -51,6 +56,49 @@ NEXT_DATA_RE = re.compile(
     r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S
 )
 
+# What a reader is actually choosing between, keyed by Maven course slug. Maven
+# carries no theme field - its own grouping is by format and date, which is the cut
+# the three tables used to make. A reader does not arrive asking "what is scheduled
+# and what is self-paced"; they arrive asking "is this about trading or about
+# agents", so the themes are stated here and the schedule fills them in.
+#
+# A slug absent from this map lands in OTHER_THEME rather than being dropped: a
+# newly launched course must never vanish from the front page because nobody
+# updated a dict, which is the failure #1130 and #1132 were both instances of.
+THEMES = {
+    "ml4t-foundations": "ml4t",
+    "research-to-production": "ml4t",
+    "ml4t-ai-agents": "ml4t",
+    "agent-engineering": "agents",
+    "loop-engineering": "coding-agents",
+}
+OTHER_THEME = "ml4t"
+
+# Rendered in this order, each with the heading and the one line under it.
+THEME_ORDER = ["ml4t", "agents", "coding-agents"]
+THEME_HEADINGS = {
+    "ml4t": (
+        "Machine Learning for Trading",
+        "The workflow this repository implements, taught end to end.",
+    ),
+    "agents": (
+        "Agentic systems",
+        "Designing multi-agent systems whose reasoning can be audited.",
+    ),
+    "coding-agents": (
+        "Coding agents",
+        "Getting reliable work out of the agents you code with.",
+    ),
+}
+
+# Displayed names. Maven's course_name carries the "ML for Trading:" prefix that the
+# section heading above the table already supplies, and repeating it four times on
+# one page is most of why the offerings block reads as a wall.
+DISPLAY_NAMES = {
+    "ml4t-foundations": "Foundations",
+    "research-to-production": "Research to Production",
+}
+
 # One-line positioning per offering, keyed by Maven course slug, for the courses
 # whose own course_description is marketing-page prose too long for a table row.
 # A course absent here falls back to its course_description, so a newly launched
@@ -58,8 +106,8 @@ NEXT_DATA_RE = re.compile(
 BLURBS = {
     "research-to-production": "Take one research idea from a question to a costed, "
     "monitored strategy, with the evidence trail that makes the result checkable.",
-    "agent-engineering": "Build a multi-agent forecasting system whose reasoning is "
-    "auditable end to end.",
+    "agent-engineering": "Go from agent fundamentals to a live multi-agent system, "
+    "with an evaluation harness that says whether it works.",
     "loop-engineering": "Get reliable work out of coding agents: harness design, "
     "verification, and recovery from a bad run.",
     "ml4t-foundations": "Build the ML for Trading pipeline yourself, end to end, and "
@@ -197,6 +245,30 @@ def collect(props: dict, now: datetime) -> tuple[list[dict], list[dict], list[di
     )
 
 
+# A free lesson has no course slug to key on - Maven gives it an opaque one
+# (`efe730`) - so its theme is read off the title. Most specific first: a session
+# about coding agents says so, a session that names trading belongs with the
+# trading material however many times it says "agent", and what is left that
+# mentions an agent at all is agentic systems.
+LESSON_THEME_KEYWORDS = [
+    ("coding agent", "coding-agents"),
+    ("trading", "ml4t"),
+    ("agent", "agents"),
+]
+
+
+def theme_for_lesson(title: str) -> str:
+    lowered = title.lower()
+    for keyword, theme in LESSON_THEME_KEYWORDS:
+        if keyword in lowered:
+            return theme
+    return OTHER_THEME
+
+
+def display_name(slug: str, course_name: str) -> str:
+    return DISPLAY_NAMES.get(slug, course_name)
+
+
 def blurb_for(cohort: dict) -> str:
     """The `What you leave with` cell, never empty.
 
@@ -218,70 +290,92 @@ def blurb_for(cohort: dict) -> str:
     return first.rstrip(".") + "."
 
 
-def render_next(lessons: list[dict]) -> str:
-    """The one-line callout under the intro. Free lesson if there is one."""
-    if not lessons:
-        return (
-            f"> **Live sessions and cohorts:** [courses and workshops]({COURSES_URL}) "
-            "lists what is scheduled next, and the "
-            "[**Insights** newsletter](https://insights.ml4trading.io/) carries the "
-            "research between them."
-        )
-    nxt = lessons[0]
-    minutes = f"{nxt['minutes']}-minute " if nxt.get("minutes") else ""
-    return (
-        f"> **Next free session:** [{nxt['title']}]({nxt['url']}), a {minutes}live "
-        f"session on **{when(nxt['start'], long=True)}**. "
-        f"[All courses, workshops, and free lessons]({COURSES_URL})."
-    )
-
-
 def render_all(lessons: list[dict], cohorts: list[dict], standing: list[dict]) -> str:
-    out: list[str] = []
+    """One table per theme, each followed by that theme's free sessions.
 
-    if cohorts:
-        out += [
-            "**Cohorts and workshops.** Live, scheduled, and worked through with direct "
-            "feedback on your own research.",
-            "",
-            "| Starts | Offering | What you leave with |",
-            "|--------|----------|---------------------|",
-        ]
-        for c in cohorts:
-            blurb = blurb_for(c)
-            out.append(f"| {span(c['start'], c['end'])} | [{c['title']}]({c['url']}) | {blurb} |")
-        out.append("")
+    The three tables this replaces were cut by scheduling mechanics - dated cohort,
+    undated course, free lesson - which is the generator's own distinction and not a
+    question anybody arrives with. It also buried the self-paced course: `Foundations`
+    is the one most readers of this repository want and it sat alone under a heading
+    reading "Courses with no date on the calendar", which says nothing is happening.
 
-    if standing:
-        out += [
-            "**Courses with no date on the calendar.** Either self-paced and on sale "
-            "now, or between cohorts with a waitlist on the course page.",
-            "",
-            "| Offering | How it runs | What you leave with |",
-            "|----------|-------------|---------------------|",
-        ]
-        for c in standing:
-            out.append(f"| [{c['title']}]({c['url']}) | {c['mode']} | {blurb_for(c)} |")
-        out.append("")
+    A `When` cell therefore carries a date span, `Self-paced` or `Waitlist`, and the
+    standing offerings sort first so a reader can start today without reading a date
+    column to find out they can.
+    """
+    by_theme: dict[str, dict[str, list]] = {
+        theme: {"offerings": [], "lessons": []} for theme in THEME_ORDER
+    }
 
-    if lessons:
-        out += [
-            "**Free live sessions.** Thirty minutes to an hour, no cost, recording sent "
-            "to everyone who registers.",
-            "",
-            "| When | Session |",
-            "|------|---------|",
-        ]
-        for lesson in lessons:
-            out.append(f"| {when(lesson['start'])} | [{lesson['title']}]({lesson['url']}) |")
-        out.append("")
-
-    if not cohorts and not lessons and not standing:
-        out.append(
-            f"Nothing is on the calendar right now. [Courses and workshops]({COURSES_URL}) "
-            "lists new dates as they are scheduled."
+    for item in standing:
+        theme = THEMES.get(item["slug"], OTHER_THEME)
+        by_theme[theme]["offerings"].append(
+            {
+                "sort": (0, item["title"]),
+                "when": "Self-paced" if "Self-paced" in item["mode"] else "Waitlist",
+                "title": display_name(item["slug"], item["title"]),
+                "url": item["url"],
+                "blurb": blurb_for(item),
+            }
         )
-        out.append("")
+    # One row per course, carrying every date it is scheduled for. Advertising only
+    # the nearer of two cohorts was #1130; advertising both as two rows with the same
+    # title and the same blurb is the same information twice.
+    merged: dict[str, dict] = {}
+    for item in cohorts:
+        row = merged.get(item["slug"])
+        if row is None:
+            theme = THEMES.get(item["slug"], OTHER_THEME)
+            row = merged[item["slug"]] = {
+                "theme": theme,
+                "sort": (1, item["start"].isoformat()),
+                "spans": [],
+                "title": display_name(item["slug"], item["title"]),
+                "url": item["url"],
+                "blurb": blurb_for(item),
+            }
+        row["spans"].append(span(item["start"], item["end"]))
+    for row in merged.values():
+        theme = row.pop("theme")
+        row["when"] = " · ".join(row.pop("spans"))
+        by_theme[theme]["offerings"].append(row)
+    for lesson in lessons:
+        by_theme[theme_for_lesson(lesson["title"])]["lessons"].append(lesson)
+
+    out: list[str] = []
+    for theme in THEME_ORDER:
+        group = by_theme[theme]
+        if not group["offerings"] and not group["lessons"]:
+            continue
+        heading, standfirst = THEME_HEADINGS[theme]
+        out += [f"### {heading}", "", standfirst, ""]
+
+        if group["offerings"]:
+            out += [
+                "| When | Offering | What you leave with |",
+                "|------|----------|---------------------|",
+            ]
+            for item in sorted(group["offerings"], key=lambda x: x["sort"]):
+                out.append(
+                    f"| {item['when']} | [{item['title']}]({item['url']}) | {item['blurb']} |"
+                )
+            out.append("")
+
+        if group["lessons"]:
+            sessions = " · ".join(
+                f"[{x['title']}]({x['url']}) ({when(x['start'])})" for x in group["lessons"]
+            )
+            out += [
+                f"**Free live sessions**, with the recording sent to everyone who registers: {sessions}",
+                "",
+            ]
+
+    if not out:
+        out += [
+            f"Nothing is on the calendar right now. [Courses and workshops]({COURSES_URL}) "
+            "lists new dates as they are scheduled.",
+            "",
+        ]
 
     out.append(
         "*Between cohorts, the [**Insights** newsletter](https://insights.ml4trading.io/) "
@@ -312,14 +406,14 @@ def main() -> int:
 
     now = datetime.now(UTC)
     lessons, cohorts, standing = collect(props, now)
-    nxt, allblock = render_next(lessons), render_all(lessons, cohorts, standing)
+    allblock = render_all(lessons, cohorts, standing)
 
     if args.show:
-        print(nxt, "", allblock, sep="\n")
+        print(allblock)
         return 0
 
     original = README.read_text()
-    updated = splice(splice(original, "next", nxt), "all", allblock)
+    updated = splice(original, "all", allblock)
 
     if updated == original:
         print("README offerings are current")
