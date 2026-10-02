@@ -53,6 +53,7 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from data import load_cme_futures
+from data.futures.roll import roll_factors
 from utils import ML4T_DATA_PATH
 from utils.paths import REPO_ROOT, get_chapter_dir
 from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
@@ -304,10 +305,19 @@ show_plotly_with_alt(
 # The roll table below reports how large the steps are. We apply
 # **ratio (multiplicative)** back-adjustment using `instrument_id` to detect roll points:
 #
-# 1. Detect where `instrument_id` changes between adjacent hourly bars
-# 2. Compute ratio = new contract open / old contract close at each roll
+# 1. Detect where `instrument_id` changes between consecutive rows of a series
+# 2. Compute ratio = new contract close / old contract close **on the same hour**
 # 3. Accumulate ratios backward (most recent prices stay unadjusted)
 # 4. Multiply all OHLC prices by cumulative ratio
+#
+# Step 2 is where this goes wrong most easily. Consecutive rows are not consecutive hours: an ES
+# front month rolls from the old contract's last bar on a Friday morning to the new contract's
+# Sunday-evening open, 57 hours later. The new open over the old close would divide prices from
+# two different days, and the factor would absorb the weekend's move, so the adjusted series
+# would show no return where a holder earned one. The contract being rolled into is usually
+# quoted in the next tenor on the old contract's last hour, and `data.futures.roll` takes the
+# pair from there, falling back to the new contract's first hour, and labels any roll where
+# neither hour has both quotes instead of silently mixing times.
 #
 # Ratio adjustment preserves **percentage returns** (critical for IC, momentum features,
 # and backtesting) unlike Panama (additive) which distorts returns for old data and can
@@ -319,25 +329,10 @@ show_plotly_with_alt(
 # Sort and detect roll transitions per (product, tenor)
 hourly_sorted = hourly_with_sessions.sort(["product", "tenor", "timestamp"])
 
-# Detect instrument_id changes within each (product, tenor) group
-hourly_sorted = hourly_sorted.with_columns(
-    pl.col("instrument_id").shift(1).over("product", "tenor").alias("_prev_instrument_id"),
-    pl.col("close").shift(1).over("product", "tenor").alias("_prev_close"),
-)
+roll_table = roll_factors(hourly_sorted)
+roll_ratios = roll_table.select("product", "tenor", "timestamp", "ratio")
 
-# Roll points: where instrument_id changes (excluding first row of each group)
-rolls = hourly_sorted.filter(
-    pl.col("_prev_instrument_id").is_not_null()
-    & (pl.col("instrument_id") != pl.col("_prev_instrument_id"))
-)
-
-# Ratio = new contract's open / old contract's close (adjacent hourly bars)
-roll_ratios = rolls.select(
-    "product",
-    "tenor",
-    "timestamp",
-    (pl.col("open") / pl.col("_prev_close")).alias("ratio"),
-)
+print(roll_table.group_by("tenor", "basis").len().sort("tenor", "basis"))
 
 print(f"Roll transitions detected: {len(roll_ratios)}")
 print(f"Products with rolls: {roll_ratios['product'].n_unique()}")
@@ -455,8 +450,8 @@ print(
 # (unadjusted) ES front-month close against the ratio-adjusted series; the two
 # coincide at the right edge (recent prices are the anchor) and separate going
 # back in time as each roll's ratio compounds. The bottom panel is that
-# cumulative multiplier — every downward step is a roll where the new contract
-# opened below the old one's close. Raw prices carry those roll gaps as spurious
+# cumulative multiplier - every downward step is a roll where the new contract
+# traded below the old one on the same hour. Raw prices carry those roll gaps as spurious
 # returns; the adjusted series does not.
 
 # %%
@@ -534,9 +529,7 @@ show_plotly_with_alt(
 # so the raw and adjusted series stay reconcilable.
 
 # %%
-hourly_with_sessions = hourly_adjusted.drop("_prev_instrument_id", "_prev_close").rename(
-    {"_cumulative_ratio": "cum_ratio"}
-)
+hourly_with_sessions = hourly_adjusted.rename({"_cumulative_ratio": "cum_ratio"})
 
 # %% [markdown]
 # ## 4. Aggregate to Daily OHLCV
@@ -711,6 +704,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # Save combined daily file
 output_path = OUTPUT_DIR / "continuous_daily.parquet"
 daily.write_parquet(output_path)
+roll_table.write_parquet(OUTPUT_DIR / "roll_factors.parquet")
 print(f"Saved: {_rel(output_path)}")
 print(f"Size: {output_path.stat().st_size / 1e6:.1f} MB")
 
