@@ -58,6 +58,9 @@ from agent_schemas import (
     TokenUsage,
 )
 
+# This module lives in ``notebooks/utils/`` but the pinned trace fixtures sit in
+# ``notebooks/forecast_traces/`` next to the notebooks, so resolve one level up
+# from the package directory.
 TRACES_DIR = Path(__file__).resolve().parent / "forecast_traces"
 
 # A process-wide monotonic counter so calls captured by *different* tracers
@@ -203,6 +206,10 @@ class RunTrace:
     supervisor: dict[str, Any] | None = None
     final_probability: float | None = None
     final_confidence: float | None = None
+    status: str = "legacy_capture"
+    failure_reason: str | None = None
+    execution_mode: str = "legacy_capture"
+    duration_seconds: float | None = None
 
     # Raw model conversation, chronological
     llm_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -227,6 +234,10 @@ class RunTrace:
         final_confidence: float | None = None,
         llm_calls: list[LLMCall] | None = None,
         notes: str = "",
+        status: str = "legacy_capture",
+        failure_reason: str | None = None,
+        execution_mode: str | None = None,
+        duration_seconds: float | None = None,
     ) -> RunTrace:
         """Build a RunTrace from in-memory artifacts and a captured call log."""
         return cls(
@@ -242,6 +253,17 @@ class RunTrace:
             final_confidence=final_confidence,
             llm_calls=[to_serializable(c) for c in (llm_calls or [])],
             notes=notes,
+            status=status,
+            failure_reason=failure_reason,
+            execution_mode=execution_mode
+            or (
+                "synthetic"
+                if any(a.execution_mode == "synthetic" for a in (agents or []))
+                else "live"
+                if any(a.execution_mode == "live" for a in (agents or []))
+                else "legacy_capture"
+            ),
+            duration_seconds=duration_seconds,
         )
 
     @classmethod
@@ -269,10 +291,13 @@ class RunTrace:
             final_confidence=result.final_confidence,
             llm_calls=llm_calls,
             notes=notes,
+            status=result.status,
+            failure_reason=result.failure_reason,
+            duration_seconds=result.duration_seconds,
         )
 
     def to_json(self) -> str:
-        return json.dumps(to_serializable(self), indent=2, default=str)
+        return json.dumps(to_serializable(self), indent=2, default=str, allow_nan=False)
 
     def save(self, directory: Path | str = TRACES_DIR) -> Path:
         """Write the trace to ``<notebook>_<timestamp>_<run_id>.json``."""
@@ -280,7 +305,13 @@ class RunTrace:
         directory.mkdir(parents=True, exist_ok=True)
         stamp = self.created_at.replace(":", "").replace("-", "").replace("+0000", "Z")
         path = directory / f"{self.notebook}_{stamp}_{self.run_id}.json"
-        path.write_text(self.to_json(), encoding="utf-8")
+        payload = self.to_json()
+        temporary = path.with_suffix(".tmp")
+        try:
+            temporary.write_text(payload, encoding="utf-8")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
         return path
 
     @classmethod
@@ -327,9 +358,8 @@ class RunTrace:
     def forecast_result(self) -> ForecastResult:
         """Rebuild a full ``ForecastResult`` (NB08 pipeline) from the trace.
 
-        ``duration_seconds`` is not part of the persisted record (wall-clock is
-        not reproducible), so it comes back ``None``; the token total is
-        reconstructed from the saved per-stage usage.
+        Legacy records lack duration and status; those remain unavailable or
+        explicitly legacy. Token totals come from saved per-stage usage.
         """
         agents = self.agent_artifacts()
         debate = self.debate_obj()
@@ -348,10 +378,12 @@ class RunTrace:
             aggregation=self.aggregation_obj(),
             debate=debate,
             supervisor=supervisor,
-            final_probability=self.final_probability if self.final_probability is not None else 0.5,
+            final_probability=self.final_probability,
             final_confidence=self.final_confidence if self.final_confidence is not None else 0.5,
             total_token_usage=total,
-            duration_seconds=None,
+            status=self.status,
+            failure_reason=self.failure_reason,
+            duration_seconds=self.duration_seconds,
         )
 
 
@@ -432,7 +464,10 @@ def _rehydrate_agent(d: dict[str, Any]) -> AgentForecastArtifact:
         p_yes=d["p_yes"],
         rationale=d.get("rationale", ""),
         traces=[_rehydrate_trace(t) for t in d.get("traces", [])],
-        forecast_produced=d.get("forecast_produced", True),
+        status=d.get("status", "legacy_capture"),
+        failure_reason=d.get("failure_reason"),
+        messages=d.get("messages", []),
+        execution_mode=d.get("execution_mode", "legacy_capture"),
         confidence=d.get("confidence", 0.5),
         sentiment=Sentiment(d.get("sentiment", "neutral")),
         key_findings=list(d.get("key_findings", [])),
@@ -527,9 +562,10 @@ def show_agent_timeline(
     rationale, key findings, and uncertainties. This is the per-agent view
     that makes "how did this agent proceed over time" answerable at a glance.
     """
+    probability = "n/a" if artifact.p_yes is None else f"{artifact.p_yes:.2f}"
     lines = [
         _rule("="),
-        f"  {artifact.agent_id.upper()}  ·  p_yes={artifact.p_yes:.2f}  "
+        f"  {artifact.agent_id.upper()}  ·  p_yes={probability}  status={artifact.status}  "
         f"confidence={artifact.confidence:.2f}  "
         f"sentiment={artifact.sentiment.value}  "
         f"evidence={artifact.evidence_quality.value}",
@@ -552,7 +588,7 @@ def show_agent_timeline(
                         snip = snip[:snippet_chars].rstrip() + "…"
                     lines.append(_wrap(snip, indent="         "))
         elif t.action == "forecast":
-            lines.append(f"  Step {t.step} · FORECAST → p_yes={artifact.p_yes:.2f}")
+            lines.append(f"  Step {t.step} · FORECAST → p_yes={probability}")
         else:
             lines.append(f"  Step {t.step} · {t.action.upper()}")
     lines.append("")

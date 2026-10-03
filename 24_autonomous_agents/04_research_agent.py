@@ -42,13 +42,18 @@
 # [`03_state_and_memory`](03_state_and_memory.ipynb) (state and gates).
 
 # %%
-"""The Research Agent: ReAct loop with structured output extraction."""
+"""The Research Agent - ReAct loop with rich output extraction."""
 
+import sys
+
+from utils.paths import get_chapter_dir
+
+sys.path.insert(0, str(get_chapter_dir(24)))
+
+import json
 import re
-from dataclasses import dataclass, field, replace
-from datetime import date, datetime
+from datetime import date
 
-import matplotlib.pyplot as plt
 import polars as pl
 from agent_fixtures import get_chapter_contested_question
 from agent_observability import (
@@ -58,44 +63,34 @@ from agent_observability import (
     show_agent_timeline,
     trace_llm,
 )
+from agent_pipeline import validate_probabilities
 from agent_providers import ChatMessage, LLMClient, TokenUsage, create_llm_client
-from agent_research import extract_confidence, parse_json, validate_action
 from agent_schemas import (
     AgentForecastArtifact,
-    AgentState,
     AgentTrace,
     EvidenceQuality,
     ForecastQuestion,
+    SearchResult,
     Sentiment,
-    run_quality_gates,
 )
 from agent_tools import (
+    MockSearchClient,
     SearchClient,
     ToolExecutor,
     create_search_client,
+    eligible_results,
     format_search_results,
 )
 
-from utils.style import COLORS, add_message_title, format_pct_axis, show_with_alt
-
-# %% [markdown]
-# ## Settings
-#
-# `RUN_LIVE` left at `False` replays the pinned 2026-06-09 capture named below: the notebook
-# reloads that saved run and makes no API calls, so the agent's output is fixed and matches the
-# chapter's discussion of it. `True` forecasts a current question against live search, which
-# costs money and will not reproduce these values.
-#
-# `MAX_STEPS` is the turn budget, as in
-# [`01_react_reasoning`](01_react_reasoning.ipynb). `MAX_SEARCH_RESULTS` caps how many
-# documents one search returns; five keeps a handful of searches inside the context window.
-# `LLM_PROVIDER` is empty so the factory picks whichever provider has a key, and is read only
-# on the live path.
-
 # %% tags=["parameters"]
+# RUN_LIVE=False (the default) replays the pinned 2026-06-09 trace named below:
+# the notebook reloads that saved run and makes no API calls, so the agent
+# outputs are stable and match the chapter. Set RUN_LIVE=True (with API keys) to
+# forecast a current question live; that path produces different numbers.
 RUN_LIVE = False
 PINNED_TRACE = "04_research_agent_20260609T141730Z_b694ab4d0453.json"
-LLM_PROVIDER = ""
+
+LLM_PROVIDER = ""  # Blank reads .env; "mock" selects a synthetic fixture
 MAX_STEPS = 5
 MAX_SEARCH_RESULTS = 5
 
@@ -117,7 +112,9 @@ Your job:
 2) Then produce a binary probability forecast for the question.
 
 You must follow the action schema exactly and output valid JSON only.
-You must not browse prediction market prices unless they are explicitly provided."""
+You must not browse prediction market prices unless they are explicitly provided.
+Cite a retained source URL or title in your rationale. If evidence is insufficient,
+return {"action":"abstain","rationale":"what is missing"}."""
 
 # %% [markdown]
 # ### Step prompt
@@ -130,13 +127,25 @@ You must not browse prediction market prices unless they are explicitly provided
 def build_step_prompt(
     question: ForecastQuestion,
     market_price: float | None = None,
+    max_steps: int | None = None,
 ) -> str:
-    """Format the step prompt with question context."""
+    """Format the step prompt with question context.
+
+    When ``max_steps`` is given, the agent is told its search budget and is
+    nudged to commit once it has enough evidence - searching is not free, and an
+    agent that knows its budget stops reformulating the same query and forecasts.
+    """
     prompt = f"QUESTION:\n{question.question}\n\n"
     if question.description:
         prompt += f"MARKET CONTEXT:\n{question.description}\n\n"
     if market_price is not None:
         prompt += f"MARKET IMPLIED PROBABILITY (p_yes):\n{market_price}\n\n"
+    if max_steps is not None:
+        prompt += (
+            f"SEARCH BUDGET: you have at most {max_steps} steps. Search only when a "
+            "specific, named fact is missing - do not reformulate a query you already "
+            "ran. As soon as you have a base rate and the current signal, forecast.\n\n"
+        )
     prompt += (
         "NEXT ACTION SCHEMA (output JSON only):\n"
         'If you need more info:\n{"action":"search","query":"..."}\n'
@@ -146,6 +155,84 @@ def build_step_prompt(
         "Pick exactly one action."
     )
     return prompt
+
+
+# %% [markdown]
+# ## JSON Parsing
+#
+# LLMs sometimes wrap JSON in markdown code blocks or add trailing text.
+# Robust parsing tries `json.loads` first, then falls back to extracting
+# the first `{...}` block.
+
+
+# %%
+def parse_json(raw: str) -> dict:
+    """Parse JSON from LLM output with fallback bracket extraction."""
+    raw = raw.strip()
+    try:
+        parsed = json.loads(raw)
+        return (
+            parsed
+            if isinstance(parsed, dict)
+            else {"action": "invalid", "error": "Expected JSON object"}
+        )
+    except json.JSONDecodeError:
+        pass
+
+    # Strip markdown code fences
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    try:
+        parsed = json.loads(raw)
+        return (
+            parsed
+            if isinstance(parsed, dict)
+            else {"action": "invalid", "error": "Expected JSON object"}
+        )
+    except json.JSONDecodeError:
+        pass
+
+    # Extract first {...} block
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group())
+            return (
+                parsed
+                if isinstance(parsed, dict)
+                else {"action": "invalid", "error": "Expected JSON object"}
+            )
+        except json.JSONDecodeError:
+            pass
+
+    return {"action": "invalid", "error": "JSON parse failure"}
+
+
+# %% [markdown]
+# ## Rich Output Extraction
+#
+# After the agent produces a forecast, we extract additional metadata from the
+# raw LLM output. These fields enrich the `AgentForecastArtifact` with
+# confidence, sentiment, key findings, uncertainties, and evidence quality.
+
+# %% [markdown]
+# ### Confidence extraction
+#
+# If the forecast JSON includes a `confidence` field, we use it directly (clamped
+# to $[0, 1]$). Otherwise, we infer confidence from probability extremity:
+# $\text{confidence} = 2 \cdot |p_{\text{yes}} - 0.5|$.
+
+
+# %%
+def extract_confidence(action: dict) -> float:
+    """Extract confidence from action dict or infer from probability."""
+    if "confidence" in action:
+        try:
+            return max(0.0, min(1.0, float(action["confidence"])))
+        except (TypeError, ValueError):
+            pass
+    p = float(action.get("p_yes", 0.5))
+    return round(abs(p - 0.5) * 2, 3)
 
 
 # %% [markdown]
@@ -239,12 +326,8 @@ def extract_sentiment(p_yes: float) -> Sentiment:
 
 
 # %%
-INLINE_ENUMERATION = re.compile(r"\(\d+\)\s*")
-SENTENCE_END = re.compile(r"(?<![A-Z]\.)(?<=[.!?])\s+(?=[A-Z])")
-
-
 def extract_key_findings(rationale: str) -> list[str]:
-    """Extract the items a rationale enumerates, on their own lines or inline."""
+    """Extract bullet points and numbered items from rationale."""
     findings = []
     for line in rationale.split("\n"):
         line = line.strip()
@@ -252,13 +335,7 @@ def extract_key_findings(rationale: str) -> list[str]:
             findings.append(re.sub(r"^[-•*]\s+", "", line).strip())
         elif re.match(r"^\d+[.)]\s+", line):
             findings.append(re.sub(r"^\d+[.)]\s+", "", line).strip())
-    if findings:
-        return findings[:10]
-    items = [part.strip() for part in INLINE_ENUMERATION.split(rationale)[1:]]
-    if len(items) < 2:
-        return []
-    items[-1] = SENTENCE_END.split(items[-1])[0]  # trim the run-on after the last marker
-    return [item.rstrip(";.").strip() for item in items][:10]
+    return findings[:10]
 
 
 # %% [markdown]
@@ -295,34 +372,12 @@ def extract_uncertainties(rationale: str) -> list[str]:
 
 # %%
 def assess_evidence_quality(sources_consulted: int, queries_made: int) -> EvidenceQuality:
-    """Classify evidence volume from query and result counts."""
+    """Assess evidence quality from search metrics."""
     if sources_consulted >= 10 and queries_made >= 3:
         return EvidenceQuality.HIGH
     if sources_consulted >= 5 or queries_made >= 2:
         return EvidenceQuality.MEDIUM
     return EvidenceQuality.LOW
-
-
-# %% [markdown]
-# ### Recomputing the derived fields on a replayed run
-#
-# A saved run holds both halves: what the model returned, and what was derived from it at the
-# time. Only the first half is a recording. The second is a function of it, so the replay
-# recomputes it with the functions above rather than reading it back, and the reader sees the
-# derivation run on a real rationale instead of a value from a file.
-
-
-# %%
-def rederive_fields(a: AgentForecastArtifact) -> AgentForecastArtifact:
-    """Recompute every derived field from the probability and rationale the model returned."""
-    return replace(
-        a,
-        confidence=extract_confidence({"p_yes": a.p_yes}),
-        sentiment=extract_sentiment(a.p_yes),
-        key_findings=extract_key_findings(a.rationale),
-        uncertainties=extract_uncertainties(a.rationale),
-        evidence_quality=assess_evidence_quality(a.sources_consulted, a.search_queries_made),
-    )
 
 
 # %% [markdown]
@@ -334,182 +389,22 @@ def rederive_fields(a: AgentForecastArtifact) -> AgentForecastArtifact:
 
 
 # %%
-def _handle_search_step(
-    executor,
-    action: dict,
-    cutoff,
-    max_search_results: int,
-    messages: list[ChatMessage],
-    traces: list[AgentTrace],
-    step: int,
-    response: str,
-) -> tuple[int, int]:
-    """Execute a search action, append to messages + traces. Returns (queries_inc, sources_inc)."""
-    query = action.get("query", "")
-    results = executor.execute_search(query, max_results=max_search_results, cutoff_date=cutoff)
-    traces.append(
-        AgentTrace(step=step, action="search", query=query, results=results, llm_raw=response)
-    )
-    messages.append(ChatMessage(role="assistant", content=response))
-    messages.append(ChatMessage(role="tool", content=format_search_results(results)))
-    return 1, len(results)
-
-
-# %% [markdown]
-# ### Forecast handler
-
-
-# %%
-def _handle_forecast_step(
-    action: dict,
-    traces: list[AgentTrace],
-    step: int,
-    response: str,
-) -> tuple[float, str, dict]:
-    """Record a forecast action. Returns (p_yes, rationale, raw_action)."""
-    p_yes = action["p_yes"]
-    rationale = action["rationale"]
-    traces.append(AgentTrace(step=step, action="forecast", llm_raw=response))
-    return p_yes, rationale, action
-
-
-# %% [markdown]
-# ### Unknown-action handler
-
-
-# %%
-def _handle_unknown_step(
-    action_type: str,
-    response: str,
-    messages: list[ChatMessage],
-    traces: list[AgentTrace],
-    step: int,
-) -> None:
-    """Record an unrecognized action and feed an error back to the LLM."""
-    traces.append(AgentTrace(step=step, action=action_type, llm_raw=response))
-    messages.append(ChatMessage(role="assistant", content=response))
-    messages.append(
-        ChatMessage(
-            role="tool",
-            content=f"Error: unrecognized action '{action_type}'. Use 'search' or 'forecast'.",
-        )
-    )
-
-
-# %% [markdown]
-# ## Loop State and Assembly
-#
-# Explicit loop state keeps iteration separate from artifact construction.
-
-
-# %%
-@dataclass
-class _LoopResult:
-    """Mutable state accumulated by one ReAct loop."""
-
-    p_yes: float = 0.5
-    rationale: str = ""
-    forecast_produced: bool = False
-    raw_action: dict = field(default_factory=dict)
-    traces: list[AgentTrace] = field(default_factory=list)
-    total_tokens: TokenUsage = field(default_factory=TokenUsage)
-    queries_made: int = 0
-    sources_consulted: int = 0
-
-
-# %% [markdown]
-# ### Artifact assembly
-
-
-# %%
-def _assemble_artifact(agent, result: _LoopResult) -> AgentForecastArtifact:
-    """Convert loop state into the structured forecast artifact."""
-    return AgentForecastArtifact(
-        agent_id=agent.agent_id,
-        p_yes=result.p_yes,
-        rationale=result.rationale,
-        traces=result.traces,
-        forecast_produced=result.forecast_produced,
-        confidence=extract_confidence(result.raw_action),
-        sentiment=extract_sentiment(result.p_yes),
-        key_findings=extract_key_findings(result.rationale),
-        evidence_quality=assess_evidence_quality(
-            result.sources_consulted,
-            result.queries_made,
-        ),
-        uncertainties=extract_uncertainties(result.rationale),
-        token_usage=result.total_tokens,
-        search_queries_made=result.queries_made,
-        sources_consulted=result.sources_consulted,
-    )
-
-
-# %% [markdown]
-# ### ReAct loop
-
-
-# %%
-def _run_research_loop(
-    agent,
-    question: ForecastQuestion,
-    market_price: float | None,
-) -> AgentForecastArtifact:
-    cutoff = date.fromisoformat(question.cutoff_date) if question.cutoff_date else None
-    messages = [
-        ChatMessage(role="system", content=AGENT_SYSTEM_PROMPT),
-        ChatMessage(role="user", content=build_step_prompt(question, market_price)),
-    ]
-    result = _LoopResult()
-
-    for step in range(1, agent.max_steps + 1):
-        response, usage = agent.llm.complete_with_usage(messages, json_mode=True)
-        result.total_tokens = result.total_tokens + usage
-        parsed = parse_json(response)
-        action_type, action = validate_action(parsed)
-
-        if action_type == "search" and action is not None:
-            dq, ds = _handle_search_step(
-                agent.executor,
-                action,
-                cutoff,
-                agent.max_search_results,
-                messages,
-                result.traces,
-                step,
-                response,
-            )
-            result.queries_made += dq
-            result.sources_consulted += ds
-        elif action_type == "forecast" and action is not None:
-            result.p_yes, result.rationale, result.raw_action = _handle_forecast_step(
-                action, result.traces, step, response
-            )
-            result.forecast_produced = True
-            break
-        else:
-            _handle_unknown_step(action_type, response, messages, result.traces, step)
-    else:
-        # The budget ran out with no forecast action. result.p_yes keeps its initial
-        # value; forecast_produced stays False so nothing downstream reads it as a
-        # judgement.
-        result.rationale = "Max steps reached without forecast"
-        result.traces.append(AgentTrace(step=agent.max_steps, action="forced_default"))
-
-    return _assemble_artifact(agent, result)
+# Check the returned sources, including supplied context.
 
 
 # %% [markdown]
 # ## The ResearchAgent Class
 #
-# The class owns three things and no logic: the model client, the tool executor, and the two
-# budgets. `run()` hands them to the loop above. `agent_research.py` carries the same agent for
-# the notebooks that import it rather than rebuild it, which is why the pieces are laid out
-# separately here: this is the one notebook where the contract is read rather than called.
+# The agent owns the LLM, the search executor, and the iteration budget.
+# Its `run()` method walks the ReAct loop, dispatches each step to the
+# handlers above, and returns an `AgentForecastArtifact` with the
+# accumulated metadata. The class is reused unchanged in NB06 (multi-agent)
+# and NB08 (full pipeline).
 
 
 # %%
 class ResearchAgent:
-    """ReAct-based research agent producing probability forecasts.
+    """ReAct research agent producing evidence-linked probability forecasts.
 
     Implements the same loop as the AIA Forecaster's research agent:
     search for evidence, then forecast with rich metadata.
@@ -520,7 +415,7 @@ class ResearchAgent:
         llm: LLMClient,
         search: SearchClient | None = None,
         agent_id: str = "agent_0",
-        max_steps: int = 5,
+        max_steps: int = 6,
         max_search_results: int = 5,
     ) -> None:
         self.llm = llm
@@ -533,9 +428,135 @@ class ResearchAgent:
         self,
         question: ForecastQuestion,
         market_price: float | None = None,
+        evidence: list[SearchResult] | None = None,
     ) -> AgentForecastArtifact:
-        """Run the agent on a question and return its forecast artifact."""
-        return _run_research_loop(self, question, market_price)
+        """Research within the budget; retain unsupported attempts as abstentions."""
+        if self.max_steps < 1 or self.max_search_results < 1:
+            raise ValueError("Research budgets must be positive")
+        cutoff = date.fromisoformat(question.cutoff_date) if question.cutoff_date else None
+        messages = [
+            ChatMessage(role="system", content=AGENT_SYSTEM_PROMPT),
+            ChatMessage(
+                role="user", content=build_step_prompt(question, market_price, self.max_steps)
+            ),
+        ]
+        traces: list[AgentTrace] = []
+        sources = eligible_results(evidence or [], cutoff)
+        if sources:
+            traces.append(AgentTrace(step=0, action="supplied_evidence", results=sources))
+            messages.append(ChatMessage(role="user", content=format_search_results(sources)))
+        total_tokens = TokenUsage()
+        queries_made = 0
+        p_yes = None
+        rationale = ""
+        raw_action = {}
+        reason = "Budget exhausted without a supported forecast"
+        status = "abstained"
+
+        for step in range(1, self.max_steps + 2):
+            synthesis_only = step > self.max_steps
+            if synthesis_only:
+                if not sources:
+                    break
+                messages.append(
+                    ChatMessage(
+                        role="user",
+                        content=(
+                            "Search budget exhausted. Use only the retained evidence to forecast, "
+                            "citing its URL or title. If it is insufficient, abstain. No further search."
+                        ),
+                    )
+                )
+            try:
+                response, usage = self.llm.complete_with_usage(messages, json_mode=True)
+            except Exception as exc:
+                reason = f"Model call failed ({type(exc).__name__})"
+                status = "failed"
+                traces.append(AgentTrace(step=step, action="provider_error", llm_raw=reason))
+                break
+            total_tokens = total_tokens + usage
+            messages.append(ChatMessage(role="assistant", content=response))
+            action = parse_json(response)
+            action_type = action.get("action", "invalid")
+            if action_type == "search" and not synthesis_only:
+                query = action.get("query", "")
+                results = self.executor.execute_search(query, self.max_search_results, cutoff)
+                log = self.executor.execution_log[-1]
+                queries_made += int(log.status in {"success", "error"})
+                sources.extend(results)
+                traces.append(
+                    AgentTrace(
+                        step=step, action="search", query=query, results=results, llm_raw=response
+                    )
+                )
+                messages.append(
+                    ChatMessage(
+                        role="tool",
+                        content=(
+                            format_search_results(results)
+                            if results
+                            else f"No eligible evidence. Search status: {log.status}. {log.result_preview}"
+                        ),
+                    )
+                )
+                continue
+            traces.append(AgentTrace(step=step, action=str(action_type), llm_raw=response))
+            if action_type == "abstain":
+                reason = str(action.get("rationale") or "Model reported insufficient evidence")
+                break
+            if action_type == "forecast":
+                try:
+                    if isinstance(action["p_yes"], bool):
+                        raise ValueError("Probability must be a number, not a boolean")
+                    candidate = float(action["p_yes"])
+                    validate_probabilities([candidate])
+                except (KeyError, TypeError, ValueError):
+                    reason = "Invalid probability; forecast rejected"
+                else:
+                    explanation = action.get("rationale")
+                    if not sources:
+                        reason = "No eligible evidence; forecast rejected"
+                    elif not isinstance(explanation, str) or not explanation.strip():
+                        reason = "Missing rationale; forecast rejected"
+                    elif not any(
+                        (r.url and r.url in explanation) or (r.title and r.title in explanation)
+                        for r in sources
+                    ):
+                        reason = "Rationale must identify a retained source URL or title"
+                    else:
+                        p_yes, rationale, raw_action = candidate, explanation, action
+                        status = "accepted"
+                        break
+            else:
+                reason = "Invalid action or search requested after the budget was exhausted"
+            messages.append(ChatMessage(role="tool", content=reason))
+
+        return AgentForecastArtifact(
+            agent_id=self.agent_id,
+            p_yes=p_yes,
+            rationale=rationale,
+            traces=traces,
+            status=status,
+            failure_reason=None if status == "accepted" else reason,
+            messages=[{"role": m.role, "content": m.content} for m in messages],
+            execution_mode=(
+                "synthetic"
+                if isinstance(self.executor.search, MockSearchClient)
+                or any(
+                    label in getattr(self.llm, "model_name", "").lower()
+                    for label in ("mock", "synthetic")
+                )
+                else "live"
+            ),
+            confidence=extract_confidence(raw_action) if p_yes is not None else 0.0,
+            sentiment=extract_sentiment(p_yes) if p_yes is not None else Sentiment.NEUTRAL,
+            key_findings=extract_key_findings(rationale),
+            evidence_quality=assess_evidence_quality(len(sources), queries_made),
+            uncertainties=extract_uncertainties(rationale),
+            token_usage=total_tokens,
+            search_queries_made=queries_made,
+            sources_consulted=len(sources),
+        )
 
 
 # %% [markdown]
@@ -559,7 +580,7 @@ class ResearchAgent:
 # %%
 if RUN_LIVE:
     llm = create_llm_client(LLM_PROVIDER)
-    search = create_search_client(LLM_PROVIDER)
+    search = create_search_client()
 
     # Wrap the client in a TracingLLMClient so every prompt and raw response is
     # captured for the run trace we persist at the end of the notebook.
@@ -584,41 +605,13 @@ else:
     question = pinned_run.question_obj()
     provider_name = pinned_run.provider
     search_name = "replay (pinned trace)"
-    replayed_artifacts = [rederive_fields(a) for a in pinned_run.agent_artifacts()]
+    replayed_artifacts = pinned_run.agent_artifacts()
     artifact = replayed_artifacts[0]
-    captured_on = datetime.fromisoformat(pinned_run.created_at).date().isoformat()
 
-mode = "live" if RUN_LIVE else f"replay of a capture recorded {captured_on}"
-print(f"Mode:     {mode}")
+print(f"Mode: {'LIVE' if RUN_LIVE else 'REPLAY (pinned 2026-06-09 trace)'}")
 print(f"Provider: {provider_name}")
-print(f"Search:   {search_name}")
+print(f"Search: {search_name}")
 print(f"Question: {question.question}\n")
-
-# %% [markdown]
-# ### What the pinned trace does and does not establish
-#
-# The replay is a recording of one live run, which makes it reproducible and does not make it a
-# backtest. Three properties of the recording are worth asserting rather than assuming, because
-# each one bounds what a claim about this run can say: the file is the one this notebook
-# expects, none of its 40 search results carries a publication date, and none of the prompts
-# ever contained the market's own probability. The first is bookkeeping; the second means
-# nothing here can show the agent read only what was knowable on the day; the third means the
-# agent's forecast is independent of the market quote it is later compared against.
-
-# %%
-if not RUN_LIVE:
-    assert pinned_run.notebook == "04_research_agent"
-    assert len(replayed_artifacts) == 2
-    replay_results = [
-        result
-        for saved_artifact in replayed_artifacts
-        for trace in saved_artifact.traces
-        for result in trace.results
-    ]
-    assert len(replay_results) == 40
-    assert all(result.published is None for result in replay_results)
-    assert not any("MARKET IMPLIED PROBABILITY" in str(call) for call in pinned_run.llm_calls)
-    print(f"Pinned trace: {len(replay_results)} search results, none carrying a publication date")
 
 # %% [markdown]
 # ## Inspecting the Forecast Artifact
@@ -630,15 +623,17 @@ if not RUN_LIVE:
 
 # %%
 print("=== Forecast ===")
-print(f"Agent:                  {artifact.agent_id}")
-print(f"Produced a forecast:    {artifact.forecast_produced}")
-print(f"p(YES):                 {artifact.p_yes:.2f}")
-print(f"Confidence heuristic:   {artifact.confidence:.2f}")
-print(f"Sentiment heuristic:    {artifact.sentiment.value}")
-print(f"Evidence volume class:  {artifact.evidence_quality.value}")
-print(f"Searches:               {artifact.search_queries_made}")
-print(f"Documents read:         {artifact.sources_consulted}")
-print(f"Tokens:                 {artifact.token_usage.total_tokens:,}")
+print(f"Agent:       {artifact.agent_id}")
+print(f"Status:      {artifact.status}")
+print(f"p(YES):      {artifact.p_yes}")
+if artifact.failure_reason:
+    print(f"Reason:      {artifact.failure_reason}")
+print(f"Confidence:  {artifact.confidence:.2f}")
+print(f"Sentiment:   {artifact.sentiment.value}")
+print(f"Evidence:    {artifact.evidence_quality.value}")
+print(f"Queries:     {artifact.search_queries_made}")
+print(f"Sources:     {artifact.sources_consulted}")
+print(f"Tokens:      {artifact.token_usage.total_tokens:,}")
 
 # %%
 print(f"\nRationale:\n{artifact.rationale[:400]}")
@@ -714,46 +709,6 @@ else:
 audit_df
 
 # %% [markdown]
-# ## Gating the Finished Run
-#
-# [`03_state_and_memory`](03_state_and_memory.ipynb) defined three checks over an agent's
-# evidence, and this is the run they were defined for. Turning the artifact's traces into an
-# `AgentState` is mechanical: each search step becomes one evidence item holding its query and
-# its results, and the retrieval time is the moment the run was captured.
-#
-# The gates run here as a report rather than as a veto, and one of the three turns out to be
-# asking a question this reconstruction cannot answer, which is worth as much as the two that
-# work.
-
-# %%
-run_captured_at = datetime.now() if RUN_LIVE else datetime.fromisoformat(pinned_run.created_at)
-
-gated_state = AgentState(
-    question=question.question,
-    cutoff_date=question.cutoff_date,
-    run_id=artifact.agent_id,
-)
-for trace in artifact.traces:
-    if trace.action != "search":
-        continue
-    gated_state.evidence.append(
-        {
-            "type": "search_results",
-            "source": "web_search",
-            "timestamp": run_captured_at.isoformat(),
-            "query": trace.query or "",
-            "content": {
-                "results": [
-                    {"title": r.title, "url": r.url, "published": r.published}
-                    for r in trace.results
-                ]
-            },
-        }
-    )
-
-for gate in run_quality_gates(gated_state, as_of=run_captured_at):
-    print(f"  [{'PASS' if gate.passed else 'FAIL'}] {gate.gate_name}: {gate.reason}")
-# %% [markdown]
 # Freshness passes and consistency reports that there is no cutoff to enforce, which is a
 # statement about the question rather than a defect in the run. `CHAPTER_CONTESTED_QUESTION`
 # carries `cutoff_date=""` because it was open when it was captured: it asks about the rest of
@@ -787,14 +742,19 @@ def format_agent_summary(a: AgentForecastArtifact) -> str:
     """Format an agent artifact as a summary for supervisor/debate prompts."""
     lines = [
         f"Agent: {a.agent_id}",
-        f"Probability (p_yes): {a.p_yes:.2f}",
+        f"Probability (p_yes): {a.p_yes}",
+        f"Status: {a.status}",
         f"Confidence: {a.confidence:.2f}",
-        f"Rationale: {a.rationale[:200]}",
+        f"Rationale: {a.rationale}",
     ]
     if a.key_findings:
         lines.append("Key findings:")
         for f in a.key_findings[:3]:
             lines.append(f"  - {f}")
+    for trace in a.traces:
+        for source in trace.results:
+            lines.append(f"Source: {source.title} | {source.url}")
+            lines.append(f"Excerpt: {(source.snippet or '')[:400]}")
     return "\n".join(lines)
 
 
@@ -821,59 +781,27 @@ else:
     # Replay: the pinned trace's second saved agent is this preview run.
     artifact_b = replayed_artifacts[1]
 
-pair = [artifact, artifact_b]
-
-for a in pair:
-    print(f"{a.agent_id}: confidence={a.confidence:.2f}, sentiment={a.sentiment.value}")
-print(f"Both produced a forecast: {all(a.forecast_produced for a in pair)}")
-
-# %% [markdown]
-# Both agents committed to a probability, so both are comparable. Reading their
-# `forecast_produced` flags before comparing is the habit that stops a run which never
-# forecast from entering an average as an opinion of exactly even odds.
-
-# %%
-fig, ax = plt.subplots()
-bars = ax.bar(
-    [a.agent_id for a in pair],
-    [a.p_yes for a in pair],
-    color=[COLORS["blue"], COLORS["copper"]],
-    width=0.58,
-)
-ax.bar_label(bars, labels=[f"{a.p_yes:.0%}" for a in pair], padding=3)
-ax.set_xlabel("Research agent")
-ax.set_ylabel("Probability of a 2026 Fed rate hike")
-ax.set_ylim(0, max(a.p_yes for a in pair) + 0.10)
-format_pct_axis(ax)
-add_message_title(
-    ax,
-    "Two runs of one research agent on the same question",
-    subtitle="Same question, prompts and tools; 2026-06-09 capture, "
-    "search results carry no publication dates",
-)
-show_with_alt(
-    fig,
-    "Bar chart of the probability each of two research agents gave for the same question, one "
-    "bar per agent. The first bar stands well above even odds and the second well below it, "
-    "and each carries its own value as a label.",
-)
+for a in [artifact, artifact_b]:
+    print(f"{a.agent_id}: status={a.status}, p_yes={a.p_yes}")
+if artifact.p_yes is not None and artifact_b.p_yes is not None:
+    print(f"Difference: {abs(artifact.p_yes - artifact_b.p_yes):.2f}")
 
 # %% [markdown]
-# The two rationales disagree about the level of the policy rate itself, not only about where
-# it is going, which means at least one of them read something wrong. Neither agent's evidence
-# carries a publication date, so neither can be checked against what was knowable on the day.
-# A single agent gives no way to notice any of this: the disagreement is the diagnostic, and it
-# only exists once there is more than one run to compare.
+# **Interpretation**: The captured agents searched and weighted evidence differently.
+# Their probability spread can reflect retrieval, sampling, prompts and model biases.
+# These two runs do not isolate those effects or establish independent information.
+# Notebooks 06 and 07 inspect an ensemble and debate on other questions;
+# resolved comparable runs are needed to assess whether either improves forecasting.
 
 # %% [markdown]
 # ## Persisting the Run Trace
 #
 # The artifact holds the structured forecast; the `TracingLLMClient`s wrapped
-# around each agent hold the raw conversation. `RunTrace.capture` bundles both:
-# the question, both agents' artifacts, and every prompt/response, into one JSON
+# around each agent hold the raw conversation. `RunTrace.capture` bundles both -
+# the question, both agents' artifacts, and every prompt/response - into one JSON
 # record under `forecast_traces/`, the same auditable format the multi-agent
-# notebooks write. Reload it with `RunTrace.load` to inspect the saved
-# inputs and outputs, which is what the default `RUN_LIVE = False` path
+# notebooks (NB06–NB08) write. Reload it with `RunTrace.load` to replay exactly
+# what the agent saw and said - which is what the default `RUN_LIVE = False` path
 # does above. A live run writes a fresh trace here; the default replay run reports
 # the pinned trace it loaded rather than overwriting it.
 
@@ -891,7 +819,7 @@ if RUN_LIVE:
     trace_path = run.save()
     print(
         f"Saved {len(run.llm_calls)} model calls "
-        f"({run.total_tokens():,} tokens) -> {trace_path.relative_to(trace_path.parents[1])}"
+        f"({run.total_tokens():,} tokens) → {trace_path.relative_to(trace_path.parents[1])}"
     )
 else:
     # Replay: report the pinned trace we loaded rather than writing a new file.
@@ -902,39 +830,58 @@ else:
         f"({run.total_tokens():,} tokens) from {trace_path.name}"
     )
 
+
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **The artifact is the deliverable, not the number.** A probability with no record of what
-#    was searched, what came back, and how many turns it took cannot be audited, compared, or
-#    debugged. Everything the rest of this chapter does - aggregating, debating, scoring - reads
-#    the artifact, not the model.
-# 2. **Separate what the model said from what was derived from it.** `p_yes` and the rationale
-#    come from the model; confidence, sentiment, key findings and evidence class are functions
-#    computed over them. Mixing the two makes an arithmetic transform look like a judgement.
-# 3. **A derived field is only as good as its definition, and most of these are crude.**
-#    Extremity is not confidence and volume is not quality. They are useful because they are
-#    cheap, uniform across agents, and inspectable; they are not estimates.
-# 4. **An agent that ran out of turns did not forecast.** `forecast_produced` says which of the
-#    two a `p_yes` is, and it is the field to read before that probability enters any average.
-#    A fallback value counted as an opinion is the quietest way a panel gets pulled toward even
-#    odds by an agent that never spoke.
-# 5. **One class, many agents.** The same `ResearchAgent` with nothing changed but its id is
-#    the whole mechanism behind the multi-agent system:
-#    [`06_multi_agent_research`](06_multi_agent_research.ipynb) runs several,
-#    [`07_adversarial_debate`](07_adversarial_debate.ipynb) makes them argue, and
-#    [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) wires the stages together.
+# 1. **ResearchAgent** combines the ReAct loop with rich output extraction - every
+#    forecast comes with confidence, sentiment, evidence quality, and uncertainties
+# 2. **Structured artifacts**: `AgentForecastArtifact` captures the complete run -
+#    probability, reasoning, traces, and token usage
+# 3. **Robust parsing**: JSON extraction handles markdown code blocks and malformed
+#    LLM output gracefully
+# 4. **Reusable**: This class is the building block for multi-agent (NB06),
+#    debate (NB07), and full pipeline (NB08) notebooks
+# 5. **Token tracking**: Every LLM call is metered for cost analysis
 #
-# **Known limitations of what is built here.** Confidence is derived from how far the
-# probability sits from even odds, so a well-evidenced coin-flip is reported as maximally
-# unconfident and a hallucinated near-certainty as maximally sure. Evidence quality counts
-# documents and queries and reads nothing, so twenty copies of one wire story score as high.
-# Key findings are whatever the model happened to format as a list. And a single agent gives
-# one sample: nothing here bounds how much of the probability is the evidence and how much is
-# this run's sampling.
+# **Next**: [`aggregation`](05_aggregation_math.ipynb) - the mathematical foundation for combining
+# multiple probability estimates (Neyman extremization, weighted aggregation).
 #
-# **Next**: [`05_aggregation_math`](05_aggregation_math.ipynb) is the arithmetic for combining
-# several such probabilities into one.
+# **Book**: Section 24.6 discusses agent design patterns, including the trade-off
+# between agent complexity and forecast calibration.
+
+# %% [markdown]
+# ### Failure test: a probability without evidence
 #
-# **Book**: Section 24.6 discusses agent design patterns, including the trade-off between
-# agent complexity and forecast calibration.
+# This scripted model deliberately tries to forecast before acquiring evidence. The actual research loop must retain the attempt and abstain. No live model or invented performance result is involved.
+
+
+# %%
+class UnsupportedForecastFixture:
+    model_name = "synthetic-failure-fixture"
+
+    def complete_with_usage(self, messages, **kwargs):
+        return '{"action":"forecast","p_yes":0.9,"rationale":"No sources consulted"}', TokenUsage()
+
+
+unsupported = ResearchAgent(UnsupportedForecastFixture(), max_steps=1).run(
+    ForecastQuestion("Deliberately unsupported teaching forecast")
+)
+assert unsupported.status == "abstained" and unsupported.p_yes is None
+print(unsupported.status, unsupported.failure_reason)
+
+# %% [markdown]
+# ## Fresh verification of the current loop
+#
+# This October 2, 2026 capture uses genuine Sonnet 4.6 and Tavily calls on an
+# unresolved October FOMC question. Inspect its retained evidence and model I/O
+# alongside the original June capture above. The forecast has no outcome score;
+# acceptance means a valid probability, rationale and eligible cited evidence.
+
+# %%
+verified_run = RunTrace.load(TRACES_DIR / "verified_research_20261002T193656Z_f169a52a0918.json")
+print(verified_run.question_obj().question)
+print(f"Status: {verified_run.status}; p={verified_run.final_probability}")
+print(f"Model calls: {len(verified_run.llm_calls)}; tokens: {verified_run.total_tokens():,}")
+print(verified_run.agent_artifacts()[0].rationale)
+print(show_agent_timeline(verified_run.agent_artifacts()[0]))

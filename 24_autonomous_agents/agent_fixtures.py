@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 from agent_schemas import ForecastQuestion
 
@@ -66,7 +67,7 @@ RESOLVED_QUESTIONS: list[ForecastQuestion] = [
         resolution_date="2025-01-31",
         cutoff_date="2025-01-25",
         current_market_price=0.45,
-        resolved_outcome=0.0,  # S&P closed at ~5,994 on Jan 31
+        resolved_outcome=1.0,  # January 31 close: 6,040.53
     ),
     ForecastQuestion(
         question="Will a major tech IPO (>$1B valuation) price in Q1 2025?",
@@ -74,7 +75,7 @@ RESOLVED_QUESTIONS: list[ForecastQuestion] = [
         resolution_date="2025-03-31",
         cutoff_date="2025-03-15",
         current_market_price=0.30,
-        resolved_outcome=0.0,  # No major tech IPO priced in Q1 2025
+        resolved_outcome=1.0,  # CoreWeave priced March 27 and completed its IPO in March
     ),
     # --- Crypto ---
     ForecastQuestion(
@@ -83,7 +84,7 @@ RESOLVED_QUESTIONS: list[ForecastQuestion] = [
         resolution_date="2025-03-01",
         cutoff_date="2025-02-20",
         current_market_price=0.42,
-        resolved_outcome=0.0,  # Bitcoin did not sustain above $100K before March 1
+        resolved_outcome=1.0,  # Already exceeded $100K in December 2024
     ),
     # --- Geopolitical ---
     ForecastQuestion(
@@ -116,7 +117,16 @@ RESOLVED_QUESTIONS: list[ForecastQuestion] = [
 
 
 def get_evaluation_panel() -> list[ForecastQuestion]:
-    """Return the full evaluation panel of resolved questions."""
+    """Return resolved teaching questions with recovered outcome references."""
+    audit_path = Path(__file__).resolve().parent / "forecast_traces/evaluation_panel_recovery.json"
+    audit = json.loads(audit_path.read_text())
+    for question, record in zip(RESOLVED_QUESTIONS, audit["records"], strict=True):
+        if question.question != record["question"]:
+            raise ValueError("Outcome recovery no longer matches the teaching panel")
+        question.outcome_sources = record["outcome_sources"]
+        question.outcome_note = record["outcome_note"]
+        question.known_before_cutoff = record["known_before_cutoff"]
+        question.market_price_provenance = record["market_price_provenance"]
     return list(RESOLVED_QUESTIONS)
 
 
@@ -155,11 +165,10 @@ def get_demo_questions(n: int = 3) -> list[ForecastQuestion]:
 #       gives adversarial debate and supervisor reconciliation something to work
 #       on.
 #
-# The contrast is the lesson: how far apart a panel lands tracks how contested
-# the question's evidence is. Nothing in the chapter varies sampling settings
-# between agents, so the spread is not attributable to them. 09 uses a separate
-# panel of *resolved* questions, because scoring calibration needs known
-# outcomes.
+# The contrast is the lesson: forecast spread is a property of how contested the
+# question's evidence is, not of the temperature setting. NB09 deliberately uses
+# a separate panel of *resolved* questions instead, because scoring calibration
+# needs known outcomes.
 
 CHAPTER_CLEAR_QUESTION = ForecastQuestion(
     question="Will the US enter a recession by the end of 2026?",
@@ -191,8 +200,9 @@ CHAPTER_CONTESTED_QUESTION = ForecastQuestion(
 def get_chapter_clear_question() -> ForecastQuestion:
     """Return the pinned one-directional question (NB06 agreement demo).
 
-    The public evidence points one way, so agents running the same prompt and
-    tools land close together. See the module note on pinned chapter questions.
+    The public evidence points one way, so independent research agents reach
+    similar forecasts: the "spread comes from the question, not the temperature"
+    result. See the module note on pinned chapter questions.
     """
     return CHAPTER_CLEAR_QUESTION
 
@@ -320,10 +330,7 @@ def _market_to_question(market: dict, p_yes: float) -> ForecastQuestion:
     title = _sanitize_for_prompt(raw_title, max_len=300)
     description = _sanitize_for_prompt(raw_description, max_len=500)
     end_date = str(market.get("endDate") or "")
-    if len(end_date) >= 10:
-        end_date = end_date[:10]  # YYYY-MM-DD
-    else:
-        end_date = ""
+    end_date = end_date[:10] if len(end_date) >= 10 else ""  # YYYY-MM-DD
 
     return ForecastQuestion(
         question=title,

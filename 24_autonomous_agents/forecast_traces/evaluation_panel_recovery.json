@@ -1,0 +1,173 @@
+{
+  "retrieved_at": "2026-10-02",
+  "question_origin": "Author-written teaching fixtures, recovered by the original ordered get_evaluation_panel(); no exchange market IDs were saved.",
+  "original_capture": "09_evaluation_and_governance_20260615T191431Z_d5030378899c.json",
+  "capture_limitations": "Genuine saved probabilities; original research messages and evidence are missing. Executed June 2026 after all resolutions. Publication-date filters cannot establish historical content or remove model foreknowledge.",
+  "records": [
+    {
+      "panel_index": 0,
+      "question": "Will the Federal Reserve cut rates at the March 2025 FOMC meeting?",
+      "description": "Cut = any reduction in the federal funds target rate at the March 18-19, 2025 meeting.",
+      "cutoff_date": "2025-03-10",
+      "resolution_date": "2025-03-19",
+      "original_outcome": 0.0,
+      "resolved_outcome": 0,
+      "known_before_cutoff": false,
+      "outcome_sources": [
+        "https://www.federalreserve.gov/newsevents/pressreleases/monetary20250319a.htm"
+      ],
+      "outcome_note": "FOMC maintained the 4.25-4.50% target range on March 19, 2025.",
+      "market_price": 0.04,
+      "market_price_provenance": "Unverified illustrative fixture value; not a recovered historical quote"
+    },
+    {
+      "panel_index": 1,
+      "question": "Will US CPI year-over-year for January 2025 come in at or above 3.0%?",
+      "description": "Based on BLS CPI release for January 2025. YoY headline CPI >= 3.0% resolves YES.",
+      "cutoff_date": "2025-02-05",
+      "resolution_date": "2025-02-12",
+      "original_outcome": 1.0,
+      "resolved_outcome": 1,
+      "known_before_cutoff": false,
+      "outcome_sources": [
+        "https://www.bls.gov/news.release/archives/cpi_02122025.htm"
+      ],
+      "outcome_note": "January headline CPI increased 3.0% over 12 months; equality satisfies the written rule.",
+      "market_price": 0.55,
+      "market_price_provenance": "Unverified illustrative fixture value; not a recovered historical quote"
+    },
+    {
+      "panel_index": 2,
+      "question": "Will NVIDIA beat Q4 FY2025 earnings expectations?",
+      "description": "NVIDIA reports Q4 FY2025 on Feb 26, 2025. Beat = revenue AND EPS above consensus estimates.",
+      "cutoff_date": "2025-02-20",
+      "resolution_date": "2025-02-26",
+      "original_outcome": 1.0,
+      "resolved_outcome": 1,
+      "known_before_cutoff": false,
+      "outcome_sources": [
+        "https://investor.nvidia.com/news/press-release-details/2025/NVIDIA-Announces-Financial-Results-for-Fourth-Quarter-and-Fiscal-2025/",
+        "https://www.marketbeat.com/earnings/reports/2025-2-26-nvidia-co-stock/"
+      ],
+      "outcome_note": "Revenue $39.3B and diluted EPS $0.89 exceeded the recovered MarketBeat consensus ($38.16B, $0.84). Original fixture did not specify the consensus vendor.",
+      "market_price": 0.68,
+      "market_price_provenance": "Unverified illustrative fixture value; not a recovered historical quote"
+    },
+    {
+      "panel_index": 3,
+      "question": "Will TSLA report Q4 2024 deliveries above 500,000 vehicles?",
+      "description": "Tesla Q4 2024 delivery numbers announced Jan 2, 2025. Resolves YES if total deliveries > 500K.",
+      "cutoff_date": "2024-12-28",
+      "resolution_date": "2025-01-02",
+      "original_outcome": 0.0,
+      "resolved_outcome": 0,
+      "known_before_cutoff": false,
+      "outcome_sources": [
+        "https://ir.tesla.com/press-release/tesla-fourth-quarter-2024-production-deliveries-and-deployments"
+      ],
+      "outcome_note": "Q4 deliveries were 495,570, below the strict 500,000 threshold.",
+      "market_price": 0.62,
+      "market_price_provenance": "Unverified illustrative fixture value; not a recovered historical quote"
+    },
+    {
+      "panel_index": 4,
+      "question": "Will the S&P 500 close above 6,000 on January 31, 2025?",
+      "description": "Based on the S&P 500 index closing value on Jan 31, 2025.",
+      "cutoff_date": "2025-01-25",
+      "resolution_date": "2025-01-31",
+      "original_outcome": 0.0,
+      "resolved_outcome": 1,
+      "known_before_cutoff": false,
+      "outcome_sources": [
+        "https://fred.stlouisfed.org/data/SP500"
+      ],
+      "outcome_note": "January 31 close was 6,040.53. The old label apparently used the February 3 close (5,994.57).",
+      "market_price": 0.45,
+      "market_price_provenance": "Unverified illustrative fixture value; not a recovered historical quote"
+    },
+    {
+      "panel_index": 5,
+      "question": "Will a major tech IPO (>$1B valuation) price in Q1 2025?",
+      "description": "A technology company must complete its IPO on a US exchange with initial valuation above $1B by March 31, 2025.",
+      "cutoff_date": "2025-03-15",
+      "resolution_date": "2025-03-31",
+      "original_outcome": 0.0,
+      "resolved_outcome": 1,
+      "known_before_cutoff": false,
+      "outcome_sources": [
+        "https://investors.coreweave.com/news/news-details/2025/CoreWeave-Announces-Pricing-of-Initial-Public-Offering/default.aspx",
+        "https://www.sec.gov/Archives/edgar/data/1769628/000176962825000014/crwv-20250331.htm"
+      ],
+      "outcome_note": "CoreWeave priced March 27 at $40, traded March 28 and completed its IPO in March. Gross offer proceeds alone exceeded $1B; this satisfies the written valuation threshold.",
+      "market_price": 0.3,
+      "market_price_provenance": "Unverified illustrative fixture value; not a recovered historical quote"
+    },
+    {
+      "panel_index": 6,
+      "question": "Will Bitcoin exceed $100,000 before March 1, 2025?",
+      "description": "BTC/USD must trade above $100,000 on any major exchange before March 1, 2025 UTC.",
+      "cutoff_date": "2025-02-20",
+      "resolution_date": "2025-03-01",
+      "original_outcome": 0.0,
+      "resolved_outcome": 1,
+      "known_before_cutoff": true,
+      "outcome_sources": [
+        "https://www.coinbase.com/institutional/research-insights/research/weekly-market-commentary/weekly-2024-12-06"
+      ],
+      "outcome_note": "Bitcoin exceeded $100,000 on December 4, 2024 US evening. The question asks any exceedance, not sustained trading. Already YES at the February 20 cutoff.",
+      "market_price": 0.42,
+      "market_price_provenance": "Unverified illustrative fixture value; not a recovered historical quote"
+    },
+    {
+      "panel_index": 7,
+      "question": "Will the US impose new tariffs on Chinese goods before April 2025?",
+      "description": "New tariff actions (executive order, proclamation, or trade measure) targeting Chinese imports announced before April 1, 2025.",
+      "cutoff_date": "2025-03-20",
+      "resolution_date": "2025-04-01",
+      "original_outcome": 1.0,
+      "resolved_outcome": 1,
+      "known_before_cutoff": true,
+      "outcome_sources": [
+        "https://www.whitehouse.gov/presidential-actions/2025/02/imposing-duties-to-address-the-synthetic-opioid-supply-chain-in-the-peoples-republic-of-china/"
+      ],
+      "outcome_note": "The February 1 order announced additional China tariffs, effective February 4. Already YES at the March 20 cutoff.",
+      "market_price": 0.75,
+      "market_price_provenance": "Unverified illustrative fixture value; not a recovered historical quote"
+    },
+    {
+      "panel_index": 8,
+      "question": "Will OpenAI release GPT-5 before April 2025?",
+      "description": "Official release (not preview/beta) of a model explicitly named GPT-5 by OpenAI before April 1, 2025.",
+      "cutoff_date": "2025-03-20",
+      "resolution_date": "2025-04-01",
+      "original_outcome": 0.0,
+      "resolved_outcome": 0,
+      "known_before_cutoff": false,
+      "outcome_sources": [
+        "https://openai.com/index/introducing-gpt-5/"
+      ],
+      "outcome_note": "GPT-5 official release was August 7, 2025, after the deadline. The NO label is inferred from the official release date.",
+      "market_price": 0.15,
+      "market_price_provenance": "Unverified illustrative fixture value; not a recovered historical quote"
+    },
+    {
+      "panel_index": 9,
+      "question": "Will Apple announce a foldable device at its Spring 2025 event?",
+      "description": "Apple officially announces (not rumor) a foldable iPhone, iPad, or Mac at any event before July 2025.",
+      "cutoff_date": "2025-03-15",
+      "resolution_date": "2025-06-30",
+      "original_outcome": 0.0,
+      "resolved_outcome": 0,
+      "known_before_cutoff": false,
+      "outcome_sources": [
+        "https://www.apple.com/newsroom/archive/?page=23",
+        "https://www.apple.com/newsroom/archive/?page=19"
+      ],
+      "outcome_note": "Retain NO after reviewing Apple's spring hardware and WWDC25 announcement lists. Use the written rule (any event before July), rather than the narrower title. This is an editorial release review, not an exchange resolution.",
+      "market_price": 0.08,
+      "market_price_provenance": "Unverified illustrative fixture value; not a recovered historical quote"
+    }
+  ],
+  "model_knowledge_cutoff": "2025-08",
+  "model_knowledge_cutoff_source": "https://platform.claude.com/docs/en/models/sonnet-4-6/overview"
+}

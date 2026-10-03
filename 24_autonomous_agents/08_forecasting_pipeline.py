@@ -48,14 +48,19 @@
 # [`07_adversarial_debate`](07_adversarial_debate.ipynb).
 
 # %%
-"""Full Forecasting Pipeline: agent-debate-supervisor end-to-end."""
+"""Full Forecasting Pipeline - agent-debate-supervisor end-to-end."""
 
-import json
-import textwrap
+import sys
+
+from utils.paths import get_chapter_dir
+
+sys.path.insert(0, str(get_chapter_dir(24)))
+
+import math
+import re
 import time
-from datetime import date, datetime
+from datetime import date
 
-import matplotlib.pyplot as plt
 import polars as pl
 from agent_fixtures import get_chapter_clear_question, get_chapter_contested_question
 from agent_observability import (
@@ -66,75 +71,45 @@ from agent_observability import (
     show_supervisor,
     trace_llm,
 )
-from agent_pipeline import neyman_extremize
+from agent_pipeline import logodds_extremize, validate_probabilities
 from agent_providers import ChatMessage, TokenUsage, create_llm_client
 from agent_research import ResearchAgent, format_agent_summary, parse_json
 from agent_schemas import (
     AgentForecastArtifact,
+    AggregationResult,
+    DebateArtifact,
+    DebateRound,
     ForecastQuestion,
     ForecastResult,
     SearchResult,
     SupervisorArtifact,
 )
-from agent_specialists import DebateAgent
 from agent_tools import (
     SearchClient,
     ToolExecutor,
     create_search_client,
 )
-from IPython.display import Markdown, display
-
-from utils.style import COLORS, add_message_title, show_with_alt
-
-# %% [markdown]
-# ## Settings
-#
-# `RUN_LIVE` left at `False` replays the two pinned captures, one per question, and makes no
-# API calls.
-#
-# `N_AGENTS`, `MAX_STEPS` and `MAX_SEARCH_RESULTS` configure the research phase exactly as in
-# [`06_multi_agent_research`](06_multi_agent_research.ipynb). `DEBATE_ROUNDS` caps the
-# argument, and `NEYMAN_CORRELATION` is the pairwise correlation assumed when the panel is
-# aggregated.
-#
-# Three weights decide how much each later stage can move the answer, and they are the numbers
-# to argue with - on a live run. `DEBATE_WEIGHT` is the debate midpoint's share of the
-# post-debate probability. `SUPERVISOR_MEDIUM_WEIGHT` is the supervisor's share when it states
-# medium confidence; at high confidence it replaces the value outright and at low confidence it
-# is ignored. A replay reports the probabilities its capture recorded, so changing either weight
-# with `RUN_LIVE` left at `False` changes nothing: the run that produced the numbers is over.
-#
-# The three `CONFIDENCE_WHEN_*` values are what the pipeline reports as its own confidence in
-# each of those three cases. They are an ordering, not an estimate: a forecast the supervisor
-# overrode is marked as having had more reconciliation than one where it was ignored, and
-# nothing here measures whether either is more likely to be right.
 
 # %% tags=["parameters"]
+# Default replay includes a fresh capture of this implementation and two original
+# June runs. Each retains its question, evidence and model I/O. No API calls are
+# made during replay. Set RUN_LIVE=True for a new run with configured providers.
 RUN_LIVE = False
 PINNED_TRACES = [
+    "verified_pipeline_20261002T193817Z_e82b1cdb9bbb.json",  # current implementation
     "08_forecasting_pipeline_20260609T141954Z_ef5bca7b95bd.json",  # recession (clear)
     "08_forecasting_pipeline_20260609T142158Z_24e083e7fe54.json",  # rate hike (contested)
 ]
-LLM_PROVIDER = ""
+
+LLM_PROVIDER = ""  # Blank reads .env; "mock" selects a synthetic fixture
 N_AGENTS = 3
 DEBATE_ROUNDS = 3
 MAX_STEPS = 5
 MAX_SEARCH_RESULTS = 5
-NEYMAN_CORRELATION = 0.3
-DEBATE_WEIGHT = 0.3
-SUPERVISOR_MEDIUM_WEIGHT = 0.4
-CONFIDENCE_WHEN_OVERRIDDEN = 0.8
-CONFIDENCE_WHEN_BLENDED = 0.6
-CONFIDENCE_WHEN_IGNORED = 0.5
 
 # %% [markdown]
-# ## Supervisor Prompts
-#
-# The supervisor operates in two phases:
-# 1. **Identify disagreements** among agents and propose clarifying searches
-# 2. **Finalize** with updated probability, incorporating new evidence
-#
-# These prompts are shown inline from the AIA Forecaster's production templates.
+# The finalize prompt receives the original question, agent panel, and bounded
+# follow-up evidence. It requests a probability, confidence label, and rationale.
 
 # %%
 SUPERVISOR_DISAGREEMENTS_PROMPT = """\
@@ -152,11 +127,6 @@ Output JSON only with:
 AGENT INPUTS:
 {agent_summaries}"""
 
-# %% [markdown]
-# The finalize prompt receives the original question, agent panel, and bounded
-# follow-up evidence. It requests a probability, confidence label, and rationale.
-
-# %%
 SUPERVISOR_FINALIZE_PROMPT = """\
 You are the SUPERVISOR agent.
 
@@ -168,7 +138,7 @@ Given:
 You must output:
 1) Updated forecast p_yes in [0,1]
 2) Confidence in whether your update direction is correct: "high" | "medium" | "low"
-3) A short rationale
+3) A short rationale citing a source URL from the supplied evidence
 
 Output JSON only:
 {{"p_yes": 0.0, "confidence": "high", "rationale": "..."}}
@@ -196,6 +166,7 @@ def _supervisor_identify_disagreements(
     llm,
     agent_summaries: str,
     max_queries: int,
+    artifact: SupervisorArtifact,
 ) -> tuple[list[str], list[str], TokenUsage]:
     """Phase 1: LLM call asking for disagreements and clarifying queries."""
     prompt = SUPERVISOR_DISAGREEMENTS_PROMPT.format(
@@ -204,18 +175,13 @@ def _supervisor_identify_disagreements(
     raw, tokens = llm.complete_with_usage(
         [ChatMessage(role="user", content=prompt)], json_mode=True
     )
+    artifact.token_usage = artifact.token_usage + tokens
     parsed = parse_json(raw)
     disagreements = [str(x) for x in parsed.get("disagreements", [])][:20]
     queries = [str(x) for x in parsed.get("queries", [])][:max_queries]
     return disagreements, queries, tokens
 
 
-# %% [markdown]
-# The search phase executes only the supervisor's bounded query list and
-# applies the question's point-in-time cutoff to every request.
-
-
-# %%
 def _supervisor_run_searches(
     search,
     queries: list[str],
@@ -232,12 +198,6 @@ def _supervisor_run_searches(
     }
 
 
-# %% [markdown]
-# Search results become a compact evidence block for the final model call.
-# Dates and source URLs remain visible for audit.
-
-
-# %%
 def _format_supervisor_evidence(sr: dict[str, list[SearchResult]]) -> str:
     """Render the search-result dict into the supervisor-finalize prompt's evidence block."""
     lines: list[str] = []
@@ -255,17 +215,12 @@ def _format_supervisor_evidence(sr: dict[str, list[SearchResult]]) -> str:
     return "\n".join(lines) if lines else "No additional search evidence."
 
 
-# %% [markdown]
-# The final phase parses and clamps the supervisor probability. Invalid
-# confidence labels fall back to `medium` instead of triggering an override.
-
-
-# %%
 def _supervisor_finalize(
     llm,
     question: str,
     agent_summaries: str,
     search_results: dict[str, list[SearchResult]],
+    artifact: SupervisorArtifact,
 ) -> tuple[float | None, str | None, str | None, TokenUsage]:
     """Phase 3: LLM call asking for final p_yes / confidence / rationale."""
     evidence_text = _format_supervisor_evidence(search_results)
@@ -277,56 +232,25 @@ def _supervisor_finalize(
     raw, tokens = llm.complete_with_usage(
         [ChatMessage(role="user", content=prompt)], json_mode=True
     )
+    artifact.token_usage = artifact.token_usage + tokens
     parsed = parse_json(raw)
-    p_yes_raw = parsed.get("p_yes")
-    confidence = parsed.get("confidence")
+    confidence = str(parsed.get("confidence", "")).lower()
     rationale = parsed.get("rationale")
-
-    if confidence is not None:
-        conf_str = str(confidence).lower()
-        if conf_str not in ("high", "medium", "low"):
-            conf_str = "medium"
-        confidence = conf_str
-
-    p_yes = float(p_yes_raw) if p_yes_raw is not None else None
-    if p_yes is not None:
-        p_yes = max(0.0, min(1.0, p_yes))
+    try:
+        if isinstance(parsed["p_yes"], bool):
+            raise ValueError("Probability must be a number, not a boolean")
+        p_yes = float(parsed["p_yes"])
+        validate_probabilities([p_yes])
+        references = re.findall(r"https?://[^\s|]+", agent_summaries + "\n" + evidence_text)
+        if not isinstance(rationale, str) or not any(
+            ref.rstrip(".,)") in rationale for ref in references
+        ):
+            raise ValueError("Supervisor must cite retained evidence")
+        if confidence not in ("high", "medium", "low"):
+            raise ValueError("Invalid confidence")
+    except (KeyError, TypeError, ValueError):
+        return None, "low", "Supervisor output rejected; retain the ensemble", tokens
     return p_yes, confidence, rationale, tokens
-
-
-# %% [markdown]
-# The driver combines the three phases and returns both the artifact and its
-# token count.
-
-
-# %%
-def _run_supervisor(
-    supervisor,
-    question: str,
-    agent_summaries: str,
-    cutoff_date: date | None,
-) -> tuple[SupervisorArtifact, TokenUsage]:
-    """Run identify, search, and finalize in sequence."""
-    disagreements, queries, identify_tokens = _supervisor_identify_disagreements(
-        supervisor.llm, agent_summaries, supervisor.max_queries
-    )
-    search_results = _supervisor_run_searches(
-        supervisor.search, queries, supervisor.max_search_results, cutoff_date
-    )
-    p_yes, confidence, rationale, finalize_tokens = _supervisor_finalize(
-        supervisor.llm, question, agent_summaries, search_results
-    )
-    tokens = identify_tokens + finalize_tokens
-    artifact = SupervisorArtifact(
-        disagreements=disagreements,
-        queries=queries,
-        search_results=search_results,
-        p_yes=p_yes,
-        confidence=confidence,
-        rationale=str(rationale) if rationale is not None else None,
-        token_usage=tokens,
-    )
-    return artifact, tokens
 
 
 # %% [markdown]
@@ -361,17 +285,96 @@ class SupervisorAgent:
         cutoff_date: date | None = None,
     ) -> SupervisorArtifact:
         """Run supervisor reconciliation. Returns SupervisorArtifact."""
-        artifact, self.token_usage = _run_supervisor(self, question, agent_summaries, cutoff_date)
-        return artifact
+        self.token_usage = TokenUsage()
+        self.artifact = SupervisorArtifact()
+        disagreements, queries, t1 = _supervisor_identify_disagreements(
+            self.llm, agent_summaries, self.max_queries, self.artifact
+        )
+        self.token_usage = self.token_usage + t1
+        self.artifact.token_usage = self.token_usage
+        self.artifact.disagreements = disagreements
+        self.artifact.queries = queries
+
+        search_results = _supervisor_run_searches(
+            self.search, queries, self.max_search_results, cutoff_date
+        )
+
+        self.artifact.search_results = search_results
+
+        p_yes, confidence, rationale, t2 = _supervisor_finalize(
+            self.llm, question, agent_summaries, search_results, self.artifact
+        )
+        self.token_usage = self.token_usage + t2
+
+        self.artifact.p_yes = p_yes
+        self.artifact.confidence = confidence
+        self.artifact.rationale = rationale
+        self.artifact.token_usage = self.token_usage
+        return self.artifact
+
+
+# %% [markdown]
+# ## Debate Prompts: Bull (from NB07)
+#
+# Deliberately duplicated from NB07 for self-contained teaching. In
+# production these would live in a shared config module.
+
+# %%
+BULL_PROMPT_TEMPLATE = """\
+You are the BULL debater in a structured forecasting debate.
+
+Your role is to argue for a HIGHER probability of YES for the question below.
+You must present the strongest possible case for YES, backed by evidence.
+
+QUESTION:
+{question}
+
+AGENT SUMMARIES:
+{agent_summaries}
+
+CURRENT AGGREGATE PROBABILITY: {aggregate_p_yes}
+
+{bear_section}
+
+Output JSON only:
+{{"argument": "Your strongest case for a higher probability of YES", "p_yes": 0.XX, "key_evidence": ["evidence point 1", "evidence point 2", "evidence point 3"]}}"""
+
+
+# %% [markdown]
+# ## Debate Prompts: Bear (from NB07)
+
+# %%
+BEAR_PROMPT_TEMPLATE = """\
+You are the BEAR debater in a structured forecasting debate.
+
+Your role is to argue for a LOWER probability of YES for the question below.
+You must present the strongest possible case for NO (or lower probability), backed by evidence.
+
+QUESTION:
+{question}
+
+AGENT SUMMARIES:
+{agent_summaries}
+
+CURRENT AGGREGATE PROBABILITY: {aggregate_p_yes}
+
+BULL'S ARGUMENT:
+{bull_argument}
+Bull's probability: {bull_probability}
+
+You must directly address the Bull's points and explain why the probability should be lower.
+
+Output JSON only:
+{{"argument": "Your strongest case for a lower probability of YES", "p_yes": 0.XX, "key_evidence": ["evidence point 1", "evidence point 2", "evidence point 3"]}}"""
 
 
 # %% [markdown]
 # ## Pipeline helpers
 #
-# The debate stage is the implementation from
-# [`07_adversarial_debate`](07_adversarial_debate.ipynb), imported from
-# `agent_specialists`. What is local to this notebook is the research phase and the rule that
-# decides how much of the supervisor's opinion reaches the final number.
+# Run research agents without market-price anchoring, optionally debate their
+# retained evidence, and apply the high-confidence supervisor rule followed by
+# fixed log-odds scaling. The debate consensus rule is an example we chose;
+# it has no demonstrated performance benefit here.
 
 
 # %%
@@ -386,111 +389,115 @@ def _run_research_agents(
     artifacts: list[AgentForecastArtifact] = []
     for i in range(n_agents):
         agent = ResearchAgent(llm=llm, search=search, agent_id=f"agent_{i}", max_steps=max_steps)
-        artifacts.append(agent.run(question, market_price=question.current_market_price))
+        artifacts.append(agent.run(question, market_price=None))
     return artifacts
 
 
-# %% [markdown]
-# The supervisor has seen the agents' summaries and one round of clarifying searches; the
-# agents each did their own research. So the supervisor gets a say proportional to the
-# confidence it states, and never an unconditional one: it replaces the post-debate probability
-# only at high confidence, is mixed in at `SUPERVISOR_MEDIUM_WEIGHT` at medium, and is ignored
-# at low.
-#
-# The confidence values the pipeline attaches to its own output are stated conventions, not
-# measurements. They rank three outcomes - the supervisor overrode, it contributed, it was
-# ignored - so a consumer can order forecasts by how much reconciliation they received. Nothing
-# estimates them, and [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) is
-# where a confidence that means something has to come from.
+def _run_pipeline_debate(
+    llm,
+    question: str,
+    agent_summaries: str,
+    aggregate_p_yes: float,
+    debate_rounds: int,
+    consensus_threshold: float,
+    artifact: DebateArtifact | None = None,
+) -> DebateArtifact:
+    """Phase 3: run bull/bear debate rounds against the pre-debate aggregate."""
+    artifact = artifact if artifact is not None else DebateArtifact()
+    rounds = artifact.rounds
+    bear_argument: str | None = None
+    bear_probability: float | None = None
+
+    for round_num in range(1, debate_rounds + 1):
+        bear_section = ""
+        if bear_argument is not None:
+            bear_section = (
+                f"BEAR'S PREVIOUS ARGUMENT:\n{bear_argument}\n"
+                f"Bear's probability: {bear_probability:.4f}\n\n"
+                "You must directly address the Bear's points."
+            )
+        bull_prompt = BULL_PROMPT_TEMPLATE.format(
+            question=question,
+            agent_summaries=agent_summaries,
+            aggregate_p_yes=f"{aggregate_p_yes:.4f}",
+            bear_section=bear_section,
+        )
+        bull_raw, bull_tokens = llm.complete_with_usage(
+            [ChatMessage(role="user", content=bull_prompt)], json_mode=True
+        )
+        artifact.token_usage = artifact.token_usage + bull_tokens
+        bull_parsed = parse_json(bull_raw)
+        bull_argument = bull_parsed.get("argument", "")
+        if isinstance(bull_parsed["p_yes"], bool):
+            raise ValueError("Probability must be a number, not a boolean")
+        bull_p = float(bull_parsed["p_yes"])
+        validate_probabilities([bull_p])
+        bull_evidence = [str(e) for e in bull_parsed.get("key_evidence", [])]
+
+        bear_prompt = BEAR_PROMPT_TEMPLATE.format(
+            question=question,
+            agent_summaries=agent_summaries,
+            aggregate_p_yes=f"{aggregate_p_yes:.4f}",
+            bull_argument=bull_argument,
+            bull_probability=f"{bull_p:.4f}",
+        )
+        bear_raw, bear_tokens = llm.complete_with_usage(
+            [ChatMessage(role="user", content=bear_prompt)], json_mode=True
+        )
+        artifact.token_usage = artifact.token_usage + bear_tokens
+        bear_parsed = parse_json(bear_raw)
+        bear_argument = bear_parsed.get("argument", "")
+        if isinstance(bear_parsed["p_yes"], bool):
+            raise ValueError("Probability must be a number, not a boolean")
+        bear_probability = float(bear_parsed["p_yes"])
+        validate_probabilities([bear_probability])
+        bear_evidence = [str(e) for e in bear_parsed.get("key_evidence", [])]
+
+        consensus = abs(bull_p - bear_probability) < consensus_threshold
+        rounds.append(
+            DebateRound(
+                round_number=round_num,
+                bull_argument=bull_argument,
+                bull_probability=bull_p,
+                bear_argument=bear_argument,
+                bear_probability=bear_probability,
+                consensus_reached=consensus,
+                bull_key_evidence=bull_evidence,
+                bear_key_evidence=bear_evidence,
+            )
+        )
+        artifact.bull_final_probability = bull_p
+        artifact.bear_final_probability = bear_probability
+        artifact.consensus_reached = consensus
+        artifact.early_termination = consensus and len(rounds) < debate_rounds
+        if consensus:
+            break
+
+    return artifact
 
 
-# %%
 def _blend_final_probability(
     post_debate: float,
     supervisor_artifact: SupervisorArtifact,
-    *,
-    medium_weight: float = SUPERVISOR_MEDIUM_WEIGHT,
 ) -> tuple[float, float]:
-    """Phase 4 to final: confidence-gated supervisor override. Returns (p_yes, confidence)."""
+    """Phase 4 → final: confidence-gated supervisor override. Returns (final_p, final_confidence)."""
     final_p = post_debate
-    final_confidence = CONFIDENCE_WHEN_IGNORED
+    final_confidence = 0.5
     if supervisor_artifact.p_yes is not None and supervisor_artifact.confidence == "high":
         final_p = supervisor_artifact.p_yes
-        final_confidence = CONFIDENCE_WHEN_OVERRIDDEN
-    elif supervisor_artifact.confidence == "medium":
-        if supervisor_artifact.p_yes is not None:
-            final_p = (1 - medium_weight) * post_debate + (
-                medium_weight * supervisor_artifact.p_yes
-            )
-            final_confidence = CONFIDENCE_WHEN_BLENDED
-    return max(0.01, min(0.99, final_p)), final_confidence
+        final_confidence = 0.8
+    validate_probabilities([final_p])
+    # Fixed statistical correction from the paper, not a coefficient fitted here.
+    return logodds_extremize(final_p, math.sqrt(3)), final_confidence
 
 
 # %% [markdown]
-# The execution helper composes the four phases and records their artifacts.
-# Keeping orchestration outside the class leaves the reader-facing class as a
-# small configuration object.
-
-
-# %%
-def _forecast_one(forecaster, question: ForecastQuestion) -> ForecastResult:
-    started = time.time()
-    cutoff = date.fromisoformat(question.cutoff_date) if question.cutoff_date else None
-    agents = _run_research_agents(
-        forecaster.llm, forecaster.search, question, forecaster.n_agents, forecaster.max_steps
-    )
-    answered = [agent for agent in agents if agent.forecast_produced]
-    if not answered:
-        raise RuntimeError(f"no agent produced a forecast for: {question.question}")
-    summaries = "\n\n---\n\n".join(format_agent_summary(agent) for agent in answered)
-    aggregation = neyman_extremize(
-        [agent.p_yes for agent in answered], base=0.5, correlation=forecaster.correlation
-    )
-    aggregate_p = (
-        aggregation.extremized_probability
-        if aggregation.extremized_probability is not None
-        else aggregation.raw_probability
-    )
-    debate = DebateAgent(
-        llm=forecaster.llm,
-        max_rounds=forecaster.debate_rounds,
-        consensus_threshold=forecaster.consensus_threshold,
-    ).run(question.question, summaries, aggregate_p)
-    midpoint = (
-        (debate.bull_final_probability + debate.bear_final_probability) / 2
-        if debate.bull_final_probability is not None
-        else aggregate_p
-    )
-    supervisor = SupervisorAgent(llm=forecaster.llm, search=forecaster.search).run(
-        question.question, summaries, cutoff_date=cutoff
-    )
-    post_debate = (1 - DEBATE_WEIGHT) * aggregate_p + DEBATE_WEIGHT * midpoint
-    final_p, confidence = _blend_final_probability(
-        post_debate, supervisor, medium_weight=SUPERVISOR_MEDIUM_WEIGHT
-    )
-    tokens = sum((agent.token_usage for agent in agents), start=TokenUsage())
-    tokens = tokens + debate.token_usage + supervisor.token_usage
-    return ForecastResult(
-        question=question,
-        agents=agents,
-        aggregation=aggregation,
-        debate=debate,
-        supervisor=supervisor,
-        final_probability=round(final_p, 4),
-        final_confidence=round(confidence, 3),
-        total_token_usage=tokens,
-        duration_seconds=round(time.time() - started, 2),
-    )
-
-
-# %% [markdown]
-# ## The AIAForecaster Class
+# ## The AIAForecaster class
 #
-# The complete four-phase pipeline:
-# 1. **Research agents**: N parallel agents produce forecasts
-# 2. **Aggregation**: Neyman extremization combines agent probabilities
-# 3. **Debate**: Bull/bear stress-test the aggregate
-# 4. **Supervisor**: Reconcile with clarifying searches, confidence-gated override
+# The central sequence remains directly readable: research, mean, optional debate,
+# supervisor, fixed scaling. Abstentions stay in the artifacts and do not enter the
+# mean. If all researchers abstain, there is no final probability. These examples
+# run researchers sequentially; the application also supports parallel execution.
 
 
 # %%
@@ -505,7 +512,6 @@ class AIAForecaster:
         max_steps: int = 5,
         debate_rounds: int = 3,
         consensus_threshold: float = 0.05,
-        correlation: float = 0.3,
     ) -> None:
         self.llm = llm
         self.search = search
@@ -513,11 +519,107 @@ class AIAForecaster:
         self.max_steps = max_steps
         self.debate_rounds = debate_rounds
         self.consensus_threshold = consensus_threshold
-        self.correlation = correlation
 
     def forecast(self, question: ForecastQuestion) -> ForecastResult:
         """Run the full pipeline on a single question."""
-        return _forecast_one(self, question)
+        start_time = time.time()
+        total_tokens = TokenUsage()
+        cutoff = date.fromisoformat(question.cutoff_date) if question.cutoff_date else None
+
+        # Phase 1: research agents
+        artifacts = _run_research_agents(
+            self.llm, self.search, question, self.n_agents, self.max_steps
+        )
+        for a in artifacts:
+            total_tokens = total_tokens + a.token_usage
+        accepted = [a for a in artifacts if a.status == "accepted" and a.p_yes is not None]
+        if not accepted:
+            return ForecastResult(
+                question=question,
+                agents=artifacts,
+                status="abstained",
+                failure_reason="No accepted research forecasts",
+                total_token_usage=total_tokens,
+                duration_seconds=round(time.time() - start_time, 2),
+            )
+        probs = [a.p_yes for a in accepted]
+        agent_summaries = "\n\n---\n\n".join(format_agent_summary(a) for a in accepted)
+
+        # Phase 2: aggregation
+        validate_probabilities(probs)
+        agg_p = sum(probs) / len(probs)
+        aggregation = AggregationResult(
+            method="mean",
+            raw_probability=agg_p,
+            input_probabilities=probs,
+        )
+
+        # Optional teaching adaptation: debate. An invalid stage leaves a failed attempt.
+        debate_artifact = None
+        supervisor_artifact = None
+        supervisor = None
+        try:
+            post_debate = agg_p
+            if self.debate_rounds:
+                debate_artifact = DebateArtifact()
+                debate_artifact = _run_pipeline_debate(
+                    self.llm,
+                    question.question,
+                    agent_summaries,
+                    agg_p,
+                    self.debate_rounds,
+                    self.consensus_threshold,
+                    artifact=debate_artifact,
+                )
+                total_tokens = total_tokens + debate_artifact.token_usage
+                if debate_artifact.consensus_reached:
+                    post_debate = (
+                        debate_artifact.bull_final_probability
+                        + debate_artifact.bear_final_probability
+                    ) / 2
+
+            supervisor = SupervisorAgent(
+                llm=self.llm,
+                search=self.search,
+                max_queries=3,
+            )
+            supervisor_artifact = supervisor.run(
+                question=question.question, agent_summaries=agent_summaries, cutoff_date=cutoff
+            )
+            total_tokens = total_tokens + supervisor_artifact.token_usage
+        except Exception as exc:
+            supervisor_artifact = supervisor.artifact if supervisor is not None else None
+            total_tokens = TokenUsage()
+            for artifact in [*artifacts, debate_artifact, supervisor_artifact]:
+                if artifact is not None:
+                    total_tokens = total_tokens + artifact.token_usage
+            return ForecastResult(
+                question=question,
+                agents=artifacts,
+                aggregation=aggregation,
+                debate=debate_artifact,
+                supervisor=supervisor_artifact,
+                status="failed",
+                failure_reason=str(exc),
+                total_token_usage=total_tokens,
+                duration_seconds=round(time.time() - start_time, 2),
+            )
+
+        # Final: confidence-gated override
+        final_p, final_confidence = _blend_final_probability(post_debate, supervisor_artifact)
+        duration = time.time() - start_time
+
+        return ForecastResult(
+            question=question,
+            agents=artifacts,
+            aggregation=aggregation,
+            debate=debate_artifact,
+            supervisor=supervisor_artifact,
+            final_probability=round(final_p, 4),
+            final_confidence=round(final_confidence, 3),
+            total_token_usage=total_tokens,
+            duration_seconds=round(duration, 2),
+        )
 
 
 # %% [markdown]
@@ -556,12 +658,17 @@ for q in questions:
 
 
 # %%
-def _run_live_questions(questions_to_run: list[ForecastQuestion]) -> tuple[list, list]:
-    """Run and persist fresh provider-backed forecasts."""
+results: list[ForecastResult] = []
+run_traces = []
+
+if RUN_LIVE:
     llm = create_llm_client(LLM_PROVIDER)
-    search = create_search_client(LLM_PROVIDER)
-    live_results, live_traces = [], []
-    for q in questions_to_run:
+    search = create_search_client()
+
+    # One tracer per question wraps the shared client so the full four-phase
+    # conversation - research, debate, and supervisor calls - is captured and
+    # persisted as a standalone, replayable run trace for each question.
+    for q in questions:
         tracer = trace_llm(llm, label="pipeline")
         forecaster = AIAForecaster(
             llm=tracer,
@@ -569,9 +676,10 @@ def _run_live_questions(questions_to_run: list[ForecastQuestion]) -> tuple[list,
             n_agents=N_AGENTS,
             max_steps=MAX_STEPS,
             debate_rounds=DEBATE_ROUNDS,
-            correlation=NEYMAN_CORRELATION,
         )
         result = forecaster.forecast(q)
+        results.append(result)
+
         run = RunTrace.from_result(
             result,
             notebook="08_forecasting_pipeline",
@@ -580,50 +688,30 @@ def _run_live_questions(questions_to_run: list[ForecastQuestion]) -> tuple[list,
                 "n_agents": N_AGENTS,
                 "max_steps": MAX_STEPS,
                 "debate_rounds": DEBATE_ROUNDS,
-                "correlation": NEYMAN_CORRELATION,
-                "debate_weight": DEBATE_WEIGHT,
-                "supervisor_medium_weight": SUPERVISOR_MEDIUM_WEIGHT,
+                "aggregation": "mean",
+                "statistical_correction_a": math.sqrt(3),
             },
             llm_calls=tracer.calls,
-            notes="Full AIA pipeline: research, aggregate, debate, supervisor.",
+            notes="Teaching pipeline: research, mean, optional debate, high-only supervisor, fixed sqrt(3) scaling.",
         )
-        path = run.save()
+        trace_path = run.save()
+        run_traces.append(run)
         print(
-            f"  ✓ {q.question[:50]}... → {result.final_probability:.2f} "
-            f"({result.duration_seconds:.1f}s) | {len(run.llm_calls)} calls → {path.name}"
+            f"  ✓ {q.question[:50]}... → {result.final_probability} ({result.status}) "
+            f"({result.duration_seconds:.1f}s) | {len(run.llm_calls)} calls → {trace_path.name}"
         )
-        live_results.append(result)
-        live_traces.append(run)
-    return live_results, live_traces
-
-
-# %% [markdown]
-# Replay loads only the two committed trace names. No provider client or search
-# client is created on this path.
-
-
-# %%
-def _load_pinned_questions() -> tuple[list, list]:
-    """Rehydrate the two committed pipeline traces."""
-    replay_results, replay_traces = [], []
+else:
+    # Replay: reload one pinned pipeline trace per question and rehydrate the
+    # full ForecastResult. The display cells below consume these unchanged.
     for pinned_name in PINNED_TRACES:
         run = RunTrace.load(TRACES_DIR / pinned_name)
         result = run.forecast_result()
-        recorded = datetime.fromisoformat(run.created_at).date().isoformat()
+        results.append(result)
+        run_traces.append(run)
         print(
-            f"  ✓ {result.question.question[:50]}... → {result.final_probability:.2f} "
-            f"(replay of a capture recorded {recorded}) | {len(run.llm_calls)} calls"
+            f"  ✓ {result.question.question[:50]}... → {result.final_probability} ({result.status}) "
+            f"(replay) | {len(run.llm_calls)} calls from {pinned_name}"
         )
-        replay_results.append(result)
-        replay_traces.append(run)
-    return replay_results, replay_traces
-
-
-# %%
-if RUN_LIVE:
-    results, run_traces = _run_live_questions(questions)
-else:
-    results, run_traces = _load_pinned_questions()
 
 # %% [markdown]
 # ## Results Summary
@@ -637,7 +725,8 @@ summary_df = pl.DataFrame(
     [
         {
             "question": r.question.question[:80],
-            "final": round(r.final_probability, 3),
+            "final": round(r.final_probability, 3) if r.final_probability is not None else None,
+            "status": r.status,
             "market": (
                 round(r.question.current_market_price, 3)
                 if r.question.current_market_price is not None
@@ -669,16 +758,13 @@ r = results[0]
 print(f"Question: {r.question.question}\n")
 print(show_agents(r.agents))
 
-# %% [markdown]
-# ### Aggregation
-
 # %%
+print("Aggregation:")
 if r.aggregation:
-    print(f"  method:     {r.aggregation.method}")
-    print(f"  inputs:     {r.aggregation.input_probabilities}")
-    print(f"  raw mean:   {r.aggregation.raw_probability:.2f}")
-    print(f"  extremized: {r.aggregation.extremized_probability:.2f}")
-    print(f"  d={r.aggregation.extremization_factor:.2f}, n_eff={r.aggregation.effective_n:.1f}")
+    print(f"  method: {r.aggregation.method}")
+    print(f"  inputs: {r.aggregation.input_probabilities}")
+    print(f"  raw mean: {r.aggregation.raw_probability:.4f}")
+    print(f"  extremized: {r.aggregation.extremized_probability}")
 
 # %% [markdown]
 # ### Debate
@@ -687,14 +773,12 @@ if r.aggregation:
 if r.debate:
     print(show_debate_transcript(r.debate))
 
-# %% [markdown]
-# ### Supervisor, and what the pipeline returned
-
 # %%
 if r.supervisor:
     print(show_supervisor(r.supervisor))
 
-print(f"  probability: {r.final_probability:.2f}")
+print("\n── Final ──")
+print(f"  probability: {r.final_probability} ({r.status})")
 print(f"  confidence:  {r.final_confidence:.2f}")
 if r.duration_seconds is not None:
     print(f"  duration:    {r.duration_seconds:.1f}s")
@@ -702,253 +786,63 @@ else:
     print("  duration:    n/a (replayed from pinned trace)")
 
 # %% [markdown]
-# ## Where the Probability Went
-#
-# Three of the numbers a run produces are the same quantity at different points in the
-# pipeline: the aggregate over the research agents, the post-debate blend, and the final
-# probability. Those are what the line below joins. Everything else a stage produced is an
-# input to one of them - the market price the agents were shown, the agents' own answers, the
-# debate midpoint that enters the post-debate blend at the run's own debate weight, and the
-# supervisor's own probability - and is drawn as an open marker at the stage that read it.
-#
-# The distinction decides what a gap on this chart means. Between two carried values it is
-# movement, and a stage that never moves anything on any question is being paid for and not
-# used. Between two research agents it is disagreement: they answer in parallel and neither
-# saw the other.
-
-# %% [markdown]
-# The post-debate value is the one number on the line that no stage stores: it is rebuilt from
-# the aggregate and the debate midpoint. On a replay it has to be rebuilt with the weights the
-# capture was recorded with rather than the ones set in this notebook now. Mixing the two
-# recomputes the middle point of the line and leaves the points either side of it at their
-# recorded values. Raising `DEBATE_WEIGHT` far enough would pull the post-debate point above
-# both of its neighbours and draw a large supervisor correction that never happened. So the
-# weights take effect on a live run, and are read back from the trace on a replay.
-#
-# Neither weight was recorded when the two committed captures were taken, so they fall back to
-# the values in use then. `carried_probabilities` re-derives each capture's final probability
-# from its own parts and raises if the fallback does not reproduce it, which is what keeps the
-# fallback from becoming an assumption nobody checks.
-
+# ## Pipeline Flow Visualization
 
 # %%
-CAPTURED_DEBATE_WEIGHT = 0.3
-CAPTURED_SUPERVISOR_MEDIUM_WEIGHT = 0.4
-
-
-def carried_probabilities(result: ForecastResult, run: RunTrace) -> tuple[float, float, float]:
-    """Return (aggregate, debate midpoint, post-debate) under the run's own weights."""
-    debate_weight = float(run.params.get("debate_weight", CAPTURED_DEBATE_WEIGHT))
-    medium_weight = float(
-        run.params.get("supervisor_medium_weight", CAPTURED_SUPERVISOR_MEDIUM_WEIGHT)
-    )
-    aggregate_p = (
-        result.aggregation.extremized_probability
-        if result.aggregation.extremized_probability is not None
-        else result.aggregation.raw_probability
-    )
-    midpoint = (
-        (result.debate.bull_final_probability + result.debate.bear_final_probability) / 2
-        if result.debate and result.debate.bull_final_probability is not None
-        else aggregate_p
-    )
-    post_debate = (1 - debate_weight) * aggregate_p + debate_weight * midpoint
-
-    if result.supervisor is not None:
-        rebuilt, _ = _blend_final_probability(
-            post_debate, result.supervisor, medium_weight=medium_weight
-        )
-        if abs(round(rebuilt, 4) - result.final_probability) > 1e-4:
-            raise RuntimeError(
-                f"Rebuilt final probability {rebuilt:.4f} does not match the recorded "
-                f"{result.final_probability:.4f} for {result.question.question[:50]}: "
-                f"the weights this line is drawn with are not the ones the run used."
-            )
-    return aggregate_p, midpoint, post_debate
-
-
-# %%
-STAGE_X = {
-    "Market": 0,
-    "Agents": 1,
-    "Aggregate": 2,
-    "Post-debate": 3,
-    "Supervisor": 4,
-    "Final": 5,
-}
-
-carried_rows, input_rows = [], []
-for r, run in zip(results, run_traces, strict=True):
-    q_short = textwrap.shorten(r.question.question, width=44, placeholder="...")
-    aggregate_p, midpoint, post_debate = carried_probabilities(r, run)
-
-    carried_rows += [
-        {"question": q_short, "stage": "Aggregate", "p_yes": aggregate_p},
-        {"question": q_short, "stage": "Post-debate", "p_yes": post_debate},
-        {"question": q_short, "stage": "Final", "p_yes": r.final_probability},
-    ]
+for r in results:
+    q_short = r.question.question[:50]
+    phases = []
 
     if r.question.current_market_price is not None:
-        input_rows.append(
-            {"question": q_short, "stage": "Market", "p_yes": r.question.current_market_price}
-        )
+        phases.append(("Market", r.question.current_market_price))
+
     for a in r.agents:
-        if a.p_yes is not None:
-            input_rows.append({"question": q_short, "stage": "Agents", "p_yes": a.p_yes})
+        phases.append((a.agent_id, a.p_yes))
+
+    if r.aggregation:
+        phases.append(
+            ("Aggregate", r.aggregation.extremized_probability or r.aggregation.raw_probability)
+        )
+
     if r.debate and r.debate.bull_final_probability is not None:
-        input_rows.append({"question": q_short, "stage": "Post-debate", "p_yes": midpoint})
+        mid = (r.debate.bull_final_probability + r.debate.bear_final_probability) / 2
+        phases.append(("Debate", mid))
+
     if r.supervisor and r.supervisor.p_yes is not None:
-        input_rows.append({"question": q_short, "stage": "Supervisor", "p_yes": r.supervisor.p_yes})
+        phases.append(("Supervisor", r.supervisor.p_yes))
 
-carried_df = pl.DataFrame(carried_rows)
-inputs_df = pl.DataFrame(input_rows)
+    phases.append(("Final", r.final_probability))
 
-fig, ax = plt.subplots()
-questions = carried_df["question"].unique(maintain_order=True).to_list()
-palette = dict(zip(questions, [COLORS["blue"], COLORS["amber"]]))
-for q in questions:
-    carried = carried_df.filter(pl.col("question") == q)
-    ax.plot(
-        [STAGE_X[stage] for stage in carried["stage"]],
-        carried["p_yes"].to_list(),
-        marker="o",
-        linewidth=2,
-        color=palette[q],
-        label=q,
-        zorder=3,
-    )
-    stage_inputs = inputs_df.filter(pl.col("question") == q)
-    ax.scatter(
-        [STAGE_X[stage] for stage in stage_inputs["stage"]],
-        stage_inputs["p_yes"].to_list(),
-        facecolors="none",
-        edgecolors=palette[q],
-        s=55,
-        zorder=2,
-    )
-ax.set_xticks(list(STAGE_X.values()), list(STAGE_X.keys()))
-ax.set_xlabel("Pipeline stage")
-ax.set_ylabel("Probability of yes")
-ax.set_ylim(0, 1)
-add_message_title(
-    ax,
-    "The probability the pipeline carries, and what each stage read",
-    subtitle="Filled markers joined by a line are the running answer; open markers are inputs",
-)
-ax.legend(loc="upper right")
-show_with_alt(
-    fig,
-    "Chart of probability against pipeline stage, one colour per question. A line joins three "
-    "filled markers on each - the aggregate, the post-debate blend and the final probability - "
-    "passing over the supervisor stage without a marker there. Open markers of the same colour "
-    "sit at the market price, at each research agent's answer, at the debate midpoint and at "
-    "the supervisor's own probability. On one question the three agent markers coincide; on "
-    "the other, two coincide and the third sits far above them. Both lines stay in the lower "
-    "half of the range, and one ends higher than it started while the other ends lower.",
-)
+    print(f"\n{q_short}...")
+    for name, p in phases:
+        if p is None:
+            print(f"  {name:<12s} abstained")
+            continue
+        bar = "█" * int(p * 40) + "░" * (40 - int(p * 40))
+        print(f"  {name:<12s} {bar} {p:.2f}")
 
 # %% [markdown]
-# The steps below are taken over the carried values alone, so each one is the same quantity
-# before and after a stage weighted something into it.
+# ## Token Cost Analysis
 
 # %%
-largest_move = (
-    carried_df.with_columns(
-        pl.col("p_yes").diff().over("question").alias("move"),
-        pl.col("stage").shift().over("question").alias("from_stage"),
-    )
-    .drop_nulls("move")
-    .with_columns(pl.col("move").abs().alias("size"))
-    .sort("size", descending=True)
-    .group_by("question", maintain_order=True)
-    .first()
-    .select(
-        "question",
-        pl.format("{} to {}", "from_stage", "stage").alias("largest step"),
-        pl.col("move").round(3),
-    )
-)
-largest_move
-
-# %% [markdown]
-# The largest carried step falls at a different stage on each question: the post-debate blend
-# on one, the supervisor blend on the other. No stage in this pipeline decides the answer and
-# none of them is idle.
-#
-# The open markers carry a reading the line cannot. On the recession question all three
-# research agents returned the same probability and the aggregate came out below every one of
-# them, because extremizing away from a base of even odds treats agreement between agents as
-# evidence - which is the assumption
-# [`05_aggregation_math`](05_aggregation_math.ipynb) derives and
-# [`06_multi_agent_research`](06_multi_agent_research.ipynb) tests against agents that share a
-# prompt. Whether any of this movement is an improvement is a scoring question, and neither of
-# these questions had resolved.
-
-# %% [markdown]
-# ## Token use
-
-# %%
-print(f"  Questions forecasted: {len(results)}")
-print(f"  Total tokens: {grand_total.total_tokens:,}")
+print("Usage from the captured run:")
+print(f"  Questions: {len(results)}")
 print(f"  Input tokens: {grand_total.input_tokens:,}")
 print(f"  Output tokens: {grand_total.output_tokens:,}")
+print("Replay makes no paid calls. Dollar cost depends on the recorded model and its pricing.")
 
 # %% [markdown]
-# ## The Record a Scoring Pipeline Would Read
+# ## State persistence
 #
-# Everything above lives in memory. What a scoring or monitoring system needs is a flat record
-# per question: the forecast, the cutoff, the outcome if it is known, and enough of the
-# intermediate stages to attribute a bad forecast to one of them.
-#
-# Neither of these questions had resolved when the capture was taken, so `resolved_outcome` is
-# empty and nothing here can be scored.
-# [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) builds the scoring rules
-# against a panel of questions whose outcomes are known, rather than against these two.
+# A full trace retains the question, cutoff, evidence, model messages, component
+# outputs, status and available usage. Replaying a result reproduces the saved
+# run; it does not rerun today's algorithm or verify the outcome.
 
 # %%
-serialized = [
-    {
-        "question": r.question.question,
-        "cutoff_date": r.question.cutoff_date,
-        "final_probability": r.final_probability,
-        "resolved_outcome": r.question.resolved_outcome,
-        "agent_probs": [a.p_yes for a in r.agents],
-        "aggregate": r.aggregation.extremized_probability if r.aggregation else None,
-        "debate_consensus": r.debate.consensus_reached if r.debate else None,
-        "supervisor_p_yes": r.supervisor.p_yes if r.supervisor else None,
-        "supervisor_confidence": r.supervisor.confidence if r.supervisor else None,
-        "tokens": r.total_token_usage.total_tokens,
-        "duration_s": r.duration_seconds,
-    }
-    for r in results
-]
+# The full RunTrace saved above retains evidence, rationale and actual model I/O.
+print(run_traces[0].to_json()[:1200])
+print("Inspect the complete JSON in forecast_traces/ for the remaining messages and sources.")
 
-print(json.dumps(serialized[0], indent=2))
-print(f"\n({len(serialized)} records; the second has the same shape)")
-
-# %% [markdown]
-# The pipeline moves a probability through four stages and records where it went. What it does
-# not establish is that any stage improved the estimate. The aggregation credits the panel with
-# an independence nobody measured. The debate narrows the two sides by a few points on the
-# contested question, which is a smaller disagreement and not a more accurate one. The
-# supervisor's confidence label is its own assertion about itself. Reading the stage-to-stage
-# movement as progressive refinement is the mistake this record exists to prevent, and it is
-# why the figure above draws the whole path rather than the endpoint.
-
-# %%
-recession, rate_hike = results
-display(
-    Markdown(
-        "**This replay.** "
-        f"The recession forecast ends at {recession.final_probability:.1%} and the rate-hike "
-        f"forecast at {rate_hike.final_probability:.1%}, against market prices of "
-        f"{recession.question.current_market_price:.1%} and "
-        f"{rate_hike.question.current_market_price:.1%}. Neither distance is a comparison: "
-        "both market prices were in every research agent's prompt, so the pipeline was told "
-        "where the market stood before it looked at anything. And both questions were "
-        "unresolved when the capture was taken, so neither forecast can be scored."
-    )
-)
 # %% [markdown]
 # ## Key Takeaways
 #

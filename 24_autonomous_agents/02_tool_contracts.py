@@ -42,7 +42,13 @@
 # and the ReAct pattern).
 
 # %%
-"""Tool Contracts and Provenance: search protocol, audit trails, and domain policy."""
+"""Tool Contracts and Provenance - search protocol, audit trails, and domain policy."""
+
+import sys
+
+from utils.paths import get_chapter_dir
+
+sys.path.insert(0, str(get_chapter_dir(24)))
 
 import json
 from datetime import date
@@ -54,31 +60,13 @@ from agent_schemas import SearchResult
 from agent_tools import (
     DEFAULT_ALLOWED_DOMAINS,
     SEARCH_TOOL,
-    MockSearchClient,
     ToolExecutor,
-    apply_domain_policy,
     create_search_client,
     format_search_results,
 )
-from IPython.display import display
-
-# %% [markdown]
-# ## Settings
-#
-# `RUN_LIVE` left at `False` uses the deterministic mock search client, so the notebook runs
-# offline and prints the same results everywhere. Set it to `True`, with `TAVILY_API_KEY` set,
-# to issue real queries.
-#
-# `SEARCH_PROVIDER` is empty so the factory picks whichever provider has a key; it is read only
-# on the live path.
-#
-# `MAX_RESULTS` caps how many documents one search returns. Five is the working default for the
-# agents in this chapter: enough for a claim to appear in more than one place, few enough that
-# a handful of searches still fits in a context window.
 
 # %% tags=["parameters"]
-RUN_LIVE = False
-SEARCH_PROVIDER = ""
+SEARCH_PROVIDER = "mock"  # explicitly synthetic contract fixture; "tavily" for live retrieval
 MAX_RESULTS = 5
 
 # %% [markdown]
@@ -125,10 +113,12 @@ print(f"Score:     {example.score}")
 # %% [markdown]
 # ## Running a Search
 #
-# The default path uses `MockSearchClient`, whose results are a fixed dictionary in
+# `SEARCH_PROVIDER` decides where results come from, and it is named rather than inferred.
+# Left at `mock` it builds `MockSearchClient`, whose results are a fixed dictionary in
 # `agent_tools.py`, so this notebook produces the same output on every machine and costs
-# nothing. `RUN_LIVE = True` swaps in whichever provider has a key set, which for this chapter
-# means Tavily.
+# nothing. Name a real provider, `tavily` for this chapter, and it needs that provider's key;
+# a missing one raises instead of quietly falling back to the fixture, which is what keeps a
+# synthetic result from being read as a retrieved one.
 #
 # The demonstration question asks whether NVIDIA beat its Q4 FY2025 earnings expectations, which
 # the company answered when it reported on 2025-02-26. The question carries a **cutoff date** of
@@ -136,7 +126,8 @@ print(f"Score:     {example.score}")
 # so an agent answering the question reads only what existed before that day.
 
 # %%
-search = create_search_client(SEARCH_PROVIDER) if RUN_LIVE else MockSearchClient()
+search = create_search_client(SEARCH_PROVIDER)
+print("Mode: SYNTHETIC contract fixture" if SEARCH_PROVIDER == "mock" else "Mode: LIVE retrieval")
 print(f"Provider: {type(search).__name__}\n")
 
 question = get_demo_question()
@@ -166,52 +157,26 @@ for r in results:
 # the cutoff, so what reaches the agent is dated strictly earlier than that day. The question's
 # own `cutoff_date` is 2025-02-20 and NVIDIA reported on 2025-02-26, so the agent works from
 # what was published up to and including 2025-02-19 and the answer arrives a week later.
+#
+# The filter keeps a result only when it carries a publication date that parses and falls
+# before the cutoff, so an undated item is dropped rather than trusted. What it cannot do is
+# establish what a page said on the date it claims, or remove what the model already knows from
+# training. A cutoff makes the retrieval point-in-time; it does not make the forecast one.
 
 # %%
+# Search WITHOUT cutoff - all results returned
 all_results = search.search("NVIDIA Q4 earnings", max_results=MAX_RESULTS)
-print(f"Retrieved with no cutoff: {len(all_results)}")
+print(f"Without cutoff: {len(all_results)} results")
 for r in all_results:
     print(f"  [{r.published or '?'}] {r.title}")
 
 print()
 
-pit_results = search.search("NVIDIA Q4 earnings", max_results=MAX_RESULTS, cutoff_date=cutoff)
-print(f"Retrieved with cutoff {cutoff}: {len(pit_results)}")
-for r in pit_results:
+# Search WITH cutoff - future results filtered out
+filtered_results = search.search("NVIDIA Q4 earnings", max_results=MAX_RESULTS, cutoff_date=cutoff)
+print(f"With cutoff ({cutoff}): {len(filtered_results)} results")
+for r in filtered_results:
     print(f"  [{r.published or '?'}] {r.title}")
-
-# %% [markdown]
-# ### A result with no date is not a result before the cutoff
-#
-# Search APIs return a publication date when the page carries one, and often it does not. The
-# filter above can only exclude what it can date, so an undated result passes the cutoff by
-# default: the client keeps it because it cannot prove the page is too recent, not because it
-# has established that the page is old enough.
-#
-# That default is the right one for a live run, where excluding every undated page would throw
-# away most of the web. It is the wrong one for a scored historical evaluation, where an
-# undated page is an unbounded hindsight risk. So the two have to be counted separately, and
-# the evaluation decides what to do with the second group rather than inheriting the tool's
-# choice. The cell below adds one undated result to the filtered set and partitions it.
-
-# %%
-undated = SearchResult(
-    title="Undated market commentary",
-    url="https://www.reuters.com/markets/undated-commentary",
-    snippet="A result without provider publication metadata.",
-    published=None,
-    score=0.75,
-)
-cutoff_candidates = [*pit_results, undated]
-verified_pre_cutoff = [
-    result
-    for result in cutoff_candidates
-    if result.published and date.fromisoformat(result.published) < cutoff
-]
-unverified_dates = [result for result in cutoff_candidates if not result.published]
-
-print(f"Dated and verified before the cutoff: {len(verified_pre_cutoff)}")
-print(f"Undated, provenance unverified:       {len(unverified_dates)}")
 
 # %% [markdown]
 # ## Formatting Results for the Agent
@@ -222,8 +187,14 @@ print(f"Undated, provenance unverified:       {len(unverified_dates)}")
 # primary source against a blog and recent reporting against stale reporting, and so that a
 # quote in the final rationale can be traced back to the document it came from.
 
+# %% [markdown]
+# **Finding**: The synthetic filter excludes records outside its date bound.
+# A historical simulation also needs evidence available at its forecast cutoff
+# and an assessment of the model's prior knowledge. These fixture results test
+# the filter, not historical forecasting skill.
+
 # %%
-formatted = format_search_results(pit_results)
+formatted = format_search_results(filtered_results)
 print(formatted[:500])
 
 # %% [markdown]
@@ -238,6 +209,7 @@ print(formatted[:500])
 # %%
 executor = ToolExecutor(search=search)
 
+# Execute several searches
 r1 = executor.execute_search("NVIDIA earnings Q4 2025", max_results=3, cutoff_date=cutoff)
 r2 = executor.execute_search("semiconductor demand AI servers", max_results=3, cutoff_date=cutoff)
 r3 = executor.execute_search("NVIDIA valuation risk", max_results=3, cutoff_date=cutoff)
@@ -270,42 +242,50 @@ pl.DataFrame(
 # `DEFAULT_ALLOWED_DOMAINS` is the chapter's starting set: wire services, financial newspapers,
 # and the primary sources whose numbers the others report on.
 
-# %%
-pl.DataFrame({"allowed_domain": sorted(DEFAULT_ALLOWED_DOMAINS)})
-
+# %% [markdown]
+# **Observation**: These synthetic calls demonstrate the audit record, not
+# provider latency. Inspect measured durations from a genuine live capture to
+# identify slow queries; a fixture's timing cannot predict a live service.
 
 # %% [markdown]
-# ### Enforcement is post-retrieval
+# ## Domain policy
 #
-# The filter runs on results, not on queries: the provider returns whatever matches, and the
-# tool layer drops what the policy excludes before the agent sees it. That ordering has a cost,
-# since a blocked document was still retrieved, and one advantage that matters more, which is
-# that the policy holds whatever the model asks for. A model instructed in its prompt to avoid
-# social media occasionally reads it anyway; a host filtered here never reaches the model at
-# all.
+# The tool executor filters returned URLs by hostname before providing them to the
+# agent. This is an access constraint, not evidence that a retained source is true.
+# The next local example is a labeled synthetic domain-filter fixture.
+
+# %%
+assert len(DEFAULT_ALLOWED_DOMAINS) == 11, "DEFAULT_ALLOWED_DOMAINS count drifted"
+pl.DataFrame({"allowed_domain": sorted(DEFAULT_ALLOWED_DOMAINS)})
+
+# %% [markdown]
+# ### Custom domain policy - observable enforcement
 #
-# The three results below span a wire service, a paywalled newspaper, and a message board.
-# Running the same set through an allowlist of financial publishers and through a blocklist of
-# social sites shows what each policy keeps.
+# Policy enforcement here is **post-retrieval**: the search provider returns
+# whatever matches the query, and the agent's tool layer filters results
+# whose registered domain is not on the allowlist (or appears on a
+# blocklist) before handing them back. The fixture below seeds a mock
+# search whose results contain a `reddit.com` URL alongside a `wsj.com`
+# URL; instantiate two policies and watch the blocked one disappear.
 
 # %%
 mixed_results = [
     SearchResult(
-        title="Fed reaction on rates",
+        title="Synthetic Fed reaction on rates",
         url="https://www.reuters.com/markets/fed-reaction",
         snippet="...",
         published="2025-03-04",
         score=0.91,
     ),
     SearchResult(
-        title="WSJ analysis: NVIDIA earnings setup",
+        title="Synthetic WSJ analysis: NVIDIA earnings setup",
         url="https://www.wsj.com/articles/nvidia",
         snippet="...",
         published="2025-03-05",
         score=0.88,
     ),
     SearchResult(
-        title="r/wallstreetbets: NVDA hot take",
+        title="Synthetic r/wallstreetbets: NVDA hot take",
         url="https://www.reddit.com/r/wallstreetbets/x",
         snippet="...",
         published="2025-03-05",
@@ -313,42 +293,41 @@ mixed_results = [
     ),
 ]
 
-financial_only = {"reuters.com", "wsj.com", "ft.com", "bloomberg.com"}
-social = {"reddit.com", "twitter.com", "x.com"}
 
-policies = {
-    "raw retrieval": mixed_results,
-    "allowlist (financial)": apply_domain_policy(mixed_results, allowed=financial_only),
-    "blocklist (social)": apply_domain_policy(mixed_results, blocked=social),
-}
+def apply_domain_policy(
+    items: list[SearchResult],
+    *,
+    allowed: set[str] | None = None,
+    blocked: set[str] | None = None,
+) -> list[SearchResult]:
+    """Drop results whose host is not on `allowed`, or is on `blocked`."""
+    keep: list[SearchResult] = []
+    for r in items:
+        host = urlparse(r.url).netloc.removeprefix("www.")
+        if blocked and host in blocked:
+            continue
+        if allowed and host not in allowed:
+            continue
+        keep.append(r)
+    return keep
 
-with pl.Config(fmt_str_lengths=80, tbl_rows=20):
-    display(
-        pl.DataFrame(
-            {
-                "policy": [name for name, kept in policies.items() for _ in mixed_results],
-                "host": [urlparse(r.url).hostname for _ in policies for r in mixed_results],
-                "kept": [r in kept for kept in policies.values() for r in mixed_results],
-            }
-        )
-    )
 
-# %% [markdown]
-# ### The same policy inside the executor
-#
-# Passing the sets to `ToolExecutor` applies them to every search the agent makes, and the
-# execution log records how many results the policy removed. That count is what an auditor
-# reads: it says the agent was denied evidence, and how much, rather than leaving a short
-# result list looking like a thin day for the query.
+financial_only = apply_domain_policy(
+    mixed_results, allowed={"reuters.com", "wsj.com", "ft.com", "bloomberg.com"}
+)
+no_social = apply_domain_policy(mixed_results, blocked={"reddit.com", "twitter.com"})
 
-# %%
-policed = ToolExecutor(search=search, blocked_domains={"nasdaq.com"})
-policed_results = policed.execute_search("NVIDIA Q4 earnings", max_results=MAX_RESULTS)
-
-print(f"Returned to the agent: {len(policed_results)}")
-print(f"Log preview:           {policed.execution_log[0].result_preview}")
-for r in policed_results:
-    print(f"  {urlparse(r.url).hostname}  {r.title}")
+pl.DataFrame(
+    {
+        "policy": ["raw retrieval", "allowlist (financial)", "blocklist (social)"],
+        "n_results": [len(mixed_results), len(financial_only), len(no_social)],
+        "hosts_kept": [
+            ", ".join(urlparse(r.url).netloc for r in mixed_results),
+            ", ".join(urlparse(r.url).netloc for r in financial_only),
+            ", ".join(urlparse(r.url).netloc for r in no_social),
+        ],
+    }
+)
 
 # %% [markdown]
 # ## Tool Schema Translation
@@ -397,7 +376,7 @@ print(json.dumps(SEARCH_TOOL.to_openai_schema(), indent=2))
 disabled_executor = ToolExecutor(search=None)
 empty = disabled_executor.execute_search("test query")
 print(f"Results when disabled: {len(empty)}")
-print(f"Log entry status:      {disabled_executor.execution_log[0].status}")
+print(f"Log entry: {disabled_executor.execution_log[0].status}")
 
 # %% [markdown]
 # ## Key Takeaways

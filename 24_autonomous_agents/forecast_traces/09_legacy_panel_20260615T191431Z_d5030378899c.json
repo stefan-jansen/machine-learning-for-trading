@@ -1,0 +1,101 @@
+{
+  "notebook": "09_evaluation_and_governance",
+  "provider": "claude-sonnet-4-6",
+  "question": null,
+  "params": {
+    "panel": [
+      {
+        "agent_probs": [
+          0.05,
+          0.05,
+          0.05
+        ],
+        "final_p": 0.01
+      },
+      {
+        "agent_probs": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "final_p": 0.99
+      },
+      {
+        "agent_probs": [
+          0.97,
+          0.97,
+          0.97
+        ],
+        "final_p": 0.99
+      },
+      {
+        "agent_probs": [
+          0.04,
+          0.04,
+          0.04
+        ],
+        "final_p": 0.01
+      },
+      {
+        "agent_probs": [
+          0.95,
+          0.95,
+          0.95
+        ],
+        "final_p": 0.99
+      },
+      {
+        "agent_probs": [
+          0.97,
+          0.97,
+          0.97
+        ],
+        "final_p": 0.99
+      },
+      {
+        "agent_probs": [
+          0.99,
+          0.98,
+          0.98
+        ],
+        "final_p": 0.99
+      },
+      {
+        "agent_probs": [
+          0.97,
+          0.97,
+          0.97
+        ],
+        "final_p": 0.99
+      },
+      {
+        "agent_probs": [
+          0.03,
+          0.03,
+          0.03
+        ],
+        "final_p": 0.01
+      },
+      {
+        "agent_probs": [
+          0.03,
+          0.03,
+          0.03
+        ],
+        "final_p": 0.01
+      }
+    ],
+    "n_agents": 3,
+    "max_steps": 5
+  },
+  "agents": [],
+  "aggregation": null,
+  "debate": null,
+  "supervisor": null,
+  "final_probability": null,
+  "final_confidence": null,
+  "llm_calls": [],
+  "notes": "Per-question agent probabilities for the resolved evaluation panel.",
+  "created_at": "2026-06-15T19:14:31+00:00",
+  "run_id": "d5030378899c"
+}
