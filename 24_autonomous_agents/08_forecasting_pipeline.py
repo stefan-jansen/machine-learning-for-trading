@@ -48,13 +48,13 @@
 # [`07_adversarial_debate`](07_adversarial_debate.ipynb).
 
 # %%
+"""Full Forecasting Pipeline - agent-debate-supervisor end-to-end."""
+
 import sys
 
 from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
-
-"""Full Forecasting Pipeline - agent-debate-supervisor end-to-end."""
 
 import math
 import re
@@ -108,13 +108,8 @@ MAX_STEPS = 5
 MAX_SEARCH_RESULTS = 5
 
 # %% [markdown]
-# ## Supervisor Prompts
-#
-# The supervisor operates in two phases:
-# 1. **Identify disagreements** among agents and propose clarifying searches
-# 2. **Finalize** with updated probability, incorporating new evidence
-#
-# These prompts are shown inline from the AIA Forecaster's production templates.
+# The finalize prompt receives the original question, agent panel, and bounded
+# follow-up evidence. It requests a probability, confidence label, and rationale.
 
 # %%
 SUPERVISOR_DISAGREEMENTS_PROMPT = """\
@@ -263,7 +258,7 @@ def _supervisor_finalize(
 #
 # Three phases: (1) identify disagreements, (2) run clarifying searches,
 # (3) finalize with evidence. The supervisor only overrides the ensemble
-# when its confidence is "high" - preserving agent diversity by default.
+# when its confidence is "high", preserving agent diversity by default.
 
 
 # %%
@@ -628,13 +623,19 @@ class AIAForecaster:
 
 
 # %% [markdown]
-# ## Captured questions
+# ## The Two Questions
 #
-# The default uses the questions stored in the genuine June traces. Live mode uses
-# the pinned question definitions below; inspect their resolution dates before using
-# them as current forecasts. To study a new unresolved event, replace the question
-# and retain its resolution rule and source. Historical web research is a diagnostic:
-# publication dates do not establish historical page content or remove model foreknowledge.
+# The pipeline runs end to end on both of the chapter's pinned questions:
+# `CHAPTER_CLEAR_QUESTION`, the recession question where the research agents landed close
+# together in [`06_multi_agent_research`](06_multi_agent_research.ipynb), and
+# `CHAPTER_CONTESTED_QUESTION`, the rate-hike question where they spread out in
+# [`07_adversarial_debate`](07_adversarial_debate.ipynb). Running both shows what each stage
+# does when the panel already agrees and when it does not.
+#
+# Both were unresolved when the captures were taken, which is what makes them honest forecasts
+# and also what makes them unscoreable; the replay cell reports each capture's date from the
+# record. Replayed by default; `RUN_LIVE = True` with `ANTHROPIC_API_KEY` and `TAVILY_API_KEY`
+# forecasts current questions instead.
 
 # %%
 questions = [get_chapter_clear_question(), get_chapter_contested_question()]
@@ -650,6 +651,11 @@ for q in questions:
 
 # %% [markdown]
 # ## Running the Pipeline
+
+# %% [markdown]
+# Live execution is isolated in one helper. The publication path below never
+# calls it while `RUN_LIVE` remains false.
+
 
 # %%
 results: list[ForecastResult] = []
@@ -738,19 +744,14 @@ print(f"Total tokens across {len(results)} questions: {grand_total.total_tokens:
 summary_df
 
 # %% [markdown]
-# ## Inspect the captured evidence
+# ## The Full Trace, One Question
 #
-# The October 2 capture ran this implementation with Sonnet 4.6 and Tavily. It
-# retains the written question, sources, model messages, debate and supervisor.
-# The supervisor returned an abbreviated URL rather than the retrieved source's
-# full URL; its update was rejected and the supported ensemble retained. This
-# shows an acceptance check operating on a genuine response.
-#
-# The June captures remain available as `legacy_capture`. They predate the current
-# acceptance checks and statistical correction. Evidence presence and a citation
-# make reasoning inspectable; they do not establish that every claim is correct.
-# Search may also retrieve crowd forecasts even when no market price is passed
-# in the prompt. Inspect these dependencies before claiming an independent signal.
+# The untruncated record for the first question, stage by stage, through the same
+# `agent_observability` helpers used across the chapter: each research agent's queries,
+# documents and rationale; the debate transcript with both sides' complete arguments; and the
+# supervisor's reconciliation, including the disagreements it flagged, the clarifying searches
+# it ran, and the probability it returned. All of it is in the saved JSON, so this readout can
+# be rebuilt from disk with `RunTrace.load` long after the run.
 
 # %%
 r = results[0]
@@ -764,6 +765,9 @@ if r.aggregation:
     print(f"  inputs: {r.aggregation.input_probabilities}")
     print(f"  raw mean: {r.aggregation.raw_probability:.4f}")
     print(f"  extremized: {r.aggregation.extremized_probability}")
+
+# %% [markdown]
+# ### Debate
 
 # %%
 if r.debate:
@@ -840,19 +844,33 @@ print(run_traces[0].to_json()[:1200])
 print("Inspect the complete JSON in forecast_traces/ for the remaining messages and sources.")
 
 # %% [markdown]
-# The fresh capture verifies component execution and artifact retention on an
-# unresolved question. It provides no accuracy score. The original June captures
-# remain useful for inspecting earlier component interactions. Confidence is
-# model-reported or heuristic, not an independently calibrated reliability estimate.
-
-# %% [markdown]
-# ## Key takeaways
+# ## Key Takeaways
 #
-# 1. Evidence and status flow through composition; abstentions are not neutral forecasts.
-# 2. Mean aggregation and fixed correction have separate roles; avoid double extremization.
-# 3. Supervisor confidence gates an override, and its evidence remains inspectable.
-# 4. Debate is an optional adaptation whose benefit requires a separate experiment.
-# 5. Captured results and fresh runs have different dates and configurations.
+# 1. **The value of a pipeline is that each stage is inspectable, not that each stage improves
+#    the answer.** Four stages give four places to look when a forecast is wrong. Whether any
+#    of them made it better is a scoring question, and scoring needs resolved questions.
+# 2. **An override needs a gate, and the gate needs a rule.** The supervisor can replace the
+#    ensemble only at high stated confidence, blends at medium, and is ignored at low. Without
+#    that, one model's second opinion silently outranks three agents' evidence.
+# 3. **A stated confidence is not a measured one.** Both the supervisor's own label and the
+#    scalar this pipeline attaches to the final probability are conventions. They order
+#    outcomes; they do not estimate anything.
+# 4. **Declare every constant that moves the final number in one place.** The blend
+#    weights, the correlation and the override thresholds decide the output, and a reader who
+#    cannot find them cannot evaluate the pipeline.
+# 5. **The stage-by-stage record is the deliverable.** One JSON file per question holds every
+#    prompt, every document, every intermediate probability, and it is what makes a forecast
+#    reviewable months later.
 #
-# **Next:** [evaluation and governance](09_evaluation_and_governance.ipynb) scores a
-# separate historical panel with recovered labels and explicit limitations.
+# **Known limitations of what is built here.** Both questions were unresolved when captured, so
+# nothing in this notebook can be scored and no claim about accuracy is available from it. The
+# market price is passed to every research agent, so the pipeline's distance from the market
+# is not an independent comparison. The blend weights and confidence scalars are conventions,
+# and no experiment here shows the four-stage output is better than the three-agent mean.
+#
+# **Next**: [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) builds the
+# scoring rules, calibration curves and security controls a pipeline like this needs before
+# anyone acts on it.
+#
+# **Book**: Section 24.7 covers the pipeline architecture and section 24.9 the production
+# considerations that follow from it.

@@ -237,7 +237,7 @@ class OpenAIChatClient:
         # client (e.g. deepseek-v4-pro via OpenRouter) spend completion tokens on
         # an internal reasoning trace BEFORE the visible answer. With a 1200 cap,
         # a long reasoning turn exhausts the budget and the API returns empty
-        # `content` (finish_reason="length") — the agent then degenerates to a
+        # `content` (finish_reason="length") - the agent then degenerates to a
         # 0.5 "JSON parse error" forecast. The production deepseek profile sets
         # 8000 for the same reason; 4000 is ample for the single-agent notebooks.
         # max_tokens is only a ceiling, so non-reasoning models pay nothing extra.
@@ -459,12 +459,12 @@ class OllamaChatClient:
 def create_llm_client(provider: str = "") -> LLMClient:
     """Create an LLM client from the unified ``.env`` config.
 
-    The clean path is three intent-named variables — the same ones the ``aia``
+    The clean path is three intent-named variables - the same ones
     system reads, so one ``.env`` drives the notebooks and the system:
 
         LLM_PROVIDER   one of: deepseek, openrouter, openai, anthropic, google,
                        ollama, mock. The base URL for each is PREDEFINED in
-                       ``provider_presets.PROVIDER_PRESETS`` — never a user setting.
+                       ``provider_presets.PROVIDER_PRESETS`` - never a user setting.
         LLM_API_KEY    your key for that provider.
         LLM_MODEL      optional model override; omit to use the provider default.
 

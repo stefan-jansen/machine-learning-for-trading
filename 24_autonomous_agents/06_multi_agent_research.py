@@ -52,13 +52,13 @@
 # [`05_aggregation_math`](05_aggregation_math.ipynb) (the aggregation rules).
 
 # %%
+"""Multi-Agent Research - parallel agents on one shared question."""
+
 import sys
 
 from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
-
-"""Multi-Agent Research - parallel agents on one shared question."""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -100,16 +100,22 @@ MAX_SEARCH_RESULTS = 5
 # %% [markdown]
 # ## Setup
 #
-# All agents share the same LLM client and search provider. Each gets a unique
-# `agent_id` but the same prompt and capabilities. The question is the pinned
-# `CHAPTER_CLEAR_QUESTION` from `agent_fixtures.py` (*"Will the US enter a
-# recession by the end of 2026?"*), a macro forecast the Polymarket market priced
-# at `p_yes ≈ 0.18` on the 2026-06-09 capture date. Professional growth forecasts
-# and recession-odds trackers are broadly and consistently reported, so the agents
-# share a strong evidence base, and any spread from sampling alone has to show up
-# here. NB07 switches to the pinned `CHAPTER_CONTESTED_QUESTION` (*"Will the Fed
-# hike rates in 2026?"*, where credible evidence cuts both ways) and gets a wider
-# spread, so watch which question each notebook forecasts.
+# All three agents share one model client and one search client. Each gets a distinct
+# `agent_id` and nothing else: the same prompt, the same tools, the same sampling temperature.
+# Nothing is built in to make them disagree. Two channels remain open: the model's own
+# sampling, and the different documents each agent's searches return. The timelines below show
+# the second; nothing here separates the two.
+#
+# The question is `CHAPTER_CLEAR_QUESTION` from `agent_fixtures.py`, *"Will the US enter a
+# recession by the end of 2026?"*, carrying the prediction-market probability recorded on
+# 2026-06-09.
+#
+# **That market probability was included in every prompt.** It is passed to `agent.run` as
+# `market_price` below, so each agent saw the market's answer before it searched. That makes
+# the comparison between the agents and the market circular, and it is why the market line in
+# the chart further down is labelled as context rather than as a benchmark. A run designed to
+# test the agents against the market would withhold it, as
+# [`04_research_agent`](04_research_agent.ipynb) does.
 
 # %%
 if RUN_LIVE:
@@ -185,12 +191,11 @@ else:
 artifacts.sort(key=lambda a: a.agent_id)
 
 # %% [markdown]
-# ## Agent Results
+# ## What Each Agent Returned
 #
-# Each agent produces a probability, confidence, sentiment, and evidence
-# trail. The Polars DataFrame puts these in sortable columns next to the
-# Polymarket market's own implied probability - readers can compare every
-# agent's forecast against the market in a single readout.
+# Probability, confidence, sentiment, and how much evidence each one gathered getting there.
+# The last two columns are worth as much as the first: two agents landing on the same
+# probability after two searches and after six searches did not do the same thing.
 
 # %%
 total_tokens = TokenUsage()
@@ -216,50 +221,38 @@ print(f"Total agent tokens:         {total_tokens.total_tokens:,}\n")
 panel_df
 
 # %% [markdown]
-# ## Agent Reasoning
+# ## Reading the Agents, Not the Aggregate
 #
-# The panel above shows only the final probability and confidence; the *why*
-# behind each forecast is invisible. `show_agents` from `agent_observability`
-# renders the full captured timeline for each agent - every search query, the
-# documents it retrieved (title, date, URL, and a snippet of the body), and the
-# untruncated rationale, key findings, and uncertainties - so the reader can
-# trace question → evidence → interpretation → probability step by step. Each
-# `artifact` carries this in its `traces`, the same `AgentTrace` records built
-# in NB04; the renderer just lays them out in chronological order. Reading the
-# timelines side by side is how you tell apart the two cases that matter: agents
-# that reach a similar number by genuinely different search paths (expected),
-# versus agents pulling identical evidence and reasoning in lockstep (a sign the
-# stochasticity has been switched off: investigate the temperature setting or a
-# bug).
+# The table gives each agent's answer and none of its reasoning. `show_agents` renders the full
+# captured timeline for all three: every query, the documents it returned with title, date, URL
+# and a snippet, and the untruncated rationale, key findings and uncertainties. Each artifact
+# carries this in its `traces`, the `AgentTrace` records built in
+# [`04_research_agent`](04_research_agent.ipynb).
+#
+# Read side by side, the timelines answer the question the bar chart cannot. Three agents
+# reaching similar numbers by different search paths is three observations. Three agents
+# pulling the same documents and reasoning in step is one observation printed three times, and
+# aggregating it produces confidence that nothing earned. The second case is what a panel of
+# identical agents drifts toward, and it is worth checking before any aggregation is trusted.
 
 # %%
 print(show_agents(artifacts))
 
 # %% [markdown]
-# **Interpretation**: On this one-directional question, the three agents land
-# close together, at $p_{\text{yes}}$ of 0.12, 0.22, and 0.22. All three are
-# bearish, at confidences from 0.56 to 0.76, and the captured search traces above
-# draw on the same mainstream sources (professional-forecaster surveys, NBER
-# business-cycle dating, recession-odds trackers). The agents reached those
-# probabilities by different search paths, but the evidence pointed one way, so
-# the forecasts cluster. That small spread is the expected outcome here, and it
-# is negligible next to the much larger disagreement the *contested* question
-# provokes in NB07. The result to flag would be the opposite: identical searches
-# and identical reasoning across agents, which would mean the stochasticity has
-# been switched off. Where a question is genuinely contested, the disagreement to
-# aggregate comes from designed-in structure (distinct roles, adversarial
-# framing), which is the motivation for NB07 and NB08.
-
-# %% [markdown]
-# ## Aggregation: Comparing Methods
+# ## Aggregating the Panel
 #
-# Three aggregation approaches applied to the same agent outputs:
+# Three ways to turn three probabilities into one, from
+# [`05_aggregation_math`](05_aggregation_math.ipynb):
 #
-# | Method | What it does |
-# |--------|-------------|
-# | Simple mean | Ignores correlation structure |
-# | Neyman | Accounts for correlation, pushes away from base rate |
-# | Weighted Neyman | Also incorporates per-agent confidence |
+# | Method | What it assumes |
+# |---|---|
+# | Simple mean | Nothing beyond the forecasts themselves |
+# | Neyman | A pairwise correlation, supplied rather than estimated |
+# | Weighted Neyman | That correlation, plus that the confidence values mean something |
+#
+# Only artifacts that actually produced a forecast may enter any of the three. An agent that
+# exhausted its step budget carries the loop's fallback probability, and averaging that in
+# would pull the panel toward even odds on the strength of an agent that never answered.
 
 # %%
 forecast_artifacts = [a for a in artifacts if a.p_yes is not None]
@@ -305,20 +298,17 @@ agg_df = pl.DataFrame(
 agg_df
 
 # %% [markdown]
-# **Finding**: Because the agents nearly agree and carry similar confidence,
-# weighted Neyman is virtually indistinguishable from unweighted Neyman - both
-# extremize the ~0.19 consensus away from the 0.5 base rate (to 0.071 and 0.063
-# respectively) at $\rho=0.3$. Weighting only changes the aggregate when
-# per-agent probabilities or confidences differ materially, which they barely do
-# here. The shift from the simple mean (0.187) to the Neyman aggregate (0.071) is
-# structural, driven by the correlation assumption rather than by any real
-# cross-agent disagreement.
+# Both Neyman variants sit further from the base rate than the mean, which is what
+# extremization does. The gap between them is the whole contribution of the confidence
+# weights, and those weights are a function of how far each probability sits from even odds
+# rather than of anything measured, so the two lines being close is not reassurance.
 
 # %% [markdown]
-# ## Sensitivity: Correlation Assumption
+# ## How Much the Correlation Assumption Decides
 #
-# The correlation parameter $\rho$ is the most important assumption in Neyman
-# extremization. Here we sweep it to show the impact.
+# $\rho$ is the one input to Neyman extremization that nothing in this run measures, and it is
+# the input the answer is most sensitive to. Sweeping it over the same three forecasts shows
+# how much of the aggregate is evidence and how much is assumption.
 
 # %%
 correlation_rows = []
@@ -337,16 +327,42 @@ correlation_df = pl.DataFrame(correlation_rows)
 correlation_df
 
 # %% [markdown]
+# At the dependent end the panel is credited with barely more than one observation and the
+# aggregate settles onto the mean. At the independent end it is credited with three, the
+# formula pushes so far below the base rate that it leaves the unit interval, and what the
+# chart shows there is the floor. The agents' own forecasts never move along any of these
+# curves. Everything that does move is the assumption.
+#
+# A clamp that carries the answer is worth naming rather than tolerating. It is not part of
+# the theory: it exists so the function always returns something a downstream consumer can
+# treat as a probability, and where it binds, the method has failed on this panel rather than
+# answered it. The reading to take from the left of this chart is that a three-agent panel this
+# far from even odds, under an independence assumption, is mapped outside the unit interval by
+# this formula, which therefore has no answer to give: not that the aggregate is whatever the
+# floor happens to be set to, and not that these three agents are in fact correlated.
+#
+# Nothing in this run estimates $\rho$, and the confidence values feeding the weighted variant
+# are the extremity heuristic from [`04_research_agent`](04_research_agent.ipynb) rather than
+# measured skill. So the mean is the number to report, and the curve is what says how much
+# would be at stake in estimating the correlation properly.
+
+# %% [markdown]
+# ## What the Next Stages Receive
+#
+# Debate and supervisor reconciliation do not read the artifacts directly. They read this
+# summary: the agent's id, its probability and confidence, the opening of its rationale, and,
+# where the model enumerated any, its first few key findings. None of these three rationales
+# enumerates anything - all three are continuous prose - so no findings block appears below,
+# which is what [`04_research_agent`](04_research_agent.ipynb) means when it says the field
+# records how the model chose to present its reasons. Everything else - the full search trail,
+# the evidence, the uncertainties - stays in the record and out of the next prompt, which is a
+# context budget decision as much as a design one.
+
+# %% [markdown]
 # The correlation values are illustrative assumptions, not measured dependence
 # among these models. Confidence weights are model-reported or heuristic and are
 # not calibrated reliability estimates. Use the sensitivity sweep to see how those
 # assumptions change the arithmetic, not to establish a performance advantage.
-
-# %% [markdown]
-# ## Agent Summaries (Downstream Format)
-#
-# The supervisor (NB08) and debate (NB07) stages receive agent outputs in this
-# summary format.
 
 # %%
 all_summaries = "\n\n---\n\n".join(format_agent_summary(a) for a in forecast_artifacts)
@@ -355,12 +371,10 @@ print(all_summaries)
 # %% [markdown]
 # ## Search Execution Audit
 #
-# The per-agent reasoning above shows each query and the titles it returned.
-# This cell rolls the same `traces` into one sortable table - every search,
-# which agent issued it, and how many results came back - so the reader can
-# scan the whole panel's evidence-gathering at a glance. Overlapping query sets
-# across agents explain the clustered forecasts: when the agents retrieve the
-# same evidence base, they reach similar answers.
+# Rolling every agent's search steps into one table shows the panel's evidence-gathering at a
+# glance: who asked what, and how much came back. Queries appearing in more than one agent's
+# rows are shared retrieval, which is one of the two things that could explain agreement; the
+# table shows the overlap and does not, on its own, attribute the spread to it.
 
 # %%
 audit_df = pl.DataFrame(
@@ -377,6 +391,13 @@ audit_df = pl.DataFrame(
     ]
 )
 audit_df
+
+# %% [markdown]
+# Both counts bound what this run can be used for. Every prompt carried the market price, so
+# the agents were told the answer the market had reached before they searched, and their
+# closeness to it says nothing about their skill. No result carries a publication date, so
+# nothing establishes that a document was available before the question was asked; the trace
+# reproduces what the agents saw and cannot date it.
 
 # %% [markdown]
 # ## Persisting the Full Run Trace
@@ -425,15 +446,17 @@ else:
     )
 
 # %% [markdown]
-# ## Replaying the Raw Conversation
+# ## The Raw Conversation
 #
-# The timeline view earlier is the *parsed* trace; this is the *raw* one. For
-# the first agent, `replay_llm_calls` prints the exact messages the model
-# received - system prompt, question, and each tool result fed back in - next
-# to the untruncated JSON it returned at every step. This is the audit ground
-# truth: the parsed forecast, the search queries, and the rationale all derive
-# from these responses, and nothing here is summarized away. Pass
-# `content_chars=None` to dump the complete payloads.
+# The timeline above is the parsed trace. This is what the model actually received and sent.
+# For the first agent, `replay_llm_calls` prints each message in order - the system prompt, the
+# question, and every tool result fed back in - beside the untruncated JSON returned at each
+# step.
+#
+# This is where an audit ends up when a forecast looks wrong. The parsed rationale, the search
+# queries and the probability are all derived from these responses, so a disagreement between
+# the summary and the source is settled here. Pass `content_chars=None` for the complete
+# payloads.
 
 # %%
 agent_0_calls = [c for c in llm_calls if c.label == "agent_0"]
@@ -442,28 +465,34 @@ print(replay_llm_calls(agent_0_calls, content_chars=600))
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Forecast spread depends on the question, not the temperature.** On this
-#    one-directional question, the three agents landed in a tight cluster
-#    (0.12–0.22), all bearish and drawing on the same sources, a spread far
-#    smaller than the disagreement NB07 finds on a contested question. Parallel
-#    agents are a useful baseline, not a diversity mechanism in themselves.
-# 2. **Weighted Neyman tracks unweighted Neyman closely** (0.063 vs 0.071):
-#    weighting moves the aggregate only when per-agent confidences differ enough
-#    to matter, and here they are close.
-# 3. **The aggregate's distance from the mean is driven by the correlation
-#    assumption $\rho$**, not by cross-agent disagreement: at $\rho=0$ the Neyman
-#    aggregate drops to 0.01; at $\rho=0.9$ it barely leaves the simple mean
-#    (0.176 vs 0.187). For LLM agents using overlapping sources,
-#    $\rho \in [0.3, 0.5]$ remains the reasonable default.
-# 4. **ThreadPoolExecutor** still buys real wall-clock speedup, but the saved
-#    minutes have to be weighed against the duplicated cost.
-# 5. **Agent summaries** are the structured input for downstream debate (NB07)
-#    and supervisor reconciliation (NB08), where a contested question supplies the
-#    disagreement those stages reconcile.
+# 1. **Identical agents diverge, and that is the panel's entire value.** Nothing distinguishes
+#    these three: same prompt, same tools, same client, same sampling temperature. Three
+#    different answers come out anyway, from the model's sampling and from what each agent's
+#    searches returned, in proportions this run does not separate.
+# 2. **A panel is only worth aggregating if its members are worth aggregating separately.**
+#    Read the timelines before the aggregate. Agents converging by different routes is evidence;
+#    agents pulling identical documents and reasoning in step is one agent run three times, and
+#    the aggregate will report false confidence.
+# 3. **Extremization moves the answer more than the panel does.** Sweeping the correlation
+#    assumption over the same three forecasts moves the aggregate further than the forecasts
+#    themselves are apart. With no estimate of that correlation, the mean is the number to
+#    report and the Neyman values are a sensitivity analysis around it.
+# 4. **An agent handed the market's own probability is not an independent check on it.** This
+#    capture put the market price in every prompt, so the agents' proximity to it is not
+#    evidence about their skill.
+# 5. **Parallelism is a thread pool and a per-agent tracer.** Agents share the model client and
+#    the search client, so both have to be safe under concurrent calls; each gets its own
+#    tracer, which is what keeps the captured conversations correctly attributed.
 #
-# **Next**: [`adversarial_debate`](07_adversarial_debate.ipynb) - bull vs bear
-# debate on a contested question, where credible evidence supports both sides.
+# **Known limitations of what is built here.** One capture, one question, three agents: the
+# spread has no error bar and nothing establishes it would recur. The confidence values feeding
+# the weighted aggregate are the extremity heuristic from
+# [`04_research_agent`](04_research_agent.ipynb), not measured skill. No retrieved result
+# carries a publication date, so nothing here can be scored as a point-in-time forecast. And
+# the agents differ only by sampling: a panel built to be diverse would vary the model, the
+# search index, or the framing of the question.
 #
-# **Book**: Section 24.7 uses this run to show that forecast spread reflects the
-# question's evidence: when it points one way, parallel agents agree, and the
-# debate and supervisor stages earn their cost on genuinely contested questions.
+# **Next**: [`07_adversarial_debate`](07_adversarial_debate.ipynb) takes a panel that disagrees
+# and makes the disagreement do work, by having the agents argue the two sides.
+#
+# **Book**: Section 24.7 presents multi-agent forecasting systems.

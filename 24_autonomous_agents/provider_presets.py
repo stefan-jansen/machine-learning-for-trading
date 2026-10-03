@@ -1,16 +1,17 @@
-"""Provider presets — the ONE place base URLs and default models are fixed.
+"""Provider presets - the one place base URLs and default models are fixed.
 
 Students never type a base URL. They pick a provider by name, paste one key, and
 (optionally) name a model:
 
-    LLM_PROVIDER=deepseek          # which provider — base URL is predefined below
+    LLM_PROVIDER=deepseek          # which provider - base URL is predefined below
     LLM_API_KEY=sk-...             # your key for that provider
     LLM_MODEL=deepseek-v4-pro      # optional; omit to use the default below
 
 Everything else (the OpenAI-compatible base URL, the default model) is predefined
-here, per provider — not a user setting. The ``aia`` system mirrors this exact
-table in ``src/aia_forecaster/config/providers.py``; a parity test keeps the two
-in lockstep so the notebooks and the system always agree.
+here, per provider, and is not a user setting. This table is the only place in the
+chapter that names an endpoint: a notebook that hardcoded one would have to be
+edited in step with every other, which is how a chapter ends up pointing half its
+notebooks at a host that has moved.
 
 Fields per provider:
   - ``client``        which client class builds it. OpenAI-compatible hosts

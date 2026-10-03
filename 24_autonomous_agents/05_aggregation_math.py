@@ -45,13 +45,13 @@
 # **Prerequisites**: None. Nothing here calls a model.
 
 # %%
+"""From Opinions to Probabilities - aggregation math for multi-agent forecasting."""
+
 import sys
 
 from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
-
-"""From Opinions to Probabilities - aggregation math for multi-agent forecasting."""
 
 import math
 
@@ -260,24 +260,30 @@ show_with_alt(
 )
 
 # %% [markdown]
-# **Interpretation**: Platt scaling with $a=1.5$ is appropriate for agents that are
-# systematically under-confident (e.g., always predicting near 50-60%). The $d$
-# parameter handles asymmetric miscalibration.
-#
-# **Warning**: Do not apply Platt scaling on top of Neyman extremization - both
-# push probabilities away from 0.5, leading to double extremization.
+# Above one the curve bows away from the diagonal and probabilities move toward the ends;
+# below one it bows toward the middle. Which direction a given forecaster needs is not
+# something the curve can say. It is measured against resolved forecasts, and the measurement
+# has to be made on observations the transformation was not fitted to, or it will report the
+# improvement it was constructed to produce.
 
 # %% [markdown]
-# ## Weighted Neyman Extremization
+# ## Weighting the Panel
 #
-# When agents have different confidence levels, we should weight their estimates
-# accordingly. **Weighted Neyman** uses the Herfindahl index to compute an
-# effective sample size from confidence weights:
+# Agents are not always interchangeable. When a design can defend giving one more weight than
+# another - a specialist on the sector in question, an agent with a track record on this class
+# of question - the mean becomes a weighted mean, and the panel size has to be adjusted to
+# match. Three agents where one carries most of the weight is not three forecasters.
 #
-# $$\text{HI} = \sum w_i^2, \quad n_{\text{eff}} = \frac{1}{\text{HI}}$$
+# The **Herfindahl index** measures that concentration. It is the sum of the squared normalized
+# weights, and its reciprocal is the number of equally-weighted forecasters that would be as
+# concentrated:
 #
-# A uniform weighting gives $n_{\text{eff}} = n$ (same as standard Neyman).
-# Concentrating weight on one agent reduces $n_{\text{eff}}$ toward 1.
+# $$\text{HI} = \sum w_i^2, \qquad n_{\text{weight}} = \frac{1}{\text{HI}}$$
+#
+# Uniform weights give back the panel size exactly; putting everything on one agent gives one.
+# The correlation adjustment then applies on top,
+# $n_{\text{adjusted}} = n_{\text{weight}} / [1 + (n_{\text{weight}} - 1)\rho]$, and it is the
+# adjusted figure that becomes $d^2$.
 
 # %%
 # Three agents with different confidence levels
@@ -457,29 +463,45 @@ show_with_alt(
 )
 
 # %% [markdown]
-# **Finding:** With $n_{\text{eff}} = n / (1 + (n-1)\rho)$ and $\rho=0.3$, ten agents have effective $N\approx2.70$. The limit as $n$ grows is $1/\rho\approx3.33$. This is an analytical consequence of the assumed correlation, not a measured property of our models. Additional agents increase calls roughly in proportion to count; this curve alone cannot select an optimal team size.
+# Effective size rises steeply for the first few agents and then flattens against a ceiling
+# that depends only on the correlation: for fixed $\rho > 0$ it approaches $1/\rho$ however
+# many agents are added. That ceiling is where the budget question gets its answer. Agents past
+# the point where the curve bends are paying full price for a fraction of an observation, and
+# the way to buy more information is to lower $\rho$ rather than to raise $n$: different
+# evidence, different framings, different models.
+#
+# This is arithmetic, not a measurement. It says what the formula implies for an assumed
+# correlation, and the correlation is the thing nobody has estimated.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **The arithmetic mean is a baseline**; extremization adds assumptions about
-#    shared information and error correlation that require evaluation.
-# 2. **Neyman extremization** scales the mean around a base rate using
-#    $d = \sqrt{n / (1 + (n-1)\rho)}$; probability dispersion is not an input.
-# 3. **Weighted Neyman** accounts for heterogeneous confidence via the Herfindahl
-#    index, preventing over-extremization when one agent dominates
-# 4. **Correlation is the binding constraint**: At $\rho=0.5$, going from 3 to 8
-#    agents barely moves the aggregate
-# 5. **Effective N approaches $1/\rho$**: at $\rho=0.3$ the analytical limit
-#    is about 3.33, without implying a measured optimal agent count.
-# 6. **Log-odds extremization** and `find_optimal_d` provide principled per-model
-#    calibration tuned on resolved forecasts (tuning quality scales with the size
-#    of the resolved-forecast panel)
+# 1. **The mean is the baseline anything else has to beat, out of sample.** Extremization and
+#    calibration are adjustments to it, and an adjustment fitted on the data it is evaluated on
+#    has not been evaluated.
+# 2. **Extremization is a claim about independence, not about agreement.** Agents that agree
+#    because they read the same three articles carry one observation between them. The whole
+#    question is $\rho$, and this formula takes it as an input rather than estimating it.
+# 3. **The panel's spread does not enter the formula.** Three agents at 20, 65 and 90 percent
+#    and three within a point of each other produce the same aggregate at the same assumed
+#    correlation. If dispersion should matter, it has to enter through an estimated dependence
+#    model or a different rule.
+# 4. **Adding agents runs into a ceiling that depends on the correlation, not the budget.**
+#    Effective size approaches $1/\rho$, so diversity is bought by changing what the agents
+#    read, not by running more of them.
+# 5. **A calibration parameter is fitted, frozen, and then evaluated on observations it never
+#    saw.** Any other order measures how well a curve fits the points it was drawn through.
 #
-# **Next**: [`multi_agent_research`](06_multi_agent_research.ipynb) - test
-# whether running multiple identical research agents on the same question
-# actually produces diversity worth aggregating, or whether the panel
-# collapses to a single mode.
+# **Known limitations of what is built here.** Every result on this page is conditional on a
+# correlation nobody measured, and the panel is assumed exchangeable: one $\rho$ for every
+# pair. The clamps that keep the output well-defined are not part of the theory, so an
+# aggregate near the bounds is partly an artifact of them. The calibration demonstration runs
+# on simulated forecasts drawn from a known generating process, which is the easiest possible
+# case: real forecast panels are small, resolve slowly, and are not identically distributed.
+#
+# **Next**: [`06_multi_agent_research`](06_multi_agent_research.ipynb) asks whether running
+# several identical research agents on one question produces a panel worth aggregating at all,
+# or whether they land in the same place.
 #
 # **Book**: Section 24.7 covers aggregation theory, including connections to
 # Condorcet's jury theorem and prediction market design.

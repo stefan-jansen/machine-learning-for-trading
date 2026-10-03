@@ -23,10 +23,16 @@
 # the strongest case for yes and another the strongest case for no, show each the other's
 # argument, and watch what happens to the distance between them over a few rounds.
 #
-# The probability gap and transcript show how the two positions change.
-# Convergence can reflect new evidence, persuasion or shared error. Inspect
-# the arguments and sources; the gap alone cannot establish accuracy or
-# whether debate improves on the mean.
+# The distance is the whole output. If it closes, each side had evidence the other had not
+# weighed and the debate produced something the average could not. If it stays open, both sides
+# read the same evidence and reached opposite conclusions, and the midpoint reports how wide
+# the disagreement is rather than a sharper forecast. Those two cases look identical in a single
+# blended number, which is why this notebook draws the trajectory before it computes one.
+#
+# A gap that closes is still only a gap that closed. The two sides may have exchanged evidence,
+# one may have been talked out of a correct position, or both may share the same error. The
+# transcript and the sources are what distinguish those; the trajectory on its own cannot, and
+# neither establishes that debating beats averaging.
 #
 # **Learning Objectives**:
 # - Run a multi-round debate in which each side argues against the other's previous position
@@ -35,8 +41,10 @@
 # - Read the gap trajectory to tell a debate that moved something from one that did not
 # - Fold a debate midpoint back into an aggregate under a stated weight, and say what that
 #   weight is a claim about
-# - Inspect disagreement, probability shifts and call cost, then specify the resolved
-#   outcomes and matched comparisons needed to judge forecasting value
+# - Decide whether a debate was worth running, from the panel's disagreement and the gap, not
+#   from the movement of a blend that moves by construction
+# - State what a claim that debate improves a forecast would require: resolved outcomes and
+#   matched runs with and without it, neither of which this notebook has
 #
 # **Book Reference**: Chapter 24, Section 24.7 (Multi-Agent Forecasting Systems -
 # Debate Pattern)
@@ -59,13 +67,13 @@
 # debates a current question instead and will not reproduce these values.
 
 # %%
+"""Bull vs Bear Debate - adversarial stress-testing of forecasts."""
+
 import sys
 
 from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
-
-"""Bull vs Bear Debate - adversarial stress-testing of forecasts."""
 
 
 import matplotlib.pyplot as plt
@@ -103,6 +111,12 @@ N_AGENTS = 3
 DEBATE_ROUNDS = 3
 CONSENSUS_THRESHOLD = 0.05
 MAX_STEPS = 5
+
+# How much of the debate midpoint the final forecast takes. Declared here rather
+# than written into the blend because it is a convention, not a fitted value, and
+# a reader changing it is the point: 0.3 keeps the aggregate of three independent
+# research runs in charge of a number the debate adjusts.
+DEBATE_WEIGHT = 0.3
 
 # %% [markdown]
 # ## Debate Prompts: Bull
@@ -321,9 +335,10 @@ class DebateAgent:
 # %% [markdown]
 # ## Setup: Run Research Agents
 #
-# We first run the research agents from NB06 to establish baseline probability
-# estimates that the debate will stress-test - this time on the pinned contested
-# question, where the agents are expected to disagree.
+# The research agents from
+# [`06_multi_agent_research`](06_multi_agent_research.ipynb) run first, to establish the
+# baseline estimates the debate stress-tests. This time they run on the pinned contested
+# question, where they are expected to disagree.
 
 # %%
 artifacts: list[AgentForecastArtifact] = []
@@ -374,14 +389,12 @@ for a in artifacts:
 print(f"\nAggregate (Neyman ρ=0.3): {aggregate.extremized_probability:.2f}")
 
 # %% [markdown]
-# ### Pre-debate agent timelines
+# ### Where the agents started
 #
-# Before the debate stress-tests them, here is the full captured run for each
-# research agent - every query, the documents retrieved, and the untruncated
-# rationale - rendered by the same `show_agents` observability helper used in
-# NB06. On this contested question the agents enter the debate already
-# disagreeing; the timelines show *which* evidence pulled each one toward its
-# starting probability.
+# Before any argument, here is each research agent's full captured run: every query, the
+# documents it retrieved, and its untruncated rationale, rendered by the same `show_agents`
+# helper used in [`06_multi_agent_research`](06_multi_agent_research.ipynb). The agents enter
+# this debate already disagreeing, and the timelines say which evidence pulled each one where.
 
 # %%
 print(show_agents(artifacts))
@@ -392,6 +405,14 @@ print(show_agents(artifacts))
 # The `DebateAgent` makes real LLM calls for each round. The bull and bear
 # prompts include the agent summaries so both sides argue from the same
 # evidence base.
+#
+# Both debaters are anchored on the research panel's aggregate, which the cell below reads off
+# the `AggregationResult`. That field is `None` when there was nothing to aggregate, and the
+# fallback to the plain mean is meant for exactly that case. Testing it with `or` would also
+# fall through on a probability of zero, which is a different thing entirely: `neyman_extremize`
+# cannot return one today, because it clamps just inside the unit interval, but that is a
+# property of one clamp rather than of the field. Testing against `None` says what is meant
+# whatever the clamp does next.
 
 # %%
 agg_p = aggregate.extremized_probability or aggregate.raw_probability
@@ -456,23 +477,22 @@ rounds_df = pl.DataFrame(
 rounds_df
 
 # %% [markdown]
-# The table above is the *shape* of the debate; the transcript below is its
-# *substance*. `show_debate_transcript` prints each round in full - both sides'
-# complete arguments and the key evidence they cited, with nothing truncated -
-# so the reader can see not just that the gap stayed open but the reasoning each
-# side used to hold its ground. This is the debate counterpart to NB06's
-# per-agent timelines: the same auditing discipline applied to the adversarial
-# stage.
+# The table gives the shape of the debate and the transcript below gives its substance.
+# `show_debate_transcript` prints each round in full: both sides' complete arguments and the
+# key evidence they cited, with nothing truncated. The table says whether the gap stayed open;
+# only the transcript says what reasoning each side used to hold its ground. It is the debate
+# counterpart to the panel's per-agent timelines.
 
 # %%
 print(show_debate_transcript(result))
 
 # %% [markdown]
-# ## Visualizing Probability Trajectory
+# ## The Gap Across Rounds
 #
-# This figure tracks the bull-bear gap across rounds: whether it narrows as each
-# side takes on the other's strongest arguments, or holds when the disagreement
-# is genuine.
+# One figure answers the question the whole notebook is about: does adversarial pressure close
+# the distance between the two sides, or does it leave them where they started? The shaded band
+# is the disagreement itself, and the dotted line is the aggregate the research agents reached
+# before either debater said anything.
 
 # %%
 if len(result.rounds) >= 2:
@@ -510,6 +530,30 @@ if len(result.rounds) >= 2:
     )
 
 # %% [markdown]
+# A closing gap is the productive case: each side gives ground on the other's strongest point,
+# and the final midpoint carries a reconciliation that averaging the research agents could not
+# have produced. A gap that stays the same width means nothing was reconciled, whether or not
+# both sides moved - they can drift together, which shifts the midpoint while leaving the
+# disagreement exactly as wide as it was.
+#
+# So the midpoint on its own says nothing about how much the two sides disagree. A pair of
+# forecasts far apart and a pair close together have the same midpoint whenever they are
+# centred on the same point. Disagreement is the gap, which is what the shaded band draws, and
+# a midpoint reported without it hides how much of the question is unsettled.
+
+# %% [markdown]
+# ## Folding the Debate Back In
+#
+# The debate produces a midpoint. Turning that into a forecast means deciding how much of it
+# to believe relative to the aggregate the research agents produced, and there is no fitted
+# answer to that: `DEBATE_WEIGHT` is a stated convention. It is set low because the aggregate
+# rests on three independent evidence-gathering runs while the midpoint rests on two prompts
+# arguing from summaries of them, so the debate adjusts the aggregate rather than replacing it.
+#
+# A number produced this way is only as good as the debate behind it, which is what the next
+# section checks before anyone uses it.
+
+# %% [markdown]
 # **Interpretation**: The plot tracks the bull-bear gap across rounds.
 # Agreement shows convergence within this discussion; it does not establish
 # accuracy, evidence quality, or calibrated confidence. The captured run
@@ -526,11 +570,12 @@ if len(result.rounds) >= 2:
 pre_debate = agg_p
 debate_midpoint = (result.bull_final_probability + result.bear_final_probability) / 2
 
-blended = 0.7 * pre_debate + 0.3 * debate_midpoint
+blended = (1 - DEBATE_WEIGHT) * pre_debate + DEBATE_WEIGHT * debate_midpoint
 
+pct = f"{round((1 - DEBATE_WEIGHT) * 100)}/{round(DEBATE_WEIGHT * 100)}"
 print(f"Pre-debate aggregate:  {pre_debate:.2f}")
 print(f"Debate midpoint:       {debate_midpoint:.2f}")
-print(f"Blended (70/30):       {blended:.2f}")
+print(f"Blended ({pct}):       {blended:.2f}")
 print(f"Shift from debate:     {blended - pre_debate:+.2f}")
 
 if result.consensus_reached:
@@ -562,12 +607,11 @@ else:
 # %% [markdown]
 # ## Persisting the Full Run Trace
 #
-# The same auditing discipline as NB06, now covering both stages. `RunTrace`
-# bundles the question, the research-agent artifacts, the complete debate
-# transcript, and the raw model conversation for every research and debate call
-# - captured by the per-agent and debate `TracingLLMClient`s - into one JSON
-# record under `forecast_traces/`. Reload it to replay exactly what each
-# debater was shown and how it responded, round by round.
+# The same record as the panel notebook keeps, now covering both stages. `RunTrace` bundles
+# the question, the research-agent artifacts, the complete debate transcript, and the raw
+# model conversation for every research and debate call (captured by the per-agent and debate
+# `TracingLLMClient`s) into one JSON record under `forecast_traces/`. Reload it to replay
+# exactly what each debater was shown and how it responded, round by round.
 
 # %%
 if RUN_LIVE:
@@ -607,10 +651,10 @@ else:
 # %% [markdown]
 # ## Replaying the Debate Calls
 #
-# The raw audit view for the debate: every bull and bear prompt - including the
-# opposing side's previous argument that gets fed back in each round - next to
-# the untruncated JSON each debater returned. The transcript and trajectory
-# figure above are both derived from exactly these responses.
+# The raw audit view for the debate: every bull and bear prompt, including the opposing
+# side's previous argument that is fed back in each round, next to the untruncated JSON each
+# debater returned. The transcript and the trajectory figure above are both derived from
+# exactly these responses.
 
 # %%
 debate_calls = [c for c in llm_calls if c.label == "debate"]
@@ -619,19 +663,30 @@ print(replay_llm_calls(debate_calls, content_chars=700))
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Gap trajectory** describes agreement. Inspect the cited arguments to
-#    determine whether new evidence was used; narrowing alone does not establish
-#    learning, and a flat gap alone does not establish that the discussion was useless.
-# 2. **Midpoint** is the arithmetic mean of the final bull and bear probabilities.
-#    Their opposing prompts may produce different estimates from the initial
-#    research ensemble; the averaging operation is the same.
-# 3. **Consensus stopping** avoids remaining calls when the declared threshold is
-#    reached. It may also omit useful later discussion; the threshold is a design choice.
-# 4. **Forecasting value** requires resolved outcomes and matched runs with and
-#    without debate. This trace demonstrates the mechanism, not an accuracy gain.
+# 1. **Debate is a diagnostic before it is an aggregator.** Whether the gap closes tells you
+#    something the average cannot: closing means the disagreement was informational and one
+#    side had evidence the other had not weighed; holding means the two sides read the same
+#    evidence and drew different conclusions from it. Only the first is a case for updating.
+# 2. **A midpoint that does not move is a result.** Blending an unchanged midpoint into the
+#    aggregate produces a number that looks updated and is not, which is worse than reporting
+#    the aggregate and the open gap side by side.
+# 3. **Adversarial roles are a prompt, not a mechanism.** Both debaters are the same model told
+#    to argue opposite sides from the same evidence, so a narrowing gap is two prompts
+#    converging rather than two analysts persuading each other. It is a cheap stress test and
+#    not an independent second opinion.
+# 4. **Terminate on the gap, not on the round count.** Once the two sides are within the
+#    consensus threshold there is nothing left to argue, and every further round is paid for.
+# 5. **Debate only earns its cost where the panel already disagrees.** Running it on a panel
+#    that agreed spends tokens to confirm the agreement.
 #
-# **Next**: [`forecasting_pipeline`](08_forecasting_pipeline.ipynb) - wire everything together into the full
-# agent → aggregation → debate → supervisor pipeline.
+# **Known limitations of what is built here.** One capture, one question, three rounds: nothing
+# establishes that the gap would behave this way again. The bull and bear see agent summaries
+# rather than the underlying evidence, so neither can check a claim the other makes. The blend
+# weight is a stated convention rather than a fitted parameter, and no scoring anywhere
+# establishes that a blended forecast scores better than the aggregate it adjusts.
+#
+# **Next**: [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) wires the research,
+# aggregation, debate and supervisor stages into one runnable pipeline.
 #
 # **Book**: Section 24.7 discusses the debate pattern in the context of Bridgewater's
 # AIA system and prediction market design.

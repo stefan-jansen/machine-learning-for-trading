@@ -14,22 +14,64 @@
 # ---
 
 # %% [markdown]
-# # Framework comparison with inspectable runs
+# # Framework Comparison: Native SDK vs CrewAI vs LangGraph
 #
-# Native Python and LangGraph below call the same research, mean aggregation,
-# debate and supervisor functions. New live runs use the high-only supervisor rule
-# and fixed $\sqrt{3}$ correction. The framework changes orchestration, not the
-# evidence acceptance rule. This is a teaching implementation, not a forecasting
-# performance benchmark.
+# **Docker image**: `ml4t`
 #
-# Default replay retains the genuine June Native and LangGraph captures, including
-# actual model I/O and measured duration. Those captures used the earlier Neyman
-# pipeline and are labeled legacy. CrewAI is a syntax example: the former fixed
-# numbers had no inspectable capture and are removed from the comparison.
+# The pipeline of notebooks 04 to 08 was built end to end with plain Python classes,
+# no orchestration framework. That choice keeps every transition visible and
+# every artifact inspectable, but it pushes the reader to write the
+# orchestration logic by hand. The agentic-framework ecosystem offers
+# alternatives that automate parts of that work in exchange for adopting a
+# framework's conventions.
 #
-# **Book:** §24.5. **Prerequisites:** research, debate and forecasting pipeline.
+# This notebook expresses the same four-phase forecasting flow in three styles, and only two
+# of them are comparable:
+#
+# 1. **Native Python SDK**: direct composition of the chapter's
+#    `ResearchAgent` / `DebateAgent` / `SupervisorAgent` classes, same shape
+#    as `AIAForecaster` in [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb).
+# 2. **LangGraph**: the pipeline as a `StateGraph` with typed state and four
+#    nodes that delegate to the same specialist classes the native variant
+#    uses. Native and LangGraph call the same research, aggregation, debate and
+#    supervisor functions, so what differs between them is the orchestration and
+#    nothing about how evidence is accepted.
+# 3. **CrewAI**: a **configuration sketch**, not a run. CrewAI's primitives
+#    (`Agent`, `Task`, `Crew`) are shown as they would be written, and the code is
+#    not executed here. An earlier pass reported fixed probabilities for this
+#    variant with no capture behind them; a number with nothing to inspect is worse
+#    than no number, so it is gone and the syntax is what remains.
+#
+# So the comparison is of the **orchestration layer** between two implementations that share
+# their internals: how each expresses a four-phase flow, where state lives, and what happens
+# when something fails midway. It is a teaching implementation and not a performance
+# benchmark - two runs of one question decide nothing about which framework forecasts better.
+#
+# **Learning objectives**:
+# - Express the same specialist, aggregate, debate and supervise flow twice, once by composing
+#   classes directly and once as a typed state graph, and read off what the graph adds
+# - Say where a run's state lives in each implementation, and find the entry point you would
+#   attach a debugger to when a phase fails midway
+# - Decide whether a project should adopt an orchestration framework, from what the framework
+#   takes over and what it costs to inspect a run through it
+#
+# **Book reference**: §24.5 (The Engineering Stack: Frameworks and Migration).
+#
+# **Prerequisites**: [`04_research_agent`](04_research_agent.ipynb) through
+# [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb), which build the specialist
+# classes and the pipeline that the native and LangGraph variants compose.
+#
+# **Replay vs live mode**: by default (`RUN_LIVE = False`) the notebook replays the pinned
+# 2026-06-09 native and LangGraph captures, which hold the real model exchanges and the
+# durations measured that day. Those two ran under the chapter's earlier aggregation, so they
+# are labelled legacy where their numbers appear. No API call is made and the output is
+# identical on every machine. Set `RUN_LIVE = True` to run both variants against a current
+# question through the chapter's `LLMClient`, which costs money and reproduces nothing; use
+# `LLM_PROVIDER=mock` for the deterministic client.
 
 # %%
+"""Framework comparison: one four-phase pipeline, native and as a LangGraph."""
+
 import sys
 
 from utils.paths import get_chapter_dir
@@ -50,6 +92,27 @@ from agent_research import ResearchAgent, format_agent_summary
 from agent_schemas import AggregationResult, ForecastQuestion, ForecastResult
 from agent_specialists import DebateAgent, SupervisorAgent
 from agent_tools import create_search_client
+
+# %% [markdown]
+# ## Settings
+#
+# `RUN_LIVE` left at `False` replays the pinned 2026-06-09 run: the saved native and LangGraph
+# traces are reloaded, no API calls are made, and the reported figures are the ones measured
+# that day. Set it to `True` to run both executable variants live against a current question,
+# which costs money and reproduces nothing.
+#
+# `N_AGENTS`, `MAX_STEPS`, `DEBATE_ROUNDS` and `SUPERVISOR_QUERIES` configure the chapter's
+# specialist classes, which the native and LangGraph variants both compose, so a change moves
+# both of them identically. That is what makes the statement count and the state-location
+# column the comparison, rather than the two probabilities.
+#
+# The turn budget matters more here than elsewhere: an agent that runs out of turns returns no
+# probability at all, and a variant whose agents all did that would look like it had failed
+# when the budget was what failed.
+#
+# `LLM_PROVIDER` is empty so the factory picks the first provider whose key is set. The CrewAI
+# section calls no model: it is printed configuration, and CrewAI's own LiteLLM layer is one
+# reason there was nothing for the chapter's tracing to capture.
 
 # %% tags=["parameters"]
 RUN_LIVE = False
@@ -325,10 +388,72 @@ print(replay_llm_calls(records[0].call_log()[:2], content_chars=600))
 print("Full messages remain in the saved JSON; display excerpts are abbreviated.")
 
 # %% [markdown]
-# ## What the example establishes
+# The statement count covers the orchestration layer, not the agent classes.
+# CrewAI is the most verbose at the orchestration layer because each agent
+# carries a role / goal / backstory triple and each task carries a
+# description / expected_output / context list. LangGraph's overhead is
+# the typed state schema and four short node functions; once the schema is
+# defined, each node is a handful of statements. Native SDK is a single
+# function.
 #
-# Both executable orchestrators use the same specialist contracts, and the synthetic
-# failure check exercises the actual LangGraph graph offline. Genuine captured
-# conversations support inspection of older runs. One run per framework does not
-# establish a speed or accuracy ranking. Adopt a framework for concrete needs such
-# as conditional execution or checkpointing, and verify those capabilities separately.
+# The two `final_p` values are not expected to match, and their gap measures nothing about
+# orchestration: native and LangGraph run the same specialist classes over the same evidence
+# rule, so what separates their numbers is that they are two samples from a stochastic model.
+# That is the argument for comparing structure - statements written, where state lives, where a
+# debugger attaches - rather than forecast agreement.
+#
+# ## Comparison matrix
+#
+# | Dimension | Native SDK | CrewAI | LangGraph |
+# |---|---|---|---|
+# | **Orchestration shape** | function call stack | role-based agents in a `Crew` | `StateGraph` with typed nodes |
+# | **State location** | local variables | task outputs threaded by framework | explicit `TypedDict` |
+# | **Parallelism** | manual (threads / asyncio) | opt-in asynchronous tasks | conditional / parallel edges |
+# | **Checkpointing** | write it yourself, as in notebook 03 | not first-class | first-class (`BaseCheckpointSaver`) |
+# | **LLM layer** | chapter `LLMClient` | LiteLLM (provider auto-detect) | passes through whatever the nodes use |
+# | **Debug entry point** | the line that raised | inside CrewAI's loop | `app.get_state(thread)` snapshot |
+# | **Full-trace capture** | one client wrapper | framework callbacks / verbose logs | one client wrapper |
+# | **Visual debugging** | print / pdb | verbose logs | graph rendering + state inspection |
+# | **Dep weight** | LLM SDK only | crewai + langchain transitives | langgraph + langchain transitives |
+# | **Learning curve** | low (Python only) | medium (roles / tasks / processes) | medium-high (graph + state) |
+#
+# The differences that matter for a Chapter 24-shaped pipeline cluster in
+# two columns: LangGraph exposes an explicit checkpoint abstraction, while
+# native Python adds no orchestration dependency. Migration paths, observability stories, framework-momentum
+# trade-offs, and a longer discussion of when persistence /
+# parallelism / conditional-flow pressures justify a framework live in
+# §24.5 of the book rather than in the notebook.
+#
+# ## Key Takeaways
+#
+# 1. **Start with plain Python for a pipeline this shape.** It asks the caller to write the
+#    least orchestration and puts every failure on the line that caused it. That is structural
+#    evidence about this pipeline, not a ranking of the frameworks.
+# 2. **A framework earns its place against a named pressure, not a preference.** Crash recovery
+#    mid-run is what LangGraph's checkpoint abstraction is for; named personas with distinct
+#    charters are what CrewAI's role and goal slots are for. Without one of those pressures, the
+#    dependency and the indirection are the whole trade.
+# 3. **Ask where the run's state lives before adopting anything.** It decides what you can
+#    inspect when a run goes wrong: local variables you can print, a framework's task outputs,
+#    or a typed state object you can snapshot.
+# 4. **A framework that owns the model client owns the observability.** CrewAI drives LiteLLM
+#    directly, so nothing in this chapter's tracing sees its calls. That is why it appears here
+#    as syntax rather than as a run: there was no capture to inspect, and the concrete cost of
+#    the boundary moving is that there could not be one.
+# 5. **Two probabilities from two runs are not a benchmark.** The native and LangGraph variants
+#    share their internals, so what differs between their numbers is sampling, not
+#    orchestration. Comparing frameworks needs a structural measure, which is what the
+#    statement count and the state-location column are for.
+#
+# **Known limitations of what is built here.** One question, one run per variant, one model, and
+# only two of the three variants execute at all. The statement count is a proxy for how much a
+# caller writes and says nothing about how much there is to understand: a framework can trade
+# statements for concepts. The elapsed times are single measurements of two different call paths
+# on one machine, taken under the chapter's earlier aggregation, and the comparison matrix
+# describes framework versions that move.
+#
+# **Next**: [`11_research_operator`](11_research_operator.ipynb) replays a
+# production-shaped operator loop against a real case-study registry.
+#
+# **Book**: Section 24.5 covers migration paths, the persistence, parallelism and
+# conditional-flow pressures that justify a framework, and the ecosystem-version note.

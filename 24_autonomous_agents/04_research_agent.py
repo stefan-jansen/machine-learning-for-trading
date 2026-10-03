@@ -42,15 +42,13 @@
 # [`03_state_and_memory`](03_state_and_memory.ipynb) (state and gates).
 
 # %%
+"""The Research Agent - ReAct loop with rich output extraction."""
+
 import sys
 
 from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
-
-from agent_pipeline import validate_probabilities
-
-"""The Research Agent - ReAct loop with rich output extraction."""
 
 import json
 import re
@@ -65,6 +63,7 @@ from agent_observability import (
     show_agent_timeline,
     trace_llm,
 )
+from agent_pipeline import validate_probabilities
 from agent_providers import ChatMessage, LLMClient, TokenUsage, create_llm_client
 from agent_schemas import (
     AgentForecastArtifact,
@@ -98,9 +97,11 @@ MAX_SEARCH_RESULTS = 5
 # %% [markdown]
 # ## Prompt Templates
 #
-# The system prompt and step prompt define the agent's behavior. They are shown
-# inline so readers can see exactly how the LLM is instructed. These are the same
-# prompts used by the AIA Forecaster production system.
+# The system prompt fixes the agent's role and its two hard constraints: emit valid JSON, and
+# do not go looking for the market's own price. The second matters for evaluation. An agent
+# that reads the prediction market it is being scored against is copying, and the copy will
+# score well, so the constraint is stated to the model and then verified against the saved
+# prompts further down rather than trusted.
 
 # %%
 AGENT_SYSTEM_PROMPT = """\
@@ -235,9 +236,58 @@ def extract_confidence(action: dict) -> float:
 
 
 # %% [markdown]
+# ## Parsing and Validating the Model's Reply
+#
+# A model told to emit JSON emits JSON most of the time. The rest of the time it wraps the
+# object in a markdown fence, adds a sentence of explanation before it, or returns something
+# well-formed that is not an action. All three are ordinary, none is an error condition, and
+# an agent that crashes on them is an agent that cannot be run unattended.
+#
+# `parse_json` accepts exactly one JSON object, fenced or bare, and turns anything else into an
+# explicit parse-failure action. `validate_action` then checks the object against the two
+# documented schemas: a search needs a non-empty string query, a forecast needs a finite
+# numeric `p_yes` and a string rationale, and probabilities are clamped to $[0, 1]$ before
+# anything acts on them. A reply failing either check costs a turn and is returned to the model
+# for correction.
+#
+# Both come from `agent_research.py` rather than being written here, because every agent in the
+# chapter has to reject the same shapes the same way: a parser that differs between notebooks
+# is a source of disagreement that looks like a difference of judgement.
+
+
+# %% [markdown]
+# ## Derived Fields
+#
+# The model returns a probability and a rationale. Everything else on the artifact is computed
+# from those two by the functions below. Keeping the derivation in code rather than asking the
+# model for it means every agent's metadata is produced the same way, which is what makes
+# agents comparable; it also means the fields are exactly as good as their definitions, and
+# several of these definitions are crude on purpose. They are labelled as heuristics wherever
+# they are printed.
+
+# %% [markdown]
+# ### Confidence
+#
+# When the model volunteers a `confidence` field it is used, clamped to $[0, 1]$. Otherwise
+# confidence is taken as distance from even odds,
+# $\text{confidence} = 2\,\lvert p_{\text{yes}} - \tfrac{1}{2} \rvert$, which is zero at
+# even odds and one at either certainty.
+#
+# That is a statement about the probability's position, not about the evidence behind it. An
+# agent that read forty documents and concluded the question is genuinely balanced scores zero,
+# and so does an agent that read nothing and guessed at even odds. The number is cheap and it
+# means the same thing for every agent, which is what it is for. What would answer the question
+# instead is calibration: whether probabilities stated at seventy percent come true about
+# seventy percent of the time.
+# [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) builds that arithmetic
+# and runs it on synthetic inputs, because measuring it for real needs forecasts recorded
+# before their questions resolved, which no capture in this chapter has.
+
+
+# %% [markdown]
 # ### Sentiment extraction
 #
-# Maps $p_{\text{yes}}$ to a five-level sentiment scale.
+# Maps $p_{\text{yes}}$ mechanically to a five-level sentiment scale.
 
 
 # %%
@@ -255,10 +305,24 @@ def extract_sentiment(p_yes: float) -> Sentiment:
 
 
 # %% [markdown]
-# ### Key findings and uncertainties
+# ### Key findings
 #
-# Parses bullet points and numbered items from the rationale text, and identifies
-# sentences containing uncertainty language.
+# A model asked for a short rationale usually enumerates its reasons, and it picks the format
+# on its own: sometimes one item per line behind a dash or a number, sometimes run together
+# inside a sentence as `(1) ... (2) ...`. The function takes both, preferring line-leading
+# items where they exist and falling back to the inline markers, and it requires at least two
+# markers so that a lone parenthesised digit in ordinary prose is not read as a list.
+#
+# A rationale that enumerates nothing yields nothing, and that is the honest outcome rather
+# than a failure: the field records how the model chose to present its reasons, not how many
+# reasons it had.
+#
+# The last inline item is the one that needs care, because the text after the final marker
+# runs on into whatever the model wrote next, so the item has to end at its own sentence
+# boundary. Finding that boundary means telling a full stop from an abbreviation:
+# *U.S. inflation remains elevated* is one sentence, and a rule that cut at every stop would
+# return `U.S`. The item ends only where the letter before the stop is not a capital and the
+# next word begins with one.
 
 
 # %%
@@ -302,7 +366,8 @@ def extract_uncertainties(rationale: str) -> list[str]:
 # %% [markdown]
 # ### Evidence quality assessment
 #
-# Based on how many search queries the agent made and how many sources it consulted.
+# This volume heuristic uses only query and result counts. It does not validate
+# source credibility, independence, or point-in-time availability.
 
 
 # %%
@@ -497,18 +562,20 @@ class ResearchAgent:
 # %% [markdown]
 # ## Running the Research Agent
 #
-# We run the agent on the pinned `CHAPTER_CONTESTED_QUESTION` from
-# `agent_fixtures.py` (*"Will the Federal Reserve hike rates in 2026?"*, where
-# credible evidence cuts both ways) and inspect the full `AgentForecastArtifact`.
-# The whole forecasting arc forecasts this same pinned question (NB07 debates it,
-# NB08 runs it through the full pipeline, NB10 ports it across frameworks); NB06
-# uses the companion `CHAPTER_CLEAR_QUESTION`, a one-directional question on which
-# the agents instead agree. The numbers are a dated point-in-time capture
-# (provider `claude-sonnet-4`, Tavily search, 2026-06-09). By default the notebook
-# *replays* that pinned run (`RUN_LIVE = False`): it reloads the saved artifacts
-# and raw conversation and makes no API calls, so the outputs are stable. Set
-# `RUN_LIVE = True` (with `LLM_PROVIDER` + `LLM_API_KEY` + `TAVILY_API_KEY` in `.env`) to forecast a
-# current question live, which is not reproducible.
+# The question is `CHAPTER_CONTESTED_QUESTION` from `agent_fixtures.py`: *"Will the Federal
+# Reserve hike rates in 2026?"*. It is contested in the specific sense that matters here, which
+# is that two runs of the same agent reach opposite conclusions on it, so it is the question
+# the chapter uses wherever disagreement is the subject.
+# [`07_adversarial_debate`](07_adversarial_debate.ipynb) makes agents argue about it and
+# [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) runs the full pipeline on it.
+# [`06_multi_agent_research`](06_multi_agent_research.ipynb) uses the companion
+# `CHAPTER_CLEAR_QUESTION` instead, where the agents agree, so the two can be compared.
+#
+# On the default path the notebook replays the pinned capture rather than calling anything;
+# the cell below reports the provider, the search tool and the date of the capture it read,
+# each taken from the saved record. Setting `RUN_LIVE = True` with `ANTHROPIC_API_KEY` and
+# `TAVILY_API_KEY` forecasts a current question instead, and will not reproduce the values
+# below.
 
 # %%
 if RUN_LIVE:
@@ -549,8 +616,10 @@ print(f"Question: {question.question}\n")
 # %% [markdown]
 # ## Inspecting the Forecast Artifact
 #
-# The `AgentForecastArtifact` captures everything about the agent's run -
-# the probability, reasoning, evidence trail, and metadata.
+# One object holds everything the run produced. The first three fields are what the model
+# committed to; the rest were computed from them by the extraction functions above, and are
+# labelled as heuristics wherever they are printed so that a derived class is never read as a
+# measurement.
 
 # %%
 print("=== Forecast ===")
@@ -584,10 +653,10 @@ if artifact.uncertainties:
 # ## Execution Trace
 #
 # Every search query and its results are captured in the trace. `show_agent_timeline`
-# from `agent_observability` renders the whole run in order - each query, the
+# from `agent_observability` renders the whole run in order: each query, the
 # documents it returned (title, date, URL, and a snippet), and the forecast with
-# the untruncated rationale - so the agent's path from question to probability is
-# fully visible. This is the per-agent observability view reused across NB06–NB08.
+# the untruncated rationale. This is the per-agent observability view reused
+# across the multi-agent notebooks that follow.
 
 # %%
 print(show_agent_timeline(artifact))
@@ -595,13 +664,14 @@ print(show_agent_timeline(artifact))
 # %% [markdown]
 # ## Tool Execution Audit
 #
-# The executor's independent log captures timing and provenance for every
-# search call. Rendering it as a Polars DataFrame puts the query / status /
-# duration in three sortable columns rather than a hand-aligned string
-# table - the same audit data, in a form that downstream analysis code can
-# read without parsing. (A live run also records per-call `duration_ms`; the
-# replay path reconstructs the same query/status/result-count audit from the
-# saved traces, since wall-clock timing is not part of the persisted record.)
+# The timeline above is assembled from the agent's own traces, which is the model's account of
+# the run. `ToolExecutor` keeps a second, independent record of what it was actually asked to
+# do. On a live run that log carries a per-call `duration_ms`; the pinned trace does not
+# persist wall-clock timing, because a duration measured on one machine reproduces on no other,
+# so the replay path rebuilds the query, status and result count from the saved traces instead.
+#
+# A table rather than aligned text: the same three fields, in a form that sorts, filters and
+# joins without anyone parsing a string.
 
 # %%
 if RUN_LIVE:
@@ -639,9 +709,31 @@ else:
 audit_df
 
 # %% [markdown]
+# Freshness passes and consistency reports that there is no cutoff to enforce, which is a
+# statement about the question rather than a defect in the run. `CHAPTER_CONTESTED_QUESTION`
+# carries `cutoff_date=""` because it was open when it was captured: it asks about the rest of
+# 2026, so no document available on the day could have held the answer and no date needs
+# excluding. The gate having nothing to check is the correct outcome. It has teeth on the
+# resolved questions in `agent_fixtures.py`, each of which carries a cutoff, and reading past
+# one is how a forecasting result gets faked.
+#
+# Coverage is a different matter, and its failure says more about the adapter than about the
+# agent. Every item above is tagged `search_results`, because a trace records what the agent
+# searched for and not what kind of evidence it decided each result was. The coverage gate asks
+# for a `base_rate` item and cannot find one, and it could not have found one however well the
+# agent had researched. Reading that as "the agent skipped the base rate" would be reading a
+# limitation of the reconstruction as a finding about the run.
+#
+# This is the argument [`03_state_and_memory`](03_state_and_memory.ipynb) makes, arriving from
+# the other direction: evidence type is a judgement made while gathering, and a record written
+# afterwards from a trace cannot recover it. An agent that is going to be gated on coverage has
+# to write its state as it goes, classifying each result as it arrives, rather than have the
+# classification inferred from a log at the end.
+
+# %% [markdown]
 # ## Agent Summary Format
 #
-# When multiple agents run in parallel (NB06), their outputs are summarized
+# When several agents run in parallel, their forecasts are summarized
 # for the supervisor and debate stages. This is the format used downstream.
 
 
@@ -670,15 +762,15 @@ def format_agent_summary(a: AgentForecastArtifact) -> str:
 print(format_agent_summary(artifact))
 
 # %% [markdown]
-# ## Running Multiple Agents
+# ## Two Agents, One Question
 #
-# A preview of the multi-agent notebooks: the same agent class with different
-# IDs, run on this *contested* question, can already produce different forecasts,
-# driven by which evidence each agent emphasises. That spread is real but
-# question-dependent. NB06 runs the same class on the one-directional
-# `CHAPTER_CLEAR_QUESTION` and the agents instead agree. The contrast is why the
-# later notebooks add debate (NB07) and a role-specialized pipeline (NB08) for
-# contested questions rather than relying on temperature alone.
+# The same class with a different id gives a second sample. Nothing else differs: same
+# question, same prompts, same search tool, same model. The two probabilities below come apart
+# anyway, which is the observation the rest of the chapter is built on. Where that variation
+# comes from - which documents each search returned, and the model's own sampling - is not
+# identified here, and [`06_multi_agent_research`](06_multi_agent_research.ipynb) does not
+# identify it either; what that notebook does is run enough copies for the spread to be worth
+# looking at.
 
 # %%
 if RUN_LIVE:

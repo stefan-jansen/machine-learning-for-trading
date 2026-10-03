@@ -41,13 +41,13 @@
 # **Prerequisites**: None. This is the first notebook in the Chapter 24 workshop.
 
 # %%
+"""LLM Providers and the ReAct Loop - multi-provider agent reasoning."""
+
 import sys
 
 from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
-
-"""LLM Providers and the ReAct Loop - multi-provider agent reasoning."""
 
 import json
 from datetime import date
@@ -73,6 +73,26 @@ LLM_PROVIDER = ""  # Blank reads .env; "mock" selects a synthetic fixture
 MAX_STEPS = 6
 
 # %% [markdown]
+# ## The LLM Provider Protocol
+#
+# Every notebook in this chapter reaches its language model through the same `LLMClient`
+# **protocol**: a pair of method signatures that any provider class must offer, with no shared
+# base class and no vendor SDK visible to the caller.
+#
+# - `complete(messages) → str` returns the reply text
+# - `complete_with_usage(messages) → (str, TokenUsage)` returns the text and the prompt and
+#   completion token counts, which is what makes a run's cost measurable
+#
+# Two methods is a deliberate floor. Everything a provider offers beyond them, such as
+# streaming, native tool calling or thinking budgets, varies across vendors, and an agent that
+# reaches for any of it is an agent that can no longer be moved.
+#
+# The cell below sends one arithmetic question. Its answer is worthless; what it establishes is
+# that a client was constructed, a key was accepted, and a reply came back, before the loop
+# starts spending money on real prompts. On the replay path there is no client, so the reply
+# comes out of the saved record.
+
+# %% [markdown]
 # **Optional dependencies** (for a real LLM and web search - the chapter runs in
 # offline replay mode without them):
 #
@@ -93,21 +113,6 @@ MAX_STEPS = 6
 # Live mode auto-loads `.env`. Missing live credentials raise an explicit error;
 # select `mock` only for a labeled synthetic test fixture. Run `uv run python check_env.py` to confirm which
 # model will be used.
-
-# %% [markdown]
-# ## The LLM Provider Protocol
-#
-# Every notebook in this chapter uses the same `LLMClient` protocol. The key insight is
-# that agent logic should be **provider-agnostic** - the same ReAct loop works whether
-# backed by a \$0 mock, a local Ollama model, or a commercial API.
-#
-# The protocol defines two methods:
-#
-# - `complete(messages) → str` - just the text
-# - `complete_with_usage(messages) → (str, TokenUsage)` - text plus token counts
-#
-# Provider selection is automatic: set `LLM_PROVIDER=mock` for deterministic testing,
-# or let the factory auto-detect from available API keys.
 
 # %%
 if RUN_LIVE:
@@ -131,12 +136,16 @@ print(f"Response: {response[:200]}")
 # %% [markdown]
 # ## The Forecasting Question
 #
-# We fetch a **live prediction market question** from Polymarket - an open
-# question that the LLM cannot answer from training data. This ensures the
-# agent must search for current information and reason about genuine uncertainty.
+# The agent is pointed at a **prediction market** question: a contract that pays out if a
+# stated event happens by a stated date, so its price is the market's probability that it will.
+# Polymarket publishes these openly, and an unresolved one is useful here for a reason that
+# matters when evaluating any language model on forecasting. A question whose answer is already
+# in the model's training data tests recall, not forecasting. An open question does not exist in
+# the training data at all, so the only way to say anything about it is to go and look.
 #
-# If the Polymarket API is unavailable (offline, CI), we fall back to a static
-# demo question.
+# On the replay path the question comes out of the saved record. On the live path
+# `get_live_question` calls the Polymarket API and falls back to a fixed demonstration question
+# when that call fails, so the notebook still runs with no network.
 
 # %%
 question = get_live_question() if RUN_LIVE else pinned_run.question_obj()
@@ -154,13 +163,15 @@ else:
 # ## Building the ReAct Agent
 #
 # The ReAct pattern interleaves **reasoning** (thinking about what to do) with **action**
-# (calling tools) in a loop. Our agent has exactly two actions:
+# (calling tools) in a loop. The agent here has exactly two actions:
 #
-# - `{"action": "search", "query": "..."}` - search the web for evidence
-# - `{"action": "forecast", "p_yes": 0.XX, "rationale": "..."}` - produce a probability
+# - `{"action": "search", "query": "..."}`: search the web for evidence
+# - `{"action": "forecast", "p_yes": 0.XX, "rationale": "..."}`: produce a probability
 #
-# The system prompt and step prompt are shown inline so readers can see exactly how
-# the LLM is instructed. This is the same prompt structure used by the AIA Forecaster.
+# The prompts appear in full below rather than hidden behind a helper, because what the model
+# is told is as much a part of this program as the loop that calls it. The same two-action
+# schema is used by the AIA Forecaster (Alur et al., 2025), the system the rest of this chapter
+# reconstructs.
 
 # %%
 SYSTEM_PROMPT = """\
@@ -209,11 +220,11 @@ def build_step_prompt(q: ForecastQuestion, market_price: float | None = None) ->
 # %% [markdown]
 # ### Session setup
 #
-# Each ReAct session starts with three pieces of state: the cutoff date (used
-# to keep the search engine away from post-question evidence), a tool
-# executor wrapping the search client, and the initial system + user
-# messages. Pulling this out of the loop keeps the loop function focused on
-# control flow.
+# A session opens with three pieces of state. The **cutoff date** is the last date the search
+# tool may return documents from, which is what keeps an agent forecasting a past question from
+# reading the answer. The tool executor holds the search client and is the only route the loop
+# has to the outside world. The message list starts with the system prompt and the first step
+# prompt, and grows by two entries per turn: what the model said, and what the tool returned.
 
 
 # %%
@@ -321,9 +332,16 @@ def run_react_agent(
 # %% [markdown]
 # ## Running the Agent
 #
-# The agent decides when to search and when to forecast, based on the question
-# context. In mock mode the search returns deterministic results; with a real LLM
-# and Tavily, the reasoning adapts to actual web content.
+# The agent chooses each turn: search again, or commit to a probability. What follows is the
+# recorded session, one line per turn.
+#
+# On the default replay path the run does not reach a forecast. The model kept searching for
+# evidence that the 2026 rate path had already been settled, found reporting that argued both
+# ways, and used every turn doing so. That is the ordinary failure of an agent under a budget,
+# and it is why `run_react_agent` returns an explicit no-answer value instead of a probability:
+# a caller that reads that value as a forecast would record a confident coin-flip where the
+# agent said nothing. The mock run at the end of the notebook takes the other branch and
+# commits.
 
 # %%
 if RUN_LIVE:
@@ -367,7 +385,7 @@ print(f"Tokens: {tokens.total_tokens:,}")
 # %% [markdown]
 # ## Inspecting the Execution Trace
 #
-# Every step is captured as an `AgentTrace`. This is critical for **auditability** -
+# Every step is captured as an `AgentTrace`. This is critical for **auditability**:
 # in production, you need to know which queries were issued, what results came back,
 # and how the LLM arrived at its forecast.
 
@@ -388,13 +406,12 @@ for t in traces:
 # %% [markdown]
 # ## Persisting the Run
 #
-# A live run is a point-in-time capture - a live prediction-market question, the
-# Tavily documents available that day, and the model's reasoning over them.
-# Bundling the question, the agent's traces, and the raw model conversation into
-# one JSON record under `forecast_traces/` makes the session auditable and, more
-# importantly, *replayable*: the default `RUN_LIVE = False` path above reloads
-# this trace and reproduces the run with no API calls, so the chapter is stable
-# regardless of which provider or search backend a reader has configured.
+# A live run depends on three things that will not exist tomorrow: an open market question, the
+# documents a search API returned that day, and a specific model version. Writing the question,
+# the agent's steps, and the full prompt-and-reply conversation into one JSON file under
+# `forecast_traces/` fixes all three. That file is what `RUN_LIVE = False` reads, which is why
+# the printed session above is the same for every reader regardless of which provider or search
+# backend they have configured, and why a run can be re-examined months later.
 
 # %%
 if RUN_LIVE:
@@ -434,6 +451,26 @@ else:
     )
 
 # %% [markdown]
+# ## Swapping the Backend
+#
+# Nothing in `run_react_agent` names a provider. It calls `complete_with_usage` on whatever
+# object it was handed, so any class satisfying the two-method protocol can be substituted:
+# `MockLLMClient` here, a local Ollama model, or a commercial API. The cell below runs the same
+# loop against the mock client, whose replies are canned, and gives it three turns rather than
+# five because the mock searches once and then commits.
+#
+# On the live path, `create_llm_client("")` picks the first provider whose key is present, and
+# reading `LLM_PROVIDER` from the environment overrides that. So a continuous-integration run
+# forces deterministic replies without editing the notebook:
+#
+# ```bash
+# LLM_PROVIDER=mock uv run python 24_autonomous_agents/01_react_reasoning.py
+# ```
+#
+# That variable only takes effect when `RUN_LIVE = True`; on the replay path no client is
+# constructed at all.
+
+# %% [markdown]
 # The June capture retains actual searches and model messages. It predates the new
 # acceptance check; inspect its rationale and sources rather than assuming a
 # validated status. The current loop rejects malformed or unsupported probabilities
@@ -441,23 +478,6 @@ else:
 # abstain. A citation makes support inspectable, not automatically correct.
 #
 # The mock example below is an explicitly synthetic flow test, not a model evaluation.
-
-# %% [markdown]
-# ## Provider Swapping
-#
-# The same `run_react_agent` works with any provider - agent logic is
-# provider-agnostic. To switch, edit the repo-root **`.env`** (the notebook
-# auto-loads it) and change one line:
-#
-# ```bash
-# LLM_PROVIDER=openrouter     # deepseek | openrouter | openai | anthropic | google | ollama | mock
-# LLM_API_KEY=...             # your key for that provider
-# LLM_MODEL=z-ai/glm-4.6      # optional; blank = the provider default
-# ```
-#
-# The base URL for each provider is predefined - you never set it. Then set
-# `RUN_LIVE = True` above and re-run the cells. Tip: `uv run python check_env.py`
-# prints the exact model that will run.
 
 # %%
 mock_llm = MockLLMClient()
@@ -473,14 +493,27 @@ print(f"Synthetic p(YES): {p_mock}")
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Provider abstraction**: The `LLMClient` protocol decouples agent logic from
-#    providers - same code works with mock, Ollama, or commercial APIs
-# 2. **Explicit outcomes**: `search`, `forecast` and `abstain` keep the action space minimal -
-#    the agent's job is to gather evidence and produce a supported probability; calibration is evaluated separately
-# 3. **Structured traces**: `AgentTrace` captures every search query and its results,
-#    separate from the LLM's context window
-# 4. **Mock-first development**: Build and test with deterministic mocks, then swap
-#    in real LLMs for evaluation
+# 1. **One interface, any backend.** An agent that calls `complete_with_usage` and nothing else
+#    can be moved between a free local model and a commercial API without an edit. Write the
+#    loop against the protocol, not against a vendor's SDK.
+# 2. **A small action space is what makes a loop auditable.** With two actions, every turn is
+#    either a query you can re-issue or a probability you can score. Adding actions adds ways
+#    for a run to go wrong that the record cannot explain.
+# 3. **Model output is untrusted input.** Parse it against the declared schema, and hand a
+#    malformed reply back for correction rather than letting it reach a tool.
+# 4. **A budget needs a distinguishable exhaustion value.** A loop that returns a probability on
+#    both success and failure gives the caller no way to tell a judgement from a timeout. Return
+#    a value the caller must branch on, and say so in the type or the record.
+# 5. **Record the conversation, not just the answer.** Prompts, replies and tool results in one
+#    file are what make a run reproducible after the market has closed and the model has been
+#    retired.
 #
-# **Next**: [`tool_contracts`](02_tool_contracts.ipynb) - the SearchClient protocol, Tavily integration,
-# and domain policy enforcement.
+# **Known limitations of what is built here.** The loop keeps every message in the context
+# window, so a long session eventually exceeds it and there is no summarisation or eviction. The
+# search results carry no publication dates, so a run cannot be shown to be free of hindsight.
+# There is one agent and one sample, so the probability has no dispersion around it. And nothing
+# scores the forecast: an agent is only as good as the record of how its past probabilities
+# resolved, which needs resolved questions and a proper scoring rule.
+#
+# **Next**: [`02_tool_contracts`](02_tool_contracts.ipynb) gives the search tool a typed
+# contract, a publication-date filter, and a source policy.

@@ -14,29 +14,51 @@
 # ---
 
 # %% [markdown]
-# # Scoring, replay and bounded tools
+# # Scoring, Replay, and Security
 #
-# Use saved probabilities with incomplete provenance to teach Brier/log loss, reliability plots,
-# held-out fitting and paired uncertainty. Recoverable history is retained; missing
-# research history is declared. The ten-question panel was executed after resolution
-# and cannot establish clean forecasting skill. Tool-policy examples use labeled
-# synthetic fixtures. **Book:** §§24.7-24.9.
+# **Docker image**: `ml4t`
 #
-# The original public record remains available as a labeled synthetic arithmetic
-# fixture. The workshop's older saved vector is used here to recover the teaching
-# history; it reports a model name, but original model I/O and research are absent.
-# Its probabilities are inputs for scoring and contamination diagnosis. The fresh
-# October captures in notebook 08 verify genuine model/tool execution; their
-# question is unresolved and has no accuracy score.
+# Everything the chapter has built so far produces probabilities that nobody has checked. This
+# notebook is the machinery for checking them, and the controls that have to be in place before
+# anyone acts on one: proper scoring rules, reliability diagrams, calibration fitting done
+# without cheating, a proxy that enforces tool policy, and a scan for text written to hijack
+# the agent reading it.
+#
+# **Every probability on this page was recorded after its question had resolved.** The panel is
+# recovered from a June 2026 capture that saved the probabilities but not the research behind
+# them, and it ran after every one of its questions was settled. The probabilities are genuine
+# and the arithmetic over them is reproducible; what they cannot measure is how good any
+# forecaster is. A real evaluation needs forecasts recorded before their questions resolved, and
+# the model that produced these had a reliable knowledge cutoff after several of them. The
+# tool-policy examples further down use synthetic fixtures, labelled as such where they appear.
+# Nothing else in this notebook repeats the caveat; it applies to every number in it.
+#
+# **Learning Objectives**:
+# - Score a set of probability forecasts four ways, and say what each measure rewards and what
+#   it is blind to
+# - Read a reliability diagram to find where a forecaster is over- or under-confident, rather
+#   than only how far off it is on average
+# - Fit a calibration transform without scoring it on the rows it was fitted to, and see what
+#   the difference is worth
+# - Enforce read-only, source and rate policy in a proxy between the agent and its tools
+# - Scan untrusted text for injection payloads and refuse them, without treating the scan as a
+#   defence on its own
+#
+# **Book Reference**: Chapter 24, Section 24.7 (Multi-agent forecasting systems), Section 24.9
+# (Preparing for production) and Section 24.10 (Security and governance)
+#
+# **Prerequisites**: [`05_aggregation_math`](05_aggregation_math.ipynb) (scoring and
+# calibration arithmetic), [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) (the
+# pipeline being evaluated).
 
 # %%
+"""Scoring, Replay, and Security - capstone evaluation and governance."""
+
 import sys
 
 from utils.paths import get_chapter_dir
 
 sys.path.insert(0, str(get_chapter_dir(24)))
-
-"""Scoring, Replay, and Security - capstone evaluation and governance."""
 
 import json
 import math
@@ -587,12 +609,72 @@ print(
 )
 
 # %% [markdown]
-# ## Key takeaways
+# The scanner blocks three payloads and accepts two. This remains a narrow
+# heuristic demonstration, not a complete prompt-injection defense. The Warden
+# still enforces tool policy if a payload evades these patterns.
+
+# %% [markdown]
+# ## OWASP Top 10 for LLM Applications
 #
-# 1. Validate probabilities and outcomes before scoring; retain failure coverage.
-# 2. Recover metadata without rewriting captured probabilities or inventing evidence.
-# 3. Fit and evaluate on separate questions; arithmetic transformations are not ablations.
-# 4. Historical web dates and LLM foreknowledge limit historical performance claims.
-# 5. Enforce simple tool capabilities at execution, and state what the security example tests.
+# The security controls in this notebook map to the OWASP Top 10 for LLM
+# Applications (2025):
 #
-# **Optional next:** [framework comparison](10_framework_comparison.ipynb).
+# | OWASP Risk | Control | Notebook |
+# |-----------|---------|----------|
+# | LLM01: Prompt Injection | fail-closed input scan + Warden | This notebook |
+# | LLM02: Insecure Output | Warden policy enforcement | This notebook |
+# | LLM04: Data Poisoning | Publication-date cutoffs on retrieved evidence | `02_tool_contracts` |
+# | LLM06: Excessive Agency | Read-only tools, no order path | `02_tool_contracts` |
+# | LLM07: System Prompt Leakage | No secrets in prompts | All notebooks |
+# | LLM08: Excessive Autonomy | Quality gates and abstention | `03_state_and_memory` |
+# %% [markdown]
+# ## Replay Against Frozen Evidence
+#
+# Every stage of this chapter's pipeline has two sources of variation: what the search API
+# returned, and what the model did with it. Comparing two configurations without separating
+# them compares both at once, and the search index moves between runs.
+#
+# Freezing the evidence removes one of them. The execution log that
+# [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) saves holds every query and every
+# document a run retrieved, so a search client that replays from it hands a second run exactly
+# the evidence the first one saw. Whatever then differs is the model, the prompt, or the
+# aggregation, and the difference is attributable. It also makes the comparison repeatable
+# after the documents have gone.
+#
+# What the frozen replay cannot do is tell you whether the second configuration is better. It
+# holds the evidence fixed, not the truth: scoring still needs resolved questions and forecasts
+# recorded before they resolved.
+
+# %% [markdown]
+# ## Key Takeaways
+#
+# 1. **A probability is scored, not checked.** Brier and log score both reward being right and
+#    being right confidently, and they disagree about how much: log score punishes a confident
+#    error without bound, Brier does not. Which one to report follows from how expensive a
+#    confident error is in the application.
+# 2. **Calibration and sharpness pull against each other, and only one of them is free.**
+#    Anyone can be perfectly calibrated by forecasting the base rate every time, and anyone can
+#    be maximally sharp by forecasting zero or one. The pair has to be read together, and
+#    sharpness on its own is not a quality to maximize.
+# 3. **A transform fitted on the rows it is scored on reports the improvement it was
+#    constructed to produce.** The in-sample and leave-one-out numbers here differ for that
+#    reason and for no other.
+# 4. **Enforce tool policy in a proxy, fail closed.** An allowlist that denies what it has not
+#    been told about still holds when a tool nobody thought of appears; a blocklist does not.
+# 5. **Input scanning is a filter, not a defence.** It catches the payloads it has patterns
+#    for. The reason to run it anyway is that it is cheap and independent of the Warden, and a
+#    payload has to get past both.
+# 6. **Freeze the evidence before comparing configurations**, or the comparison includes
+#    whatever the search index did that day.
+#
+# **Known limitations of what is built here.** Every probability on this page was chosen after
+# its question resolved, so no number here estimates accuracy or calibration. Ten questions
+# would be too few to estimate them from even if the forecasts had been genuine. The injection
+# patterns are a handful of regular expressions against a threat that adapts, and the Warden
+# enforces the policies it is given and nothing about whether they are the right ones.
+#
+# **Optional next**: [`10_framework_comparison`](10_framework_comparison.ipynb) expresses the
+# same pipeline in three agent frameworks.
+#
+# **Book**: Section 24.9 covers production reliability, replay and contamination control, and
+# section 24.10 the full OWASP threat model for LLM agents.

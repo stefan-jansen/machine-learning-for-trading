@@ -53,7 +53,7 @@ def build_step_prompt(
     """Format the step prompt with question context.
 
     When ``max_steps`` is given, the agent is told its search budget and is
-    nudged to commit once it has enough evidence — searching is not free, and an
+    nudged to commit once it has enough evidence - searching is not free, and an
     agent that knows its budget stops reformulating the same query and forecasts.
     """
     prompt = f"QUESTION:\n{question.question}\n\n"
@@ -64,7 +64,7 @@ def build_step_prompt(
     if max_steps is not None:
         prompt += (
             f"SEARCH BUDGET: you have at most {max_steps} steps. Search only when a "
-            "specific, named fact is missing — do not reformulate a query you already "
+            "specific, named fact is missing - do not reformulate a query you already "
             "ran. As soon as you have a base rate and the current signal, forecast.\n\n"
         )
     prompt += (
