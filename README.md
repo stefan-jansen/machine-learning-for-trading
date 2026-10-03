@@ -102,7 +102,7 @@ The workflow this repository implements, taught end to end.
 | When | Offering | What you leave with |
 |------|----------|---------------------|
 | Self-paced | [Foundations](https://maven.com/stefan-jansen/ml4t-foundations) | Build the ML for Trading pipeline yourself, end to end, and the evidence to say what it does and does not establish. |
-| Oct 10, 2026 | [ML for Trading in the Age of AI Agents](https://maven.com/stefan-jansen/ml4t-ai-agents) | Run the whole ML for Trading workflow once, end to end, in a single session. |
+| Oct 10, 2026 | [ML for Trading in the Age of AI Agents](https://maven.com/stefan-jansen/ml4t-ai-agents) | Work through an ETF strategy from idea to a realistic trading simulation. |
 | Dec 3 – Feb 18, 2027 | [Research to Production](https://maven.com/stefan-jansen/research-to-production) | Take one research idea from a question to a costed, monitored strategy, with the evidence trail that makes the result checkable. |
 
 **Free live sessions**, with the recording sent to everyone who registers: [How AI Agents Change the ML for Trading Workflow](https://maven.com/p/222e36) (Wed, Oct 7, 11:00 AM ET / 15:00 UTC)
