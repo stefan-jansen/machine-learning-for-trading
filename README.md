@@ -113,7 +113,7 @@ Designing multi-agent systems whose reasoning can be audited.
 
 | When | Offering | What you leave with |
 |------|----------|---------------------|
-| Oct 3, 2026 · Nov 21, 2026 | [Agent Engineering: Build, Evaluate, and Deploy AI Agents](https://maven.com/stefan-jansen/agent-engineering) | Go from agent fundamentals to a live multi-agent system, with an evaluation harness that says whether it works. |
+| Nov 21, 2026 | [Agent Engineering: Build, Evaluate, and Deploy AI Agents](https://maven.com/stefan-jansen/agent-engineering) | Go from agent fundamentals to a live multi-agent system, with an evaluation harness that says whether it works. |
 
 **Free live sessions**, with the recording sent to everyone who registers: [Why Multi-Agent Systems Break, and How To Fix It](https://maven.com/p/393eee) (Wed, Nov 4, 11:00 AM ET / 16:00 UTC)
 
