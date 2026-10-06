@@ -115,7 +115,7 @@ Designing multi-agent systems whose reasoning can be audited.
 |------|----------|---------------------|
 | Nov 21, 2026 | [Agent Engineering: Build, Evaluate, and Deploy AI Agents](https://maven.com/stefan-jansen/agent-engineering) | Go from agent fundamentals to a live multi-agent system, with an evaluation harness that says whether it works. |
 
-**Free live sessions**, with the recording sent to everyone who registers: [Why Multi-Agent Systems Break, and How To Fix It](https://maven.com/p/393eee) (Wed, Nov 4, 11:00 AM ET / 16:00 UTC)
+**Free live sessions**, with the recording sent to everyone who registers: [AI Agent Architectures: ReAct, Reflection and Planning](https://maven.com/p/b146f5) (Wed, Oct 28, 11:00 AM ET / 15:00 UTC) · [Multi-Agent AI Systems: When They Help and How to Build Them](https://maven.com/p/393eee) (Wed, Nov 11, 11:00 AM ET / 16:00 UTC)
 
 ### Coding agents
 
@@ -123,7 +123,7 @@ Getting reliable work out of the agents you code with.
 
 | When | Offering | What you leave with |
 |------|----------|---------------------|
-| Oct 24, 2026 | [Loop Engineering: Reliable Work From Coding Agents](https://maven.com/stefan-jansen/loop-engineering) | Get reliable work out of coding agents: harness design, verification, and recovery from a bad run. |
+| Oct 24, 2026 | [Stop Micromanaging Your Coding Agent](https://maven.com/stefan-jansen/loop-engineering) | Get reliable work out of coding agents: harness design, verification, and recovery from a bad run. |
 
 *Between cohorts, the [**Insights** newsletter](https://insights.ml4trading.io/) covers the same ground weekly, source by source.*
 <!-- offerings:all end -->
