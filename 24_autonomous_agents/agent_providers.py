@@ -1,11 +1,11 @@
 """LLM provider abstraction with auto-detection cascade.
 
 Providers: Anthropic, OpenAI, Google Gemini, OpenRouter (any model), Ollama
-(local), Mock (CI fallback). Any OpenAI-compatible endpoint (OpenLLM, vLLM,
+(local), Mock (explicit tests). Any OpenAI-compatible endpoint (OpenLLM, vLLM,
 LM Studio, …) plugs in through the OpenAI client by passing a base_url.
 
 Auto-detect priority: ANTHROPIC_API_KEY -> OPENAI_API_KEY -> GOOGLE_API_KEY ->
-OPENROUTER_API_KEY -> Ollama (if running) -> Mock.
+OPENROUTER_API_KEY -> Ollama (if running). Missing live integrations raise errors.
 
 No disk cache, no structured logging — teaching code stays transparent.
 """
@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import json
 import os
-import warnings
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from agent_schemas import TokenUsage
+from provider_presets import PROVIDER_PRESETS, SUPPORTED_PROVIDERS
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -117,7 +117,7 @@ class MockLLMClient:
                     {
                         "action": "forecast",
                         "p_yes": 0.62,
-                        "rationale": "Based on search evidence, moderate probability of YES",
+                        "rationale": "Synthetic test support: https://example.org/default-0",
                         "confidence": 0.65,
                         "key_findings": ["Mock finding from search results"],
                     }
@@ -230,9 +230,17 @@ class OpenAIChatClient:
         api_key: str,
         model: str = "gpt-4.1-mini",
         temperature: float = 0.7,
-        max_tokens: int = 1200,
+        max_tokens: int = 4000,
         base_url: str | None = None,
     ) -> None:
+        # 4000, not 1200: reasoning models routed through this OpenAI-compatible
+        # client (e.g. deepseek-v4-pro via OpenRouter) spend completion tokens on
+        # an internal reasoning trace BEFORE the visible answer. With a 1200 cap,
+        # a long reasoning turn exhausts the budget and the API returns empty
+        # `content` (finish_reason="length") - the agent then degenerates to a
+        # 0.5 "JSON parse error" forecast. The production deepseek profile sets
+        # 8000 for the same reason; 4000 is ample for the single-agent notebooks.
+        # max_tokens is only a ceiling, so non-reasoning models pay nothing extra.
         try:
             from openai import OpenAI
         except ImportError as e:
@@ -449,70 +457,103 @@ class OllamaChatClient:
 
 
 def create_llm_client(provider: str = "") -> LLMClient:
-    """Create an LLM client with auto-detection cascade.
+    """Create an LLM client from the unified ``.env`` config.
 
-    Priority when ``provider`` is unset:
-      ANTHROPIC_API_KEY → OPENAI_API_KEY → GOOGLE_API_KEY → OPENROUTER_API_KEY
-      → Ollama (if running locally) → Mock.
+    The clean path is three intent-named variables - the same ones
+    system reads, so one ``.env`` drives the notebooks and the system:
 
-    Explicit ``provider`` values: ``"mock"``, ``"anthropic"``, ``"openai"``,
-    ``"google"``, ``"openrouter"``, ``"ollama"``. Any OpenAI-compatible
-    endpoint (OpenLLM, vLLM, LM Studio, …) can be reached by constructing
-    ``OpenAIChatClient(api_key=..., base_url=...)`` directly.
+        LLM_PROVIDER   one of: deepseek, openrouter, openai, anthropic, google,
+                       ollama, mock. The base URL for each is PREDEFINED in
+                       ``provider_presets.PROVIDER_PRESETS`` - never a user setting.
+        LLM_API_KEY    your key for that provider.
+        LLM_MODEL      optional model override; omit to use the provider default.
 
-    Per-provider env vars consulted: ``ANTHROPIC_MODEL``, ``OPENAI_MODEL``,
-    ``GOOGLE_MODEL``, ``OPENROUTER_MODEL``, ``OLLAMA_MODEL``. Set
-    ``LLM_PROVIDER=mock`` for CI runs.
+    Precedence: the ``provider`` argument wins, else ``LLM_PROVIDER`` from the
+    environment. With neither set, fall back to the legacy auto-detect cascade
+    (``ANTHROPIC_API_KEY`` → ``OPENAI_API_KEY`` → … → Ollama) so older
+    ``.env`` files keep working.
     """
-    provider = provider or os.environ.get("LLM_PROVIDER", "")
+    provider = (provider or os.environ.get("LLM_PROVIDER", "")).strip().lower()
 
-    if provider == "mock":
+    if provider in PROVIDER_PRESETS:
+        return _client_from_preset(provider)
+
+    if provider:
+        raise ValueError(
+            f"Unknown LLM provider {provider!r}. Supported: {', '.join(SUPPORTED_PROVIDERS)}"
+        )
+
+    return _legacy_autodetect()
+
+
+def _client_from_preset(provider: str) -> LLMClient:
+    """Build a client for a named provider using its predefined preset."""
+    preset = PROVIDER_PRESETS[provider]
+    client = preset["client"]
+    model = os.environ.get("LLM_MODEL") or preset["default_model"]
+
+    if client == "mock":
         return MockLLMClient()
 
-    if provider == "anthropic" or (not provider and os.environ.get("ANTHROPIC_API_KEY")):
-        key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if key:
-            model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-            return AnthropicChatClient(api_key=key, model=model)
+    if client == "ollama":
+        return OllamaChatClient(model=model, base_url=preset["base_url"])
 
-    if provider == "openai" or (not provider and os.environ.get("OPENAI_API_KEY")):
-        key = os.environ.get("OPENAI_API_KEY", "")
-        if key:
-            model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
-            return OpenAIChatClient(api_key=key, model=model)
+    key = os.environ.get("LLM_API_KEY", "")
+    if not key:
+        raise RuntimeError(
+            f"LLM_PROVIDER={provider} requires LLM_API_KEY. Select mock explicitly for a synthetic teaching fixture."
+        )
 
-    if provider == "google" or (not provider and os.environ.get("GOOGLE_API_KEY")):
-        key = os.environ.get("GOOGLE_API_KEY", "")
-        if key:
-            model = os.environ.get("GOOGLE_MODEL", "gemini-2.5-flash")
-            return GoogleGeminiClient(api_key=key, model=model)
+    if client == "anthropic":
+        return AnthropicChatClient(api_key=key, model=model)
+    if client == "google":
+        return GoogleGeminiClient(api_key=key, model=model)
+    # OpenAI-compatible: openai, deepseek, openrouter (base_url predefined).
+    return OpenAIChatClient(api_key=key, model=model, base_url=preset["base_url"])
 
-    if provider == "openrouter" or (not provider and os.environ.get("OPENROUTER_API_KEY")):
-        key = os.environ.get("OPENROUTER_API_KEY", "")
-        if key:
-            model = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
-            return OpenAIChatClient(
-                api_key=key,
-                model=model,
-                base_url="https://openrouter.ai/api/v1",
-            )
 
-    if provider == "ollama" or not provider:
-        try:
-            import httpx
+def _legacy_autodetect() -> LLMClient:
+    """Back-compat cascade for ``.env`` files that predate the LLM_* scheme.
 
-            r = httpx.get("http://localhost:11434/api/tags", timeout=2)
-            if r.status_code == 200:
-                return OllamaChatClient(
-                    model=os.environ.get("OLLAMA_MODEL", "qwen2.5:32b"),
-                )
-        except Exception:
-            pass
+    Honors the older per-provider vars (``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``
+    with ``OPENAI_BASE_URL``/``OPENAI_MODEL``, ``GOOGLE_API_KEY``,
+    ``OPENROUTER_API_KEY``) and a locally-running Ollama. No available live provider raises an error.
+    """
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return AnthropicChatClient(
+            api_key=os.environ["ANTHROPIC_API_KEY"],
+            model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+        )
 
-    warnings.warn(
-        "No LLM provider detected. Using MockLLMClient. Set one of "
-        "ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY "
-        "in .env, or start Ollama (`ollama serve`).",
-        stacklevel=2,
+    if os.environ.get("OPENAI_API_KEY"):
+        return OpenAIChatClient(
+            api_key=os.environ["OPENAI_API_KEY"],
+            model=os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"),
+            base_url=os.environ.get("OPENAI_BASE_URL") or None,
+        )
+
+    if os.environ.get("GOOGLE_API_KEY"):
+        return GoogleGeminiClient(
+            api_key=os.environ["GOOGLE_API_KEY"],
+            model=os.environ.get("GOOGLE_MODEL", "gemini-2.5-flash"),
+        )
+
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return OpenAIChatClient(
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            model=os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-4"),
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+    try:
+        import httpx
+
+        r = httpx.get("http://localhost:11434/api/tags", timeout=2)
+        if r.status_code == 200:
+            return OllamaChatClient(model=os.environ.get("OLLAMA_MODEL", "qwen2.5:32b"))
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        "No LLM provider is available. Configure a provider or select mock explicitly for a synthetic teaching fixture."
     )
-    return MockLLMClient()

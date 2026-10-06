@@ -95,21 +95,20 @@ class AgentForecastArtifact:
     Holds the probability, the reasoning trace behind it, heuristic
     confidence and sentiment metadata, and token usage for cost tracking.
 
-    `forecast_produced` separates an agent that committed to a probability
-    from one that ran out of turns. Both carry a `p_yes`; only the first is a
-    forecast, and treating the second as one puts an unearned 0.5 into every
-    average downstream.
+    `status` separates an agent that committed to a probability from one that
+    ran out of turns, failed, or declined to answer. Only `accepted` carries a
+    `p_yes`; the others leave it `None`, because averaging a fallback value
+    puts an unearned 0.5 into every aggregate downstream.
     """
 
     agent_id: str
-    p_yes: float
+    p_yes: float | None
     rationale: str
     traces: list[AgentTrace] = field(default_factory=list)
-
-    # False when the loop ended on its step budget rather than on a forecast
-    # action. `p_yes` then holds the loop's fallback value, which is not a
-    # judgement and must not be aggregated as one.
-    forecast_produced: bool = True
+    status: str = "accepted"
+    failure_reason: str | None = None
+    messages: list[dict[str, str]] = field(default_factory=list)
+    execution_mode: str = "unspecified"
 
     # Rich output fields
     confidence: float = 0.5
@@ -214,6 +213,10 @@ class ForecastQuestion:
     cutoff_date: str = ""
     current_market_price: float | None = None
     resolved_outcome: float | None = None  # 1.0 = YES, 0.0 = NO
+    outcome_sources: list[str] = field(default_factory=list)
+    outcome_note: str = ""
+    known_before_cutoff: bool = False
+    market_price_provenance: str = "Unverified illustrative value"
 
 
 @dataclass(slots=True)
@@ -235,8 +238,10 @@ class ForecastResult:
     supervisor: SupervisorArtifact | None = None
 
     # Final output
-    final_probability: float = 0.5
+    final_probability: float | None = None
     final_confidence: float = 0.5
+    status: str = "accepted"
+    failure_reason: str | None = None
 
     # Operational
     total_token_usage: TokenUsage = field(default_factory=TokenUsage)

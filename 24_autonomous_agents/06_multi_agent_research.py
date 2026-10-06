@@ -54,10 +54,14 @@
 # %%
 """Multi-Agent Research - parallel agents on one shared question."""
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime
+import sys
 
-import matplotlib.pyplot as plt
+from utils.paths import get_chapter_dir
+
+sys.path.insert(0, str(get_chapter_dir(24)))
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import polars as pl
 from agent_fixtures import get_chapter_clear_question
 from agent_observability import (
@@ -73,42 +77,25 @@ from agent_providers import TokenUsage, create_llm_client
 from agent_research import ResearchAgent, format_agent_summary
 from agent_schemas import AgentForecastArtifact
 from agent_tools import create_search_client
-from IPython.display import Markdown, display
-
-from utils.style import COLORS, add_message_title, format_pct_axis, show_with_alt
-
-# %% [markdown]
-# ## Settings
-#
-# `RUN_LIVE` left at `False` replays the pinned capture named below and makes no API calls.
-# Setting it to `True` forecasts a current question against live search and live models, which
-# costs money and will not reproduce these numbers; a prediction-market question moves under
-# you, and once it resolves it has to be swapped for a current one of the same kind.
-#
-# `N_AGENTS` is how many copies to run on the live path. Three is enough for a spread to be
-# visible and small enough to be cheap; the replay uses however many the capture holds.
-#
-# `MAX_STEPS` and `MAX_SEARCH_RESULTS` are the per-agent turn budget and search width from
-# [`04_research_agent`](04_research_agent.ipynb). Open models tend to search more before
-# committing, so raise `MAX_STEPS` if agents start hitting the budget without forecasting.
-#
-# `NEYMAN_CORRELATION` is the pairwise correlation assumed when the panel is aggregated. It is
-# the input nothing here measures, and the sensitivity section further down is what says how
-# much rests on it.
-#
-# `LLM_PROVIDER` is empty so the factory picks the first provider whose key is set; the cell
-# below reports which provider the capture used. Setting it to `"openrouter"` with
-# `OPENROUTER_MODEL="deepseek/deepseek-v4-pro"` drives an open model instead. `"mock"` returns
-# a constant forecast and is a smoke test, not a reproduction of this run.
 
 # %% tags=["parameters"]
+# RUN_LIVE=False (the default) replays the pinned trace named in PINNED_TRACE:
+# the notebook reloads that saved run and makes no API calls, so the outputs are
+# stable and match the chapter. Set RUN_LIVE=True to forecast a current question
+# live; that path needs API keys and produces different numbers.
 RUN_LIVE = False
 PINNED_TRACE = "06_multi_agent_research_20260609T141413Z_9fc4a2655471.json"
+
+# Live-run settings (ignored when RUN_LIVE=False). Blank reads the provider from
+# your .env (LLM_PROVIDER + LLM_API_KEY); the captured run used claude-sonnet-4.
+# Set LLM_PROVIDER="openrouter" with LLM_MODEL="deepseek/deepseek-chat-v3.1" to
+# drive an open model instead (raise MAX_STEPS for open models, which tend to
+# issue more searches before forecasting). LLM_PROVIDER="mock" is a deterministic
+# CI smoke-test only and does not reproduce the captured forecasts.
 LLM_PROVIDER = ""
 N_AGENTS = 3
 MAX_STEPS = 5
 MAX_SEARCH_RESULTS = 5
-NEYMAN_CORRELATION = 0.3
 
 # %% [markdown]
 # ## Setup
@@ -133,43 +120,45 @@ NEYMAN_CORRELATION = 0.3
 # %%
 if RUN_LIVE:
     llm = create_llm_client(LLM_PROVIDER)
-    search = create_search_client(LLM_PROVIDER)
+    search = create_search_client()
     question = get_chapter_clear_question()
     provider_name = llm.model_name
     n_agents = N_AGENTS
-    captured_on = date.today().isoformat()
 else:
+    # Replay: load the pinned trace and rebuild the question it forecast.
     pinned_run = RunTrace.load(TRACES_DIR / PINNED_TRACE)
     question = pinned_run.question_obj()
     provider_name = pinned_run.provider
     n_agents = len(pinned_run.agents)
-    captured_on = datetime.fromisoformat(pinned_run.created_at).date().isoformat()
 
-mode = "live" if RUN_LIVE else f"replay of a capture recorded {captured_on}"
-print(f"Mode:         {mode}")
+print(f"Mode:         {'LIVE' if RUN_LIVE else 'REPLAY (pinned 2026-06-09 trace)'}")
 print(f"Provider:     {provider_name}")
 print(f"Question:     {question.question}")
 print(f"Market p_yes: {question.current_market_price}")
 print(f"Agents:       {n_agents}")
 
 # %% [markdown]
-# ## Running the Agents in Parallel
+# ## Running Agents in Parallel
 #
-# Each agent spends most of its time waiting on a network call, so running them one after
-# another wastes the whole panel's latency. A `ThreadPoolExecutor` gives each its own thread;
-# they share the model client and the search client, so both have to be safe under concurrent
-# calls. Anthropic's and Tavily's clients are. A provider whose client is not would need
-# construction inside the worker rather than outside it.
-#
-# Each agent gets its own tracer wrapping the shared client. That is what keeps the captured
-# conversations attributable: one tracer across three threads would interleave three agents'
-# prompts into one log with no way to separate them afterwards. The per-agent logs are merged
-# once the pool has drained.
+# `ThreadPoolExecutor` runs agents concurrently. Each agent independently
+# decides what to search and when to forecast.
 
 
 # %%
 def run_agent(agent_id: str):
-    """Run one research agent under its own tracer, returning both."""
+    """Run a single research agent under its own tracer.
+
+    The pool shares one `llm` and one `search` client across worker threads,
+    so thread safety here depends on those providers being safe under
+    concurrent calls. Anthropic and Tavily clients are; if you swap in a
+    provider that is not, construct the client inside this function.
+
+    Each agent wraps the shared client in its own `TracingLLMClient` labeled
+    with the `agent_id`. That records every prompt the agent sent and every
+    raw response it received - the full conversation, not just the parsed
+    forecast - and a per-agent tracer keeps the capture thread-safe and
+    correctly attributed. We merge the call logs afterward.
+    """
     tracer = trace_llm(llm, label=agent_id)
     agent = ResearchAgent(
         llm=tracer,
@@ -178,15 +167,9 @@ def run_agent(agent_id: str):
         max_steps=MAX_STEPS,
         max_search_results=MAX_SEARCH_RESULTS,
     )
-    return agent.run(question, market_price=question.current_market_price), tracer
+    return agent.run(question, market_price=None), tracer
 
 
-# %% [markdown]
-# The live path submits one task per agent. The replay path rehydrates the three saved
-# artifacts and their conversations instead, and every display cell below reads the same
-# objects either way.
-
-# %%
 artifacts: list[AgentForecastArtifact] = []
 
 if RUN_LIVE:
@@ -199,16 +182,13 @@ if RUN_LIVE:
             tracers.append(tracer)
     llm_calls = merge_calls(*tracers)
 else:
+    # Replay: rehydrate the saved artifacts and the raw model conversation. The
+    # display cells below cannot tell these apart from a live run's outputs.
     artifacts = pinned_run.agent_artifacts()
     llm_calls = pinned_run.call_log()
 
-# Threads finish in whatever order they finish; sort so the display is stable.
+# Sort by agent_id for consistent display
 artifacts.sort(key=lambda a: a.agent_id)
-
-# The replay is a fixed record. These fail closed if the named trace changes underneath.
-if not RUN_LIVE:
-    assert [a.p_yes for a in artifacts] == [0.12, 0.22, 0.22]
-    assert len(llm_calls) == 12
 
 # %% [markdown]
 # ## What Each Agent Returned
@@ -226,7 +206,8 @@ panel_df = pl.DataFrame(
     [
         {
             "agent_id": a.agent_id,
-            "p_yes": round(a.p_yes, 3),
+            "status": a.status,
+            "p_yes": round(a.p_yes, 3) if a.p_yes is not None else None,
             "confidence": round(a.confidence, 3),
             "sentiment": a.sentiment.value,
             "queries": a.search_queries_made,
@@ -235,50 +216,9 @@ panel_df = pl.DataFrame(
         for a in artifacts
     ]
 )
-print(f"Market price shown to the agents: {question.current_market_price:.1%}")
-print(f"Total tokens across the panel:    {total_tokens.total_tokens:,}\n")
+print(f"Market p_yes (Polymarket):  {question.current_market_price:.2f}")
+print(f"Total agent tokens:         {total_tokens.total_tokens:,}\n")
 panel_df
-
-# %% [markdown]
-# The market line is drawn as context rather than as a benchmark, for the reason given above:
-# every agent was shown it.
-
-# %%
-probabilities = panel_df["p_yes"].to_list()
-probability_range = max(probabilities) - min(probabilities)
-
-fig, ax = plt.subplots()
-bars = ax.bar(
-    panel_df["agent_id"].to_list(),
-    probabilities,
-    color=COLORS["blue"],
-    width=0.6,
-)
-ax.axhline(
-    question.current_market_price,
-    color=COLORS["amber"],
-    linestyle="--",
-    linewidth=1.5,
-    label="Market price, shown to every agent",
-)
-ax.bar_label(bars, labels=[f"{value:.0%}" for value in probabilities], padding=3)
-ax.set_xlabel("Research agent")
-ax.set_ylabel("Probability of recession")
-ax.set_ylim(0, max(probabilities) + 0.08)
-format_pct_axis(ax)
-add_message_title(
-    ax,
-    "Probability of recession, by research agent",
-    subtitle=f"Same prompt, tools and temperature; capture recorded {captured_on}",
-)
-ax.legend(loc="upper left")
-show_with_alt(
-    fig,
-    "Bar chart with one bar per research agent, each labelled with the probability that agent "
-    "returned, and a dashed horizontal line at the market price every agent was shown. Two of "
-    "the bars are the same height and sit just above the market line; the third is much "
-    "shorter and sits well below it.",
-)
 
 # %% [markdown]
 # ## Reading the Agents, Not the Aggregate
@@ -298,18 +238,6 @@ show_with_alt(
 # %%
 print(show_agents(artifacts))
 
-# %%
-probability_text = ", ".join(f"{value:.2f}" for value in probabilities)
-display(
-    Markdown(
-        f"**This run**: the three agents returned {probability_text}, a range of "
-        f"{probability_range:.2f} on a question where the market stood at "
-        f"{question.current_market_price:.1%}. That range is one observation from one capture. "
-        "It says the panel is not degenerate; it does not say how large the spread would be on "
-        "another question, another day, or with a different model."
-    )
-)
-
 # %% [markdown]
 # ## Aggregating the Panel
 #
@@ -327,22 +255,25 @@ display(
 # would pull the panel toward even odds on the strength of an agent that never answered.
 
 # %%
-answered = [a for a in artifacts if a.forecast_produced]
-if not answered:
-    raise RuntimeError("no agent produced a forecast; there is nothing to aggregate")
+forecast_artifacts = [a for a in artifacts if a.p_yes is not None]
+if not forecast_artifacts:
+    run = RunTrace.capture(
+        notebook="06_multi_agent_research",
+        provider=provider_name,
+        question=question,
+        agents=artifacts,
+        llm_calls=llm_calls,
+        status="abstained",
+    )
+    raise RuntimeError(f"All researchers abstained. Diagnostic trace: {run.save()}")
+probs = [a.p_yes for a in forecast_artifacts]
+weights = [a.confidence for a in forecast_artifacts]
 
-panel_probabilities = [a.p_yes for a in answered]
-panel_confidences = [a.confidence for a in answered]
+simple_mean = sum(probs) / len(probs)
+result_neyman = neyman_extremize(probs, base=0.5, correlation=0.3)
+result_weighted = neyman_extremize_weighted(probs, weights, base=0.5, correlation=0.3)
 
-simple_mean = sum(panel_probabilities) / len(panel_probabilities)
-result_neyman = neyman_extremize(panel_probabilities, base=0.5, correlation=NEYMAN_CORRELATION)
-result_weighted = neyman_extremize_weighted(
-    panel_probabilities, panel_confidences, base=0.5, correlation=NEYMAN_CORRELATION
-)
-
-print(f"Agents that produced a forecast: {len(answered)} of {len(artifacts)}")
-
-pl.DataFrame(
+agg_df = pl.DataFrame(
     [
         {
             "method": "Simple mean",
@@ -351,7 +282,7 @@ pl.DataFrame(
             "n_eff": None,
         },
         {
-            "method": "Neyman",
+            "method": "Neyman (ρ=0.3)",
             "aggregate": round(result_neyman.extremized_probability, 3),
             "d": round(result_neyman.extremization_factor, 3),
             "n_eff": round(result_neyman.effective_n, 2),
@@ -364,6 +295,7 @@ pl.DataFrame(
         },
     ]
 )
+agg_df
 
 # %% [markdown]
 # Both Neyman variants sit further from the base rate than the mean, which is what
@@ -381,89 +313,18 @@ pl.DataFrame(
 # %%
 correlation_rows = []
 for rho in [0.0, 0.1, 0.3, 0.5, 0.7, 0.9]:
-    r = neyman_extremize(panel_probabilities, base=0.5, correlation=rho)
-    rw = neyman_extremize_weighted(
-        panel_probabilities, panel_confidences, base=0.5, correlation=rho
-    )
-    # The reported aggregate is clamped into [0.01, 0.99]. Recovering the value before the
-    # clamp from the same result - the mean, the base rate and the diversity factor it used -
-    # is what shows when the clamp is carrying the answer.
-    unclamped = 0.5 + r.extremization_factor * (r.raw_probability - 0.5)
+    r = neyman_extremize(probs, base=0.5, correlation=rho)
+    rw = neyman_extremize_weighted(probs, weights, base=0.5, correlation=rho)
     correlation_rows.append(
         {
             "correlation": rho,
             "neyman": round(r.extremized_probability, 3),
-            "before the clamp": round(unclamped, 3),
             "weighted_neyman": round(rw.extremized_probability, 3),
             "shift_from_mean": round((r.extremized_probability or 0) - simple_mean, 3),
         }
     )
 correlation_df = pl.DataFrame(correlation_rows)
 correlation_df
-
-# %% [markdown]
-# The `before the clamp` column is the one to read first. This panel sits far enough below the
-# base rate that the formula, credited with three near-independent observations, returns a
-# **negative** probability, and `neyman_extremize` floors it. Where the two columns differ, the
-# reported aggregate is the floor rather than the method's answer, and the sensitivity curve
-# below is flat there for that reason and no other.
-
-# %%
-rho_values = correlation_df["correlation"].to_list()
-
-unclamped_values = correlation_df["before the clamp"].to_list()
-
-fig, ax = plt.subplots()
-ax.plot(
-    rho_values,
-    unclamped_values,
-    ":",
-    color=COLORS["negative"],
-    linewidth=1.5,
-    label="Neyman before the clamp",
-)
-ax.plot(
-    rho_values,
-    correlation_df["neyman"].to_list(),
-    "o-",
-    color=COLORS["blue"],
-    linewidth=2,
-    label="Neyman as reported",
-)
-ax.plot(
-    rho_values,
-    correlation_df["weighted_neyman"].to_list(),
-    "s--",
-    color=COLORS["copper"],
-    linewidth=1.5,
-    label="Confidence-weighted Neyman",
-)
-ax.axhline(
-    simple_mean,
-    color=COLORS["neutral"],
-    linestyle="-.",
-    linewidth=1.5,
-    label="Simple mean",
-)
-ax.set_xlabel(r"Assumed pairwise correlation ($\rho$)")
-ax.set_ylabel("Aggregate probability")
-ax.set_xlim(0, 0.9)
-ax.set_ylim(min(unclamped_values) - 0.02, simple_mean + 0.04)
-format_pct_axis(ax)
-add_message_title(
-    ax,
-    "Aggregate probability against the assumed correlation",
-    subtitle="Same three forecasts throughout; the mean is the unextremized baseline",
-)
-ax.legend(loc="lower right")
-show_with_alt(
-    fig,
-    "Line chart of the aggregate probability against the assumed pairwise correlation, from "
-    "independent to nearly identical. Both reported series rise steadily toward the horizontal "
-    "line marking the unextremized mean, and both run flat at the independent end. The dotted "
-    "line showing the value before the clamp keeps falling there, below zero, which is what "
-    "the flat section is hiding.",
-)
 
 # %% [markdown]
 # At the dependent end the panel is credited with barely more than one observation and the
@@ -497,8 +358,14 @@ show_with_alt(
 # the evidence, the uncertainties - stays in the record and out of the next prompt, which is a
 # context budget decision as much as a design one.
 
+# %% [markdown]
+# The correlation values are illustrative assumptions, not measured dependence
+# among these models. Confidence weights are model-reported or heuristic and are
+# not calibrated reliability estimates. Use the sensitivity sweep to see how those
+# assumptions change the arithmetic, not to establish a performance advantage.
+
 # %%
-all_summaries = "\n\n---\n\n".join(format_agent_summary(a) for a in artifacts)
+all_summaries = "\n\n---\n\n".join(format_agent_summary(a) for a in forecast_artifacts)
 print(all_summaries)
 
 # %% [markdown]
@@ -524,26 +391,6 @@ audit_df = pl.DataFrame(
     ]
 )
 audit_df
-
-# %% [markdown]
-# Two properties of the record are worth measuring rather than assuming, and the cell below
-# measures both. How many of the saved prompts carried the market's own probability, and how
-# many retrieved results carry a publication date.
-
-# %%
-search_results = [
-    result for artifact in artifacts for trace in artifact.traces for result in trace.results
-]
-dated_sources = sum(result.published is not None for result in search_results)
-market_mentions = sum(f"{question.current_market_price:.3f}" in str(call) for call in llm_calls)
-
-display(
-    Markdown(
-        f"**Replay audit**: {market_mentions} of {len(llm_calls)} saved model calls include "
-        f"the market probability; {dated_sources} of {len(search_results)} retrieved results "
-        "record a publication date."
-    )
-)
 
 # %% [markdown]
 # Both counts bound what this run can be used for. Every prompt carried the market price, so
@@ -581,7 +428,7 @@ if RUN_LIVE:
         agents=artifacts,
         aggregation=result_neyman,
         final_probability=result_neyman.extremized_probability,
-        notes="Parallel research agents on one pinned, market-aware question.",
+        notes="Parallel research agents on the pinned one-directional question.",
         llm_calls=llm_calls,
     )
     trace_path = run.save()

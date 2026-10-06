@@ -43,66 +43,34 @@
 # %%
 """LLM Providers and the ReAct Loop - multi-provider agent reasoning."""
 
+import sys
+
+from utils.paths import get_chapter_dir
+
+sys.path.insert(0, str(get_chapter_dir(24)))
+
 import json
-import math
 from datetime import date
 
 from agent_fixtures import get_live_question
 from agent_observability import TRACES_DIR, RunTrace, trace_llm
+from agent_pipeline import validate_probabilities
 from agent_providers import ChatMessage, MockLLMClient, TokenUsage, create_llm_client
 from agent_schemas import AgentForecastArtifact, AgentTrace, ForecastQuestion
 from agent_tools import ToolExecutor, create_search_client, format_search_results
-from IPython.display import Markdown, display
-
-# %% [markdown]
-# ## Two ways to run this notebook
-#
-# `RUN_LIVE` decides where the agent's evidence comes from. Left at `False`, the notebook
-# reloads a **run record**: a JSON file holding the question, every prompt sent to the model,
-# every reply, and every search result, captured on 2026-06-15 from a Claude Sonnet model and
-# the Tavily search API. Nothing is called over the network and the printed session is
-# identical on every machine. Set it to `True`, with `ANTHROPIC_API_KEY` and `TAVILY_API_KEY`
-# in the environment, and the notebook fetches an open prediction-market question and runs the
-# agent against today's web; that path costs money and produces different output each time.
-#
-# `MAX_STEPS` is the loop's budget: the agent may take at most this many turns, each of which
-# is one search or one forecast. Five is enough for a handful of searches and a decision, and
-# small enough that a model that never commits is stopped rather than left running.
-#
-# `LLM_PROVIDER` is empty so the client factory picks the first provider whose API key is set.
-# It only takes effect on the live path.
 
 # %% tags=["parameters"]
+# RUN_LIVE=False (the default) replays a pinned claude-sonnet + Tavily run: the
+# notebook reloads the saved trace named below, makes no API calls, and
+# reproduces the captured ReAct session, so the outputs are stable and match the
+# narrative. Set RUN_LIVE=True (with LLM_PROVIDER + LLM_API_KEY + TAVILY_API_KEY in .env) to
+# fetch a fresh live question and run the agent against it; that path makes real
+# calls and is not reproducible.
 RUN_LIVE = False
 PINNED_TRACE = "01_react_reasoning_20260615T191047Z_04eb6e7c603d.json"
-LLM_PROVIDER = ""
-MAX_STEPS = 5
 
-# %% [markdown]
-# **Optional dependencies** (for real LLM and web search; the chapter runs in
-# deterministic mock mode without them):
-#
-# ```bash
-# # Claude (recommended)
-# uv pip install anthropic httpx
-# # OpenAI (alternative)
-# uv pip install openai httpx
-# # Ollama (free, local). Install from https://ollama.com, then:
-# #   ollama pull qwen2.5:32b
-# ```
-#
-# Then set the relevant API keys in `.env`:
-#
-# - `ANTHROPIC_API_KEY` (https://console.anthropic.com)
-# - `OPENAI_API_KEY` (https://platform.openai.com)
-# - `GOOGLE_API_KEY` (https://aistudio.google.com)
-# - `OPENROUTER_API_KEY` (https://openrouter.ai), one key for any model
-#   (set `OPENROUTER_MODEL`, e.g. `anthropic/claude-sonnet-4`)
-# - `TAVILY_API_KEY` (https://tavily.com, web search)
-#
-# `create_llm_client()` auto-selects a provider in the order Anthropic →
-# OpenAI → Google → OpenRouter → local Ollama. Without any API key, all
-# notebooks fall back to deterministic mock mode.
+LLM_PROVIDER = ""  # Blank reads .env; "mock" selects a synthetic fixture
+MAX_STEPS = 6
 
 # %% [markdown]
 # ## The LLM Provider Protocol
@@ -124,6 +92,28 @@ MAX_STEPS = 5
 # starts spending money on real prompts. On the replay path there is no client, so the reply
 # comes out of the saved record.
 
+# %% [markdown]
+# **Optional dependencies** (for a real LLM and web search - the chapter runs in
+# offline replay mode without them):
+#
+# ```bash
+# uv pip install anthropic openai httpx        # cloud providers
+# # Ollama (free, local) - install from https://ollama.com, then:
+# #   ollama serve && ollama pull qwen3:8b
+# ```
+#
+# Then set your provider in the repo-root `.env` (copy it first:
+# `cp .env.example .env`). You set three things - **never a base URL**:
+#
+# - `LLM_PROVIDER` - `deepseek` | `openrouter` | `openai` | `anthropic` | `google` | `ollama` | `mock`
+# - `LLM_API_KEY` - your key for that provider
+# - `LLM_MODEL` - *optional*; blank uses the provider default
+# - `TAVILY_API_KEY` - web search ([tavily.com](https://tavily.com))
+#
+# Live mode auto-loads `.env`. Missing live credentials raise an explicit error;
+# select `mock` only for a labeled synthetic test fixture. Run `uv run python check_env.py` to confirm which
+# model will be used.
+
 # %%
 if RUN_LIVE:
     llm = create_llm_client(LLM_PROVIDER)
@@ -135,8 +125,6 @@ else:
     # Replay: reload the pinned trace; the provider name and warm-up response
     # come from the saved run, and no live client is created.
     pinned_run = RunTrace.load(TRACES_DIR / PINNED_TRACE)
-    assert pinned_run.notebook == "01_react_reasoning"
-    assert len(pinned_run.agents) == 1
     llm = None
     provider_name = pinned_run.provider
     response = pinned_run.params.get("warmup_response", "")
@@ -195,6 +183,9 @@ Your job:
 
 You must follow the action schema exactly and output valid JSON only.
 You must not browse prediction market prices unless they are explicitly provided."""
+SYSTEM_PROMPT += (
+    "\nCite a retained source URL or title in the rationale. Abstain if evidence is insufficient."
+)
 
 # %% [markdown]
 # ### Step prompt
@@ -212,11 +203,15 @@ def build_step_prompt(q: ForecastQuestion, market_price: float | None = None) ->
     if market_price is not None:
         prompt += f"MARKET IMPLIED PROBABILITY (p_yes):\n{market_price}\n\n"
     prompt += (
+        "SEARCH BUDGET: search only when a specific fact is missing; do not "
+        "reformulate a query you already ran. Once you have a base rate and the "
+        "current signal, forecast.\n\n"
         "NEXT ACTION SCHEMA (output JSON only):\n"
         'If you need more info:\n{"action":"search","query":"..."}\n'
         "If you are ready to forecast:\n"
         '{"action":"forecast","p_yes":0.XX,"rationale":"short explanation '
         'grounded in evidence and base rates"}\n\n'
+        'If evidence is insufficient: {"action":"abstain","rationale":"why"}\n'
         "Pick exactly one action."
     )
     return prompt
@@ -249,77 +244,14 @@ def _init_react_session(
 
 
 # %% [markdown]
-# ### Invalid-action retry
-#
-# Malformed JSON, schema-invalid values, and unknown actions are recorded and
-# returned to the model for correction. Repeated failures reach the step-budget
-# sentinel; a production decision layer should retry or abstain rather than
-# treat it as a forecast.
-
-
-# %%
-def _record_invalid_action(
-    action_type: str,
-    response: str,
-    messages: list[ChatMessage],
-    traces: list[AgentTrace],
-    step: int,
-) -> None:
-    """Record an invalid action and request a corrected JSON response."""
-    traces.append(AgentTrace(step=step, action=action_type, llm_raw=response))
-    messages.append(ChatMessage(role="assistant", content=response))
-    messages.append(
-        ChatMessage(role="tool", content="Error: output one valid search or forecast JSON action.")
-    )
-    print(f"  Step {step}: {action_type}; retrying")
-
-
-# %% [markdown]
-# ### Action validation
-#
-# Provider responses are untrusted input. Parse and validate the two documented
-# schemas before the loop executes a search or accepts a forecast.
-
-
-# %%
-def _parse_action(response: str) -> tuple[str, dict[str, object] | None]:
-    """Return a validated action type and object, or a bounded-retry failure."""
-    try:
-        action = json.loads(response)
-    except (json.JSONDecodeError, ValueError):
-        return "parse_failure", None
-    if not isinstance(action, dict):
-        return "schema_failure", None
-
-    action_type = action.get("action")
-    if not isinstance(action_type, str):
-        return "schema_failure", None
-    if action_type == "search":
-        query = action.get("query")
-        if not isinstance(query, str) or not query.strip():
-            return "schema_failure", None
-        action["query"] = query.strip()
-    elif action_type == "forecast":
-        p_yes = action.get("p_yes")
-        rationale = action.get("rationale")
-        if isinstance(p_yes, bool) or not isinstance(p_yes, (int, float)):
-            return "schema_failure", None
-        try:
-            normalized_p_yes = float(p_yes)
-        except (TypeError, ValueError, OverflowError):
-            return "schema_failure", None
-        if not math.isfinite(normalized_p_yes) or not isinstance(rationale, str):
-            return "schema_failure", None
-        action["p_yes"] = normalized_p_yes
-    return action_type, action
-
-
-# %% [markdown]
 # ### The ReAct loop
 #
-# Each iteration asks the LLM to search or forecast, executes valid actions, and
-# feeds observations back. The loop terminates on a valid forecast or the step
-# limit. Forecast probabilities are clamped to the unit interval.
+# Each iteration: the LLM decides what to do (search or forecast), we
+# execute it, and feed the observation back. The loop terminates when the
+# agent issues a `forecast` action or hits the step limit. The `p_yes`
+# value must be a finite number in [0, 1], with a rationale identifying
+# retained evidence. Invalid or unsupported output is rejected. The budget
+# can end with abstention rather than a probability.
 
 
 # %%
@@ -329,40 +261,72 @@ def run_react_agent(
     question: ForecastQuestion,
     max_steps: int = 5,
     market_price: float | None = None,
-) -> tuple[float, str, list[AgentTrace], TokenUsage]:
-    """Run a ReAct forecasting agent. Returns (p_yes, rationale, traces, token_usage)."""
+) -> tuple[float | None, str, list[AgentTrace], TokenUsage]:
+    if max_steps < 1:
+        raise ValueError("max_steps must be positive")
     cutoff, executor, messages = _init_react_session(question, search_client, market_price)
-    traces: list[AgentTrace] = []
+    traces, sources = [], []
     total_tokens = TokenUsage()
-
-    for step in range(1, max_steps + 1):
-        response, usage = llm.complete_with_usage(messages, json_mode=True)
-        total_tokens = total_tokens + usage
-
-        action_type, action = _parse_action(response)
-        if action is None:
-            _record_invalid_action(action_type, response, messages, traces, step)
-            continue
-
-        if action_type == "search":
-            query = str(action["query"])
+    reason = "Budget exhausted without a supported forecast"
+    for step in range(max_steps + 1):
+        synthesis_only = step == max_steps
+        if synthesis_only:
+            if not sources:
+                break
+            messages.append(
+                ChatMessage(
+                    role="user",
+                    content="No more searches. Cite retained evidence and forecast, or abstain.",
+                )
+            )
+        try:
+            raw, usage = llm.complete_with_usage(messages, json_mode=True)
+        except Exception as exc:
+            reason = f"Model call failed ({type(exc).__name__})"
+            traces.append(AgentTrace(step=step, action="provider_error", llm_raw=reason))
+            break
+        total_tokens += usage
+        messages.append(ChatMessage(role="assistant", content=raw))
+        try:
+            action = json.loads(raw)
+            if not isinstance(action, dict):
+                raise ValueError("Action must be an object")
+        except (ValueError, TypeError):
+            action = {}
+        kind = action.get("action", "invalid")
+        if kind == "search" and not synthesis_only:
+            query = action.get("query", "")
             results = executor.execute_search(query, max_results=5, cutoff_date=cutoff)
-            traces.append(AgentTrace(step=step, action="search", query=query, results=results))
-            messages.append(ChatMessage(role="assistant", content=response))
+            sources.extend(results)
+            traces.append(
+                AgentTrace(step=step, action="search", query=query, results=results, llm_raw=raw)
+            )
             messages.append(ChatMessage(role="tool", content=format_search_results(results)))
-            print(f'  Step {step}: search("{query}") → {len(results)} results')
-
-        elif action_type == "forecast":
-            raw_p_yes = float(action["p_yes"])
-            rationale = str(action["rationale"])
-            p_yes = max(0.0, min(1.0, float(raw_p_yes)))
-            traces.append(AgentTrace(step=step, action="forecast", llm_raw=response))
-            print(f"  Step {step}: forecast → p_yes={p_yes:.2f}")
-            return p_yes, rationale, traces, total_tokens
-        else:
-            _record_invalid_action(action_type, response, messages, traces, step)
-
-    return 0.5, "Max steps reached", traces, total_tokens
+            print(f"Step {step}: search -> {len(results)} eligible results")
+            continue
+        traces.append(AgentTrace(step=step, action=str(kind), llm_raw=raw))
+        if kind == "abstain":
+            reason = str(action.get("rationale") or "Insufficient evidence")
+            break
+        try:
+            if kind != "forecast":
+                raise ValueError("Invalid action or exhausted search budget")
+            if isinstance(action["p_yes"], bool):
+                raise ValueError("Probability must be a number, not a boolean")
+            probability = float(action["p_yes"])
+            validate_probabilities([probability])
+            rationale = action.get("rationale")
+            if not isinstance(rationale, str) or not any(
+                (s.url and s.url in rationale) or (s.title and s.title in rationale)
+                for s in sources
+            ):
+                raise ValueError("Forecast needs a rationale identifying retained evidence")
+        except (KeyError, TypeError, ValueError) as exc:
+            reason = str(exc)
+            messages.append(ChatMessage(role="tool", content=reason))
+            continue
+        return probability, rationale, traces, total_tokens
+    return None, reason, traces, total_tokens
 
 
 # %% [markdown]
@@ -381,7 +345,7 @@ def run_react_agent(
 
 # %%
 if RUN_LIVE:
-    search_client = create_search_client(LLM_PROVIDER)
+    search_client = create_search_client()
     search_name = type(search_client).__name__
     # Wrap the client so every prompt/response is captured for the run trace.
     tracer = trace_llm(llm, label="react_agent")
@@ -400,6 +364,9 @@ else:
         artifact.traces,
         artifact.token_usage,
     )
+    if not any(t.action == "forecast" for t in traces):
+        p_yes = None
+        rationale = "No forecast action in this capture; the saved 0.5 is a legacy sentinel"
     search_name = pinned_run.params.get("search_client", "replay (pinned trace)")
     print(f"Search: {search_name}\n")
     print(f"Question: {question.question}\n")
@@ -410,15 +377,9 @@ else:
             print(f"  Step {t.step}: forecast → p_yes={p_yes:.2f}")
 
 # %%
-committed_forecast = any(t.action == "forecast" for t in traces)
-if committed_forecast:
-    print("--- Forecast ---")
-    print(f"p(YES) = {p_yes:.2f}")
-    print(f"Rationale: {rationale[:300]}")
-else:
-    print("--- No forecast: step budget exhausted ---")
-    print(f"Loop returned p(YES) = {p_yes:.2f} as its no-answer value")
-    print(f"Reason: {rationale[:300]}")
+print("--- Forecast ---" if p_yes is not None else "--- Abstention ---")
+print(f"p(YES) = {p_yes}")
+print(f"Rationale: {rationale}")
 print(f"Tokens: {tokens.total_tokens:,}")
 
 # %% [markdown]
@@ -460,6 +421,9 @@ if RUN_LIVE:
         rationale=rationale,
         traces=traces,
         token_usage=tokens,
+        status="accepted" if p_yes is not None else "abstained",
+        failure_reason=rationale if p_yes is None else None,
+        execution_mode="synthetic" if "mock" in llm.model_name else "live",
         search_queries_made=sum(1 for t in traces if t.action == "search"),
         sources_consulted=sum(len(t.results) for t in traces),
     )
@@ -487,48 +451,6 @@ else:
     )
 
 # %% [markdown]
-# ### What the run record shows
-#
-# One limit on this evidence is worth naming before reading the summary. The saved search
-# results carry no publication dates, so nothing in the record establishes that a document the
-# agent read was available before the question opened. Evaluating a forecasting agent against
-# resolved history needs search results that can be filtered by publication date and a policy
-# for the ones that carry no date at all, which is what
-# [`02_tool_contracts`](02_tool_contracts.ipynb) builds.
-
-# %%
-active_run = run if RUN_LIVE else pinned_run
-search_steps = [trace for trace in traces if trace.action == "search"]
-committed = any(trace.action == "forecast" for trace in traces)
-n_searches = len(search_steps)
-n_rejected = sum(1 for trace in traces if trace.action not in {"search", "forecast"})
-n_results = sum(len(trace.results) for trace in search_steps)
-n_market_price_prompts = sum(
-    1
-    for call in active_run.llm_calls
-    for message in call.get("messages", [])
-    if "MARKET IMPLIED PROBABILITY" in message.get("content", "")
-)
-outcome = (
-    f"""committed to $p_{{\\text{{yes}}}}={p_yes:.2f}$, reasoning: *{rationale}*."""
-    if committed
-    else f"""reached the {MAX_STEPS}-step budget without ever emitting a forecast action, """
-    f"""so the loop returned its no-answer value of $p_{{\\text{{yes}}}}={p_yes:.2f}$ """
-    f"""and the note *{rationale}*. That value is the absence of a forecast, not a 50/50 """
-    """judgement, and a caller must branch on it."""
-)
-display(
-    Markdown(
-        f"""**What this run did**: {n_searches} of its turns were searches, returning """
-        f"""{n_results} documents, and {n_rejected} were replies rejected before they """
-        f"""reached a tool. The agent then {outcome} """
-        f"""Its prompts carried the market-implied probability {n_market_price_prompts} """
-        """times, so the market quote printed near the top of this notebook was withheld """
-        """from the agent and is a reference for the reader only."""
-    )
-)
-
-# %% [markdown]
 # ## Swapping the Backend
 #
 # Nothing in `run_react_agent` names a provider. It calls `complete_with_usage` on whatever
@@ -548,6 +470,15 @@ display(
 # That variable only takes effect when `RUN_LIVE = True`; on the replay path no client is
 # constructed at all.
 
+# %% [markdown]
+# The June capture retains actual searches and model messages. It predates the new
+# acceptance check; inspect its rationale and sources rather than assuming a
+# validated status. The current loop rejects malformed or unsupported probabilities
+# and permits one final synthesis turn only when evidence was retained. It can
+# abstain. A citation makes support inspectable, not automatically correct.
+#
+# The mock example below is an explicitly synthetic flow test, not a model evaluation.
+
 # %%
 mock_llm = MockLLMClient()
 mock_search = create_search_client("mock")
@@ -557,7 +488,7 @@ p_mock, _, mock_traces, mock_tokens = run_react_agent(mock_llm, mock_search, que
 print(f"Mock provider: {mock_llm.model_name}")
 print(f"Mock steps: {len(mock_traces)}")
 print(f"Mock tokens: {mock_tokens.total_tokens:,}")
-print(f"Mock p(YES): {p_mock:.2f}")
+print(f"Synthetic p(YES): {p_mock}")
 
 # %% [markdown]
 # ## Key Takeaways
