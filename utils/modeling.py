@@ -422,6 +422,30 @@ class WalkForwardConfig:
         return cls(**data)
 
 
+def _label_horizon_guards(buffer: str) -> dict[str, int]:
+    """Turn a ``labels.buffer`` string into the leakage-guard fields.
+
+    A one-character unit is sliced off the end (``21D``, ``8H``, ``60m``, ``15T``,
+    ``1M``). ``min`` has to be recognized first: NASDAQ-100 declares ``16min``, and
+    slicing only the last character asks ``int("16mi")``, so ``get_cv_config``
+    raises before it can set an embargo.
+
+    ``M`` is a calendar month. ``pd.Timedelta`` rejects it as ambiguous, so the
+    guard stores 30 days per month until the splitter accepts calendar months.
+    """
+    if buffer.endswith("min"):
+        return {"label_horizon_minutes": int(buffer[:-3])}
+    if buffer.endswith("D"):
+        return {"label_horizon_days": int(buffer[:-1])}
+    if buffer.endswith(("h", "H")):
+        return {"label_horizon_hours": int(buffer[:-1])}
+    if buffer.endswith("T") or (buffer.endswith("m") and not buffer.endswith("M")):
+        return {"label_horizon_minutes": int(buffer[:-1])}
+    if buffer.endswith("M"):
+        return {"label_horizon_days": int(buffer[:-1]) * 30}
+    return {}
+
+
 def load_protocol(case_study_id: str) -> dict:
     """Load evaluation protocol from config/setup.yaml.
 
@@ -450,22 +474,9 @@ def load_protocol(case_study_id: str) -> dict:
             "start": ev.get("holdout_start"),
             "end": ev.get("holdout_end"),
         },
-        "leakage_guards": {},
+        # "21D", "8h", "15T", "60m", "16min", "1M" — see _label_horizon_guards.
+        "leakage_guards": _label_horizon_guards(labels.get("buffer", "21D")),
     }
-
-    # Parse label horizon from buffer string (e.g. "21D", "8h", "15T", "60m", "1M")
-    buffer = labels.get("buffer", "21D")
-    if buffer.endswith("D"):
-        protocol["leakage_guards"]["label_horizon_days"] = int(buffer[:-1])
-    elif buffer.endswith(("h", "H")):
-        protocol["leakage_guards"]["label_horizon_hours"] = int(buffer[:-1])
-    elif buffer.endswith(("T",)) or (buffer.endswith("m") and not buffer.endswith("M")):
-        protocol["leakage_guards"]["label_horizon_minutes"] = int(buffer[:-1])
-    elif buffer.endswith("M"):
-        # Monthly: approximate as 30 calendar days.
-        # pd.Timedelta rejects 'M' as ambiguous; ml4t-diagnostic needs a library fix
-        # to support calendar-month durations natively (see ml4t-diagnostic-dev/bugs/).
-        protocol["leakage_guards"]["label_horizon_days"] = int(buffer[:-1]) * 30
 
     return protocol
 
