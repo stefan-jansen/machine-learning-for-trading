@@ -124,7 +124,8 @@ set_global_seeds(SEED)
 #
 # The target is the sum of the next `FORECAST_HORIZON` returns. It reaches that many sessions
 # into the future, which is what makes the gap in the folds below necessary: a training block
-# ending at session $t$ contains targets built from returns up to $t + 4$, so a test block
+# ending at session $t$ contains targets built from returns up to $t + 5$ (the rolling sum at
+# $t+5$, shifted back by the horizon, is $r_{t+1}+\ldots+r_{t+5}$), so a test block
 # starting at $t + 1$ would be predicting sessions its own training labels already saw.
 
 # %%
