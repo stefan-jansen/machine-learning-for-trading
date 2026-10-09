@@ -109,11 +109,17 @@ jobs:
       # quietly: tests/test_weekly_hf_manifest.py reads the pins out of the notebook
       # sources and fails when they disagree.
       #
-      # Budget, measured 2026-10-09: 2.47 GB across 7 caches against a 10 GB limit, the
-      # largest single entry being hf-ch11-12 at 0.76 GB. These four checkpoints are
-      # ~1.6 GB and this key holds one entry rather than one per week. Re-measure with
-      # `gh api .../actions/cache/usage`; over the limit GitHub evicts
-      # least-recently-used and the eviction is silent.
+      # The prefetch is restricted to the files the loaders open, and that restriction
+      # is what makes the cache affordable. Unrestricted, these four repositories are
+      # 6.287 GB: each ships the same weights as safetensors, as pytorch_model.bin and
+      # as a stack of ONNX and OpenVINO variants. The selection is 1.659 GB. Measured
+      # 2026-10-09 against the Hub's file metadata at the four pinned revisions.
+      #
+      # Budget, measured the same day: 2.47 GB across 7 caches against a 10 GB limit,
+      # the largest single entry being hf-ch11-12 at 0.76 GB. Adding 1.659 GB under one
+      # key rather than one per week lands near 4.1 GB; the unrestricted 6.287 GB would
+      # have gone over on its own. Re-measure with `gh api .../actions/cache/usage`;
+      # over the limit GitHub evicts least-recently-used and the eviction is silent.
       - name: HuggingFace cache key
         id: hfkey
         run: |
@@ -133,6 +139,13 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python .github/scripts/hf_prefetch.py fetch
+
+      - name: Report the warm cache
+        run: |
+          # A cold run and a warm run are indistinguishable in this job's log
+          # otherwise, and "the cache works" is the claim the step above rests on.
+          printf 'hf cache %s\n' "$(du -sh "$HF_HOME" 2>/dev/null | cut -f1)" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Record the fixture this job read
         run: |

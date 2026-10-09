@@ -10,14 +10,24 @@ models in the same job downloaded and passed.
 Two commands, both reading .github/weekly-hf-models.yaml:
 
 ``key``
-    A digest of the (repo_id, revision) pairs, for ``actions/cache``. It changes
-    when a pin changes and at no other time, so a warm run is warm. A date-bucketed
-    key would discard the whole cache on a schedule, which is the cost this removes.
+    A digest of the (repo_id, revision) pairs AND the file selection, for
+    ``actions/cache``. It changes when a pin or the selection changes and at no other
+    time, so a warm run is warm. A date-bucketed key would discard the whole cache on
+    a schedule, which is the cost this removes; a key over the pins alone would serve
+    a cache built under a narrower selection to a run that needs a wider one.
 
 ``fetch``
-    ``snapshot_download`` each repo at its pinned revision. The notebooks pin the
-    same revisions themselves, so a prefetched revision is the one they resolve, and
-    a warm cache serves them without a request for file content.
+    ``snapshot_download`` each repo at its pinned revision, restricted to the files
+    the loaders open. Unrestricted, these four repositories are 6.287 GB because each
+    ships its weights in three or four formats; the selection is 1.659 GB. The
+    notebooks pin the same revisions, so a prefetched revision is the one they
+    resolve.
+
+``select``
+    List what the selection resolves to at each pinned revision, with sizes, through
+    the same discovery path ``snapshot_download`` uses (``list_repo_files`` and
+    ``filter_repo_objects``) and without downloading a single model body. Needs
+    network; it is for checking a pattern change, not for CI.
 
 ``revisions``
     What each notebook pins, read from its source, for the manifest test.
@@ -45,19 +55,34 @@ _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _NOT_A_REPO_ID = (".py", ".ipynb", ".json", ".csv", ".parquet", ".txt", ".md", ".yaml", ".yml")
 
 
-def load_manifest(path: Path = MANIFEST) -> list[dict]:
-    models = yaml.safe_load(path.read_text())["models"]
+def load_manifest(path: Path = MANIFEST) -> tuple[list[dict], list[str]]:
+    """The models and the file selection, which are one contract and travel together."""
+    manifest = yaml.safe_load(path.read_text())
+    models = manifest["models"]
     missing = [m for m in models if not (m.get("repo_id") and m.get("revision"))]
     if missing:
         msg = f"{path} has entries without repo_id and revision: {missing}"
         raise ValueError(msg)
-    return models
+    loader_files = manifest.get("loader_files") or []
+    if not loader_files:
+        # An empty selection means snapshot_download takes everything, which is the
+        # 6.287 GB this manifest exists to avoid. Refuse rather than quietly widen.
+        msg = f"{path} declares no loader_files, so the prefetch would download every format"
+        raise ValueError(msg)
+    return models, loader_files
 
 
-def cache_key(models: list[dict]) -> str:
-    """A digest of the pins, stable across orderings of the manifest."""
+def cache_key(models: list[dict], loader_files: list[str]) -> str:
+    """A digest of the pins and the selection, stable across orderings of either.
+
+    The selection is in the key deliberately. Without it, a cache populated under a
+    narrower pattern list restores into a run that needs a wider one, and the missing
+    files are discovered by a notebook at load time rather than by the prefetch.
+    """
     pairs = sorted(f"{m['repo_id']}@{m['revision']}" for m in models)
-    return hashlib.sha256("\n".join(pairs).encode()).hexdigest()[:16]
+    return hashlib.sha256("\n".join([*pairs, "--", *sorted(loader_files)]).encode()).hexdigest()[
+        :16
+    ]
 
 
 def notebook_pins(notebook_py: Path) -> dict[str, list[str]]:
@@ -80,30 +105,74 @@ def notebook_pins(notebook_py: Path) -> dict[str, list[str]]:
     }
 
 
-def fetch(models: list[dict]) -> int:
+def fetch(models: list[dict], loader_files: list[str]) -> int:
     from huggingface_hub import snapshot_download
 
     for m in models:
-        print(f"prefetching {m['repo_id']}@{m['revision']}", flush=True)
-        path = snapshot_download(repo_id=m["repo_id"], revision=m["revision"])
+        print(
+            f"prefetching {m['repo_id']}@{m['revision']} ({len(loader_files)} patterns)", flush=True
+        )
+        path = snapshot_download(
+            repo_id=m["repo_id"],
+            revision=m["revision"],
+            allow_patterns=loader_files,
+        )
         print(f"  -> {path}", flush=True)
+    return 0
+
+
+def select(models: list[dict], loader_files: list[str]) -> int:
+    """What the selection resolves to, through the real discovery path, no bodies."""
+    import urllib.request
+
+    from huggingface_hub import HfApi
+    from huggingface_hub.utils import filter_repo_objects
+
+    api = HfApi()
+    whole = chosen = 0
+    for m in models:
+        repo, rev = m["repo_id"], m["revision"]
+        meta = json.loads(
+            urllib.request.urlopen(  # noqa: S310 - the Hub's own metadata endpoint
+                f"https://huggingface.co/api/models/{repo}/revision/{rev}?blobs=true"
+            ).read()
+        )
+        sizes = {s["rfilename"]: (s.get("size") or 0) for s in meta["siblings"]}
+        files = api.list_repo_files(repo, revision=rev)
+        kept = sorted(filter_repo_objects(files, allow_patterns=loader_files))
+        if not any(f.endswith(".safetensors") for f in kept):
+            print(f"::error::{repo}@{rev} selection has no weights: {kept}")
+            return 1
+        whole += sum(sizes.values())
+        chosen += sum(sizes.get(f, 0) for f in kept)
+        print(f"{repo}@{rev[:8]}")
+        print(f"   whole repo {sum(sizes.values()) / 1e6:9.1f} MB ({len(files)} files)")
+        print(
+            f"   selected   {sum(sizes.get(f, 0) for f in kept) / 1e6:9.1f} MB ({len(kept)} files)"
+        )
+        print(f"   skipped    {sorted(set(files) - set(kept))}")
+    print(
+        f"\ntotal {whole / 1e9:.3f} GB -> {chosen / 1e9:.3f} GB (saves {(whole - chosen) / 1e9:.3f} GB)"
+    )
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("key", "fetch", "revisions"))
+    parser.add_argument("command", choices=("key", "fetch", "select", "revisions"))
     parser.add_argument("--manifest", type=Path, default=MANIFEST)
     args = parser.parse_args(argv)
 
-    models = load_manifest(args.manifest)
+    models, loader_files = load_manifest(args.manifest)
     if args.command == "key":
-        print(cache_key(models))
+        print(cache_key(models, loader_files))
         return 0
     if args.command == "revisions":
-        print(json.dumps(models, indent=2))
+        print(json.dumps({"models": models, "loader_files": loader_files}, indent=2))
         return 0
-    return fetch(models)
+    if args.command == "select":
+        return select(models, loader_files)
+    return fetch(models, loader_files)
 
 
 if __name__ == "__main__":

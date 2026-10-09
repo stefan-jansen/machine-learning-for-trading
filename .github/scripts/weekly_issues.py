@@ -26,7 +26,13 @@ What must stay true, and what the tests pin:
 - A skip is not a pass. A missing report is not a pass. A failure to list the
   existing issues is not a pass. None of them closes anything, and the last two
   exit non-zero so the job surfaces them.
-- An unchanged failure comments once per run and does not duplicate the issue.
+- An unchanged failure comments once per run and does not duplicate the issue. A
+  re-run of the same workflow run does not comment twice, because a comment already
+  reporting that run's URL is not repeated.
+- The issues filed under the old class-name titles are retired once, by this code
+  rather than by hand. They are closed as `not_planned`, never as `completed`: a
+  title repair is not an executed successful run, and conflating the two would
+  record that a notebook passed when nothing ran.
 """
 
 from __future__ import annotations
@@ -43,6 +49,15 @@ from xml.etree import ElementTree
 
 ID_STYLES = ("notebook", "drift")
 API = "https://api.github.com"
+
+# What the broken parser put in the title: the test class, for every failure. One
+# issue per prefix absorbed every weekly failure for weeks (#1046 for the chapter
+# job). No notebook or source id will ever match these, so the close path cannot
+# reach them and they would stay open forever beside the accurate ones.
+LEGACY_IDS = {
+    "weekly-flake": "tests.test_chapter_notebooks",
+    "external-drift": "tests.test_external_drift",
+}
 
 
 class ReportMissing(RuntimeError):
@@ -118,19 +133,32 @@ def owned_issue(issues: list[dict], title: str) -> dict | None:
     return max(candidates, key=lambda i: (i.get("state") == "open", i.get("number", 0)))
 
 
+def already_reported(comments: list[str], run_url: str) -> bool:
+    """Has this run already been commented on this issue?
+
+    A re-run of a failed job keeps the same run id, so without this a job re-run
+    posts the same "failed again" line a second time on every standing issue.
+    """
+    return any(run_url and run_url in c for c in comments)
+
+
 def reconcile(
     outcomes: dict[str, list[str]],
     issues: list[dict],
     prefix: str,
     run_url: str,
     intro: str = "",
+    comments: dict[int, list[str]] | None = None,
 ) -> list[dict]:
     """The writes this run should make, as data, so a test can read them.
 
     Returns a list of ``{"action", ...}`` in the order they must be applied: a reopen
     precedes the comment that explains it, and a closing comment precedes the close.
+    ``comments`` maps an issue number to its existing comment bodies; an empty or
+    absent entry means none are known and nothing is suppressed.
     """
     actions: list[dict] = []
+    comments = comments or {}
 
     for case_id in outcomes["failed"]:
         title = f"{prefix}: {case_id}"
@@ -151,16 +179,18 @@ def reconcile(
                 }
             )
             continue
+        seen = already_reported(comments.get(existing["number"], []), run_url)
         if existing["state"] == "closed":
             actions.append({"action": "reopen", "number": existing["number"]})
-            actions.append(
-                {
-                    "action": "comment",
-                    "number": existing["number"],
-                    "body": f"Failed again after closing: {run_url}",
-                }
-            )
-        else:
+            if not seen:
+                actions.append(
+                    {
+                        "action": "comment",
+                        "number": existing["number"],
+                        "body": f"Failed again after closing: {run_url}",
+                    }
+                )
+        elif not seen:
             actions.append(
                 {
                     "action": "comment",
@@ -182,11 +212,54 @@ def reconcile(
         )
         actions.append({"action": "close", "number": existing["number"]})
 
+    actions += retire_legacy(issues, prefix, run_url, outcomes["failed"])
     return actions
+
+
+def retire_legacy(issues: list[dict], prefix: str, run_url: str, failed: list[str]) -> list[dict]:
+    """Close the class-name issue this parser replaces, once, preserving its thread.
+
+    Closed as ``not_planned``: the title was wrong, which is not the same event as a
+    notebook executing and passing, and ``completed`` is reserved for that. The issue
+    is closed rather than retitled so its comment history stays where anyone
+    following it will find it, and the comment says where the accurate issues are.
+    """
+    legacy_id = LEGACY_IDS.get(prefix)
+    if legacy_id is None:
+        return []
+    existing = owned_issue(issues, f"{prefix}: {legacy_id}")
+    if existing is None or existing["state"] != "open":
+        return []
+    if failed:
+        where = "The failures it collected are now tracked per id: " + ", ".join(
+            f"`{prefix}: {case_id}`" for case_id in failed
+        )
+    else:
+        where = (
+            "Nothing failed in this run, so there is no accurate issue to point at yet. "
+            "One opens per failing id from here on."
+        )
+    return [
+        {
+            "action": "comment",
+            "number": existing["number"],
+            "body": (
+                f"Retiring this issue. Its title is the pytest class rather than the "
+                f'notebook, because the workflow read the `name="` inside '
+                f'`classname="`, so every weekly failure deduped onto this one thread '
+                f"and none of them named what failed.\n\n{where}\n\nClosing as not "
+                f"planned rather than completed: the title was wrong, which is not the "
+                f"same thing as a notebook running and passing. Nothing here is "
+                f"deleted, and the comments above stay as the record.\n\nRun: {run_url}"
+            ),
+        },
+        {"action": "close_not_planned", "number": existing["number"]},
+    ]
 
 
 class Issues(Protocol):
     def list_by_label(self, label: str) -> list[dict]: ...
+    def comments(self, number: int) -> list[str]: ...
     def create(self, title: str, body: str, labels: list[str]) -> int: ...
     def comment(self, number: int, body: str) -> None: ...
     def set_state(self, number: int, state: str, reason: str | None = None) -> None: ...
@@ -231,6 +304,14 @@ class RestIssues:
             out.extend(batch)
             page += 1
 
+    def comments(self, number: int) -> list[str]:
+        # Only the last page. The dedup question is whether THIS run was already
+        # reported, and a re-run follows the comment it would duplicate.
+        batch = self._call(
+            "GET", f"/repos/{self.repo}/issues/{number}/comments?per_page=100&page=1"
+        )
+        return [c.get("body") or "" for c in batch or []]
+
     def create(self, title: str, body: str, labels: list[str]) -> int:
         created = self._call(
             "POST", f"/repos/{self.repo}/issues", {"title": title, "body": body, "labels": labels}
@@ -263,7 +344,10 @@ def apply(actions: list[dict], client: Issues) -> list[str]:
             log.append(f"reopened #{action['number']}")
         elif kind == "close":
             client.set_state(action["number"], "closed", "completed")
-            log.append(f"closed #{action['number']}")
+            log.append(f"closed #{action['number']} as completed")
+        elif kind == "close_not_planned":
+            client.set_state(action["number"], "closed", "not_planned")
+            log.append(f"closed #{action['number']} as not planned")
         else:
             msg = f"unknown action {kind!r}"
             raise ValueError(msg)
@@ -314,7 +398,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error::could not list `{args.prefix}` issues, so nothing was changed: {exc}")
         return 2
 
-    for line in apply(reconcile(outcomes, issues, args.prefix, args.run_url, args.intro), client):
+    # Comments are fetched only for the issues this run could write to - the ones
+    # whose title matches a failing id, plus the legacy thread - so a quiet week
+    # costs no extra requests.
+    wanted = {f"{args.prefix}: {case_id}" for case_id in outcomes["failed"]}
+    legacy = LEGACY_IDS.get(args.prefix)
+    if legacy:
+        wanted.add(f"{args.prefix}: {legacy}")
+    comments: dict[int, list[str]] = {}
+    for issue in issues:
+        if issue.get("title") in wanted and not issue.get("pull_request"):
+            try:
+                comments[issue["number"]] = client.comments(issue["number"])
+            except (OSError, ValueError) as exc:
+                # Not knowing is not the same as knowing it was not reported, but the
+                # cost of being wrong here is one duplicate comment, so the run goes
+                # on rather than failing over a notification.
+                print(f"::warning::could not read comments on #{issue['number']}: {exc}")
+
+    plan = reconcile(outcomes, issues, args.prefix, args.run_url, args.intro, comments)
+    for line in apply(plan, client):
         print(line)
     return 0
 

@@ -10,6 +10,31 @@
 #
 # `revision` is the notebook's own pin, read off the source. Do not edit one here
 # without editing the notebook: the test compares the two.
+
+# The files the loaders actually open, as `allow_patterns` for snapshot_download.
+#
+# Measured 2026-10-09 against the four pinned revisions through the Hub's own file
+# metadata: unrestricted, these four repositories are 6.287 GB, because each ships the
+# same weights three or four times over - safetensors, pytorch_model.bin, a stack of
+# ONNX variants, OpenVINO, and for two of them flax, rust and tf copies. The selection
+# below is 1.659 GB and keeps `model.safetensors` plus the config and tokenizer files
+# for every one of them. Downloading all of it would also have put the repository's
+# Actions cache over its 10 GB limit on its own.
+#
+# sentence-transformers (and llama-index's HuggingFaceEmbedding, which wraps it) reads
+# config.json, config_sentence_transformers.json, modules.json, sentence_bert_config.json,
+# the tokenizer files, 1_Pooling/config.json, and the weights. CrossEncoder reads the
+# same minus the pooling directory. `*/*.json` is what reaches 1_Pooling/config.json;
+# `model*.safetensors` also covers a sharded checkpoint, whose index is a `*.json`.
+#
+# This list is part of the cache key. A narrower selection from an earlier run must not
+# be served to a wider one, which is what would happen if the key covered only the pins.
+loader_files:
+  - "*.json"
+  - "*.txt"
+  - "*/*.json"
+  - "model*.safetensors"
+
 models:
   - repo_id: BAAI/bge-large-en-v1.5
     revision: d4aa6901d3a41ba39fb536a557fa166f842b0e09

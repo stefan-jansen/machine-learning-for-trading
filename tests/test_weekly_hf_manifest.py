@@ -25,7 +25,7 @@ assert _spec and _spec.loader
 hf_prefetch = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hf_prefetch)
 
-MODELS = hf_prefetch.load_manifest()
+MODELS, LOADER_FILES = hf_prefetch.load_manifest()
 NOTEBOOKS = sorted({nb for m in MODELS for nb in m["notebooks"]})
 
 
@@ -79,7 +79,78 @@ def test_every_weekly_tier_notebook_that_pins_a_model_is_in_the_manifest() -> No
 
 def test_the_cache_key_follows_the_pins_and_not_the_ordering() -> None:
     """Keying on the pins is what removes the weekly re-download."""
-    key = hf_prefetch.cache_key(MODELS)
-    assert hf_prefetch.cache_key(list(reversed(MODELS))) == key
+    key = hf_prefetch.cache_key(MODELS, LOADER_FILES)
+    assert hf_prefetch.cache_key(list(reversed(MODELS)), LOADER_FILES) == key
+    assert hf_prefetch.cache_key(MODELS, list(reversed(LOADER_FILES))) == key
     moved = [{**MODELS[0], "revision": "0" * 40}, *MODELS[1:]]
-    assert hf_prefetch.cache_key(moved) != key
+    assert hf_prefetch.cache_key(moved, LOADER_FILES) != key
+
+
+def test_the_cache_key_changes_when_the_file_selection_changes() -> None:
+    """Otherwise a cache built under a narrower selection restores into a wider run.
+
+    The missing weights would then be discovered by a notebook at load time rather
+    than by the prefetch, which is the failure the cache exists to remove.
+    """
+    narrower = [f for f in LOADER_FILES if f != "model*.safetensors"]
+    assert narrower != LOADER_FILES
+    assert hf_prefetch.cache_key(MODELS, narrower) != hf_prefetch.cache_key(MODELS, LOADER_FILES)
+
+
+def test_a_manifest_without_a_file_selection_is_refused(tmp_path: Path) -> None:
+    """An empty allow list makes snapshot_download take every weight format."""
+    bad = tmp_path / "m.yaml"
+    bad.write_text("models:\n  - repo_id: a/b\n    revision: " + "c" * 40 + "\n")
+    with pytest.raises(ValueError, match="loader_files"):
+        hf_prefetch.load_manifest(bad)
+
+
+# The file list of BAAI/bge-large-en-v1.5 at the pinned revision
+# d4aa6901d3a41ba39fb536a557fa166f842b0e09, from the Hub's own metadata on
+# 2026-10-09. The whole repository is 4.019 GB because the same weights ship three
+# times; the three ~1.34 GB entries are what the selection has to drop.
+BGE_LARGE_FILES = [
+    ".gitattributes",
+    "1_Pooling/config.json",
+    "README.md",
+    "config.json",
+    "config_sentence_transformers.json",
+    "model.safetensors",
+    "modules.json",
+    "onnx/model.onnx",
+    "pytorch_model.bin",
+    "sentence_bert_config.json",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.txt",
+]
+
+
+def test_the_selection_keeps_one_weight_format_and_drops_the_others() -> None:
+    """Applied through filter_repo_objects, which is what snapshot_download uses."""
+    from huggingface_hub.utils import filter_repo_objects
+
+    kept = sorted(filter_repo_objects(BGE_LARGE_FILES, allow_patterns=LOADER_FILES))
+    assert "model.safetensors" in kept, "the loader would have no weights to read"
+    assert "pytorch_model.bin" not in kept
+    assert "onnx/model.onnx" not in kept
+
+
+def test_the_selection_keeps_every_file_sentence_transformers_opens() -> None:
+    """A missing one of these fails at load time with a warm cache, not at prefetch."""
+    from huggingface_hub.utils import filter_repo_objects
+
+    kept = set(filter_repo_objects(BGE_LARGE_FILES, allow_patterns=LOADER_FILES))
+    required = {
+        "config.json",
+        "config_sentence_transformers.json",
+        "modules.json",
+        "sentence_bert_config.json",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.txt",
+        "1_Pooling/config.json",
+    }
+    assert required <= kept, f"the selection drops {sorted(required - kept)}"

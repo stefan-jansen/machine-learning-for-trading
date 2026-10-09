@@ -259,3 +259,108 @@ def test_a_missing_token_exits_non_zero(tmp_path: Path, monkeypatch: pytest.Monk
         ["--junit", str(report), "--id-style", "notebook", "--prefix", PREFIX, "--repo", "o/r"]
     )
     assert code == 2
+
+
+# ------------------------------------------------- a re-run does not comment twice
+
+
+def run_with_comments(outcomes: dict, issues: list[dict], comments: dict) -> list[tuple]:
+    client = FakeIssues(issues)
+    weekly_issues.apply(
+        weekly_issues.reconcile(
+            outcomes, client.list_by_label(PREFIX), PREFIX, RUN, comments=comments
+        ),
+        client,
+    )
+    return client.calls
+
+
+def test_a_rerun_of_the_same_run_does_not_comment_twice() -> None:
+    """Re-running a failed job keeps the run id, so the body would be identical."""
+    calls = run_with_comments(
+        {"failed": [NB], "passed": [], "skipped": []},
+        [issue(1046, NB, "open")],
+        {1046: [f"Failed again in the weekly run: {RUN}"]},
+    )
+    assert calls == []
+
+
+def test_a_later_run_does_comment() -> None:
+    calls = run_with_comments(
+        {"failed": [NB], "passed": [], "skipped": []},
+        [issue(1046, NB, "open")],
+        {1046: ["Failed again in the weekly run: https://github.com/o/r/actions/runs/0"]},
+    )
+    assert [c[0] for c in calls] == ["comment"]
+
+
+def test_dedup_never_suppresses_the_reopen() -> None:
+    """The issue state is the thing that matters; the comment is the notification."""
+    calls = run_with_comments(
+        {"failed": [NB], "passed": [], "skipped": []},
+        [issue(1046, NB, "closed")],
+        {1046: [f"Failed again after closing: {RUN}"]},
+    )
+    assert [(c[0], c[1], c[2]) for c in calls] == [("set_state", 1046, "open")]
+
+
+# ------------------------------------------------------- retiring the class-name issue
+
+LEGACY = weekly_issues.LEGACY_IDS[PREFIX]
+
+
+def test_the_class_name_issue_is_retired_as_not_planned_not_completed() -> None:
+    """A wrong title is not an executed passing run, and must not be recorded as one."""
+    calls = run({"failed": [NB], "passed": [], "skipped": []}, [issue(1046, LEGACY, "open")])
+    assert ("set_state", 1046, "closed", "not_planned") in calls
+    assert not any(c[0] == "set_state" and c[3] == "completed" for c in calls)
+
+
+def test_retiring_it_names_where_the_failures_went_and_opens_the_accurate_issue() -> None:
+    client = FakeIssues([issue(1046, LEGACY, "open")])
+    plan = weekly_issues.reconcile(
+        {"failed": [NB], "passed": [], "skipped": []}, client.issues, PREFIX, RUN
+    )
+    kinds = [a["action"] for a in plan]
+    assert kinds == ["create", "comment", "close_not_planned"]
+    assert plan[0]["title"] == f"{PREFIX}: {NB}"
+    assert NB in plan[1]["body"]
+    assert "not planned" in plan[1]["body"]
+
+
+def test_a_quiet_week_still_retires_it_and_says_so() -> None:
+    """Its title can never match an id, so leaving it open is leaving it forever."""
+    plan = weekly_issues.reconcile(
+        {"failed": [], "passed": [], "skipped": []}, [issue(1046, LEGACY, "open")], PREFIX, RUN
+    )
+    assert [a["action"] for a in plan] == ["comment", "close_not_planned"]
+    assert "no accurate issue to point at yet" in plan[0]["body"]
+
+
+def test_an_already_closed_class_name_issue_is_left_alone() -> None:
+    calls = run({"failed": [], "passed": [], "skipped": []}, [issue(1046, LEGACY, "closed")])
+    assert calls == []
+
+
+def test_retirement_does_not_fire_twice_on_a_rerun() -> None:
+    """Closed on the first run, so the second finds nothing open to retire."""
+    first = FakeIssues([issue(1046, LEGACY, "open")])
+    weekly_issues.apply(
+        weekly_issues.reconcile(
+            {"failed": [], "passed": [], "skipped": []}, first.issues, PREFIX, RUN
+        ),
+        first,
+    )
+    assert any(c[0] == "set_state" for c in first.calls)
+    second = FakeIssues([issue(1046, LEGACY, "closed")])
+    weekly_issues.apply(
+        weekly_issues.reconcile(
+            {"failed": [], "passed": [], "skipped": []}, second.issues, PREFIX, RUN
+        ),
+        second,
+    )
+    assert second.calls == []
+
+
+def test_the_drift_job_has_its_own_class_name_issue_to_retire() -> None:
+    assert weekly_issues.LEGACY_IDS["external-drift"] == "tests.test_external_drift"
