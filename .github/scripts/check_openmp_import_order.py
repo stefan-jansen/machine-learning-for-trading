@@ -74,30 +74,17 @@ SKIP_PARTS = {".venv", ".git", ".ipynb_checkpoints", "_reference", "node_modules
 
 # Affected, and blocked on something other than the import order itself.
 #
-# An earlier revision of this list held eleven entries on one shared excuse: that
-# editing a notebook's `.py` obliges a re-execution (notebook_provenance.py
-# enforces that), and re-execution restates whatever the canonical artifacts under
-# `~/ml4t/artifacts` now produce. That is true, and it is not a reason to leave a crash in place.
-# Six of the eleven were fixed and re-executed instead. What the re-run moved was
-# prose that had hard-coded a third decimal place, and where a notebook's own
-# commentary quoted values it no longer printed, the commentary was rewritten to
-# state the ordering it was actually arguing for.
+# An entry names a blocker that reordering the imports cannot clear: the notebook
+# cannot be executed in a complete environment, or re-executing it is a content
+# decision in its own right rather than a side effect of an import fix. Wanting to
+# avoid a re-run is not a blocker, and an entry carrying only that reason belongs in
+# the fix instead.
 #
-# So an entry here is not "we would rather not re-run this". It names a blocker
-# that a re-execution cannot clear:
+# Every entry is printed on every run, and an entry that stops offending fails the
+# gate, so the list cannot become a place where things are quietly parked.
 #
-#   - the *book* quotes the notebook's figures, so restating them is an errata
-#     decision about the manuscript, taken deliberately and not as a side effect
-#     of an import fix;
-#   - or the notebook cannot be executed in this environment at all.
-#
-# Every entry is printed on every run, and an entry that stops offending fails
-# the gate, so the list cannot rot into a place where things are quietly parked.
-#
-# The copies students actually run carry none of this: the course repo's
-# vendored notebooks ship without a paired `.py`, so an import-cell edit fixes
-# the crash there and leaves every output alone. All fourteen are already clean
-# in that repo.
+# A copy that ships without a paired `.py` is not affected by any of this: an
+# import-cell edit fixes the crash there and leaves every output alone.
 #
 # Revised 2026-08-08.
 KNOWN_BLOCKED = {
@@ -107,8 +94,9 @@ KNOWN_BLOCKED = {
         "TypeError). Predates this gate; reads registries and fits nothing, so it cannot crash"
     ),
     "12_gradient_boosting/02_gbm_comparison.py": (
-        "Section 12.2 quotes its library timings and speedup ratios throughout, and a live "
-        "worktree (group/ch11-12) is mid-edit on it; fits a GBM, so it can still crash"
+        "its narrative quotes the library timings and speedup ratios it prints, so re-executing "
+        "it is a content decision and not a side effect of this fix; fits a GBM, so it can "
+        "still crash"
     ),
     "12_gradient_boosting/12_case_study_insights.py": (
         "pins an approved etfs registry SHA-256 that the local registry no longer matches, "
