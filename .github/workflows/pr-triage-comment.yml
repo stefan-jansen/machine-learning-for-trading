@@ -12,6 +12,9 @@ on:
     types: [completed]
 
 permissions:
+  # actions: read is what lets this run download the artifact the other workflow
+  # produced. Without it the download fails and no comment is ever posted.
+  actions: read
   contents: read
   pull-requests: write
 
