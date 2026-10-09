@@ -490,7 +490,17 @@ def _label_horizon_guards(buffer: str) -> dict[str, int]:
     if delta < pd.Timedelta(0):
         msg = f"labels.buffer {text!r} is negative; an embargo cannot run backwards"
         raise ValueError(msg)
-    seconds = int(delta.total_seconds())
+    total = delta.total_seconds()
+    if total != int(total):
+        # int() truncates, so a sub-second buffer would become 0 seconds, pass the
+        # whole-days test below and read as `P0D` - the silent no-embargo this
+        # function exists to rule out, reached by a different route.
+        msg = (
+            f"labels.buffer {text!r} is {delta}, which carries a fraction of a second; "
+            f"the leakage guards carry whole days, hours or minutes"
+        )
+        raise ValueError(msg)
+    seconds = int(total)
     if seconds % 86400 == 0:
         return {"label_horizon_days": seconds // 86400}
     if seconds % 3600 == 0:

@@ -109,6 +109,23 @@ def test_a_sub_minute_buffer_raises_rather_than_rounding_to_zero() -> None:
         _label_horizon_guards("30s")
 
 
+@pytest.mark.parametrize("buffer", ["0.5s", "0.9s", "100ms", "1us"])
+def test_a_sub_second_buffer_raises_rather_than_truncating_to_no_embargo(buffer: str) -> None:
+    """The silent zero, reached the other way: int() truncates to 0 seconds.
+
+    0 seconds is a whole number of days, so it passed the day test and came back as
+    ``P0D`` - the same no-embargo this parser exists to refuse, under a value that
+    looks like a declared buffer.
+    """
+    with pytest.raises(ValueError, match="fraction of a second"):
+        _label_horizon_guards(buffer)
+
+
+def test_a_fractional_duration_that_lands_on_a_whole_unit_still_parses() -> None:
+    assert _label_horizon_guards("1.5D") == {"label_horizon_hours": 36}
+    assert _label_horizon_guards("2.5h") == {"label_horizon_minutes": 150}
+
+
 def test_guards_with_no_horizon_raise_instead_of_returning_a_zero_embargo() -> None:
     """The silent fallback itself: an empty dict used to read as ``"P0D"``."""
     with pytest.raises(ValueError, match="no label horizon"):
