@@ -1168,7 +1168,14 @@ print(f"Cross-sectional ranks for {sample_date}:")
 # high volatility: two assets that rose by the same amount are not equally interesting if
 # one of them did it with several times the dispersion of the other.
 #
-# $$\text{Vol-Scaled Mom} = \frac{r_{21d}}{\sigma_{21d}}$$
+# The denominator below is the 21-day realized volatility annualized, which is what the
+# `vol_21d` column holds:
+#
+# $$\text{Vol-Scaled Mom} = \frac{r_{21d}}{\sigma_{21d}\sqrt{252}}$$
+#
+# Annualizing scales every asset's denominator on a given day by the same constant, so the
+# percentile rank this feature contributes is identical with or without it. The ratio
+# itself is not a Sharpe ratio and is not comparable across horizons.
 
 # %%
 # Vol-scaled momentum: return / realized vol
