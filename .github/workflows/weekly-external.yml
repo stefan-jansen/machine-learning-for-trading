@@ -158,11 +158,16 @@ jobs:
       # populated by the prefetch below and then thrown away, and the next run paid for
       # the 1.659 GB again. actions/cache/save placed straight after the prefetch
       # persists it before a notebook can fail.
+      # The path is relative and literal on purpose. actions/cache hashes the `path`
+      # input into the cache version, and an entry is addressed by key AND version, so
+      # `${{ github.workspace }}` here would have keyed this on /__w/... inside the
+      # container while a host-based touch job keyed on /home/runner/work/... and
+      # missed every time. A relative path is the same string in both.
       - name: Restore the HuggingFace checkpoints
         id: hfcache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ github.workspace }}/.hf-cache
+          path: .hf-cache
           key: hf-weekly-${{ steps.hfkey.outputs.key }}
 
       # Fetch the pinned revisions before pytest, so a cold cache downloads once here
@@ -181,7 +186,7 @@ jobs:
         if: steps.hfcache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: ${{ github.workspace }}/.hf-cache
+          path: .hf-cache
           key: hf-weekly-${{ steps.hfkey.outputs.key }}
 
       - name: Report the warm cache
@@ -402,49 +407,63 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.mode == 'touch')
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The same image as weekly-chapters, which is not cosmetic. An entry is addressed
+    # by its key and by a version hashed from the `path` input and the compression
+    # method, so this job has to agree with the job that saved the entry on both. A
+    # host runner resolves a workspace path differently and may select a different
+    # compressor, and either difference turns every midweek restore into a miss on an
+    # entry that is sitting there.
+    container:
+      image: ml4t/ml4t:latest
     permissions:
       contents: read
       actions: read
     steps:
+      - name: Install git
+        run: |
+          # A transient apt mirror failure used to kill the whole job.
+          for attempt in 1 2 3; do
+            apt-get update -qq && apt-get install -y -qq git >/dev/null && exit 0
+            echo "apt-get failed (attempt $attempt of 3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::apt-get could not install git after three attempts"
+          exit 1
+
       - uses: actions/checkout@v6
 
-      # No container here. The job needs the key and nothing else, the key is a sha256
-      # over the manifest's own text, and the runner image ships git. Installing pyyaml
-      # explicitly rather than hoping the system python carries it: a missing import
-      # exits non-zero and is visible, which an assumed one would not be.
       - name: HuggingFace cache key
         id: hfkey
         run: |
-          python3 -m pip install --quiet pyyaml
-          echo "key=$(python3 .github/scripts/hf_prefetch.py key)" >> "$GITHUB_OUTPUT"
+          echo "key=$(python .github/scripts/hf_prefetch.py key)" >> "$GITHUB_OUTPUT"
 
       - name: Restore the HuggingFace checkpoints
         id: hfcache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ github.workspace }}/.hf-cache
+          path: .hf-cache
           key: hf-weekly-${{ steps.hfkey.outputs.key }}
 
       - name: Report what the restore touched
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CACHE_KEY: hf-weekly-${{ steps.hfkey.outputs.key }}
+          CACHE_HIT: ${{ steps.hfcache.outputs.cache-hit }}
         run: |
-          set -euo pipefail
-          key="hf-weekly-${{ steps.hfkey.outputs.key }}"
-          if [ "${{ steps.hfcache.outputs.cache-hit }}" != "true" ]; then
-            echo "::warning::no cache under $key; Monday's run will repopulate it"
-            printf 'hf cache MISS on %s\n' "$key" | tee -a "$GITHUB_STEP_SUMMARY"
+          set -eu
+          if [ "$CACHE_HIT" != "true" ]; then
+            echo "::warning::no cache under $CACHE_KEY; Monday's run will repopulate it"
+            printf 'hf cache MISS on %s\n' "$CACHE_KEY" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           # du, not the action's own word for it: a restore that unpacked nothing and a
           # restore that unpacked 1.6 GB both report cache-hit true.
           printf 'hf cache HIT on %s, %s on disk\n' \
-            "$key" "$(du -sh "$GITHUB_WORKSPACE/.hf-cache" | cut -f1)" \
+            "$CACHE_KEY" "$(du -sh .hf-cache | cut -f1)" \
             | tee -a "$GITHUB_STEP_SUMMARY"
           # The measurement that decides whether this job does its job. If
           # last_accessed_at does not move to today, a restore does not count as an
-          # access and the retention approach here is wrong, not merely unproven.
-          gh api "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
-            --jq ".actions_caches[] | select(.key == \"$key\")
-                  | \"last_accessed_at \(.last_accessed_at)  size \(.size_in_bytes)\"" \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+          # access and this approach to retention is wrong rather than unproven.
+          # python and urllib, because this image ships neither gh nor curl.
+          python .github/scripts/cache_entry.py --repo "$GITHUB_REPOSITORY" \
+            --key "$CACHE_KEY" | tee -a "$GITHUB_STEP_SUMMARY"

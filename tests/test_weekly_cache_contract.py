@@ -281,14 +281,17 @@ def test_the_save_does_not_depend_on_the_notebook_outcome() -> None:
         assert forbidden not in condition, f"the save reads {forbidden} and can be skipped"
 
 
+CACHE_SITES = (
+    ("weekly-chapters", "actions/cache/restore"),
+    ("weekly-chapters", "actions/cache/save"),
+    (TOUCH_JOB, "actions/cache/restore"),
+)
+
+
 def test_restore_and_save_and_the_touch_job_name_one_entry() -> None:
     """Three sites, one key and one path: a touch of a different entry touches nothing."""
     sites = []
-    for job, prefix in (
-        ("weekly-chapters", "actions/cache/restore"),
-        ("weekly-chapters", "actions/cache/save"),
-        (TOUCH_JOB, "actions/cache/restore"),
-    ):
+    for job, prefix in CACHE_SITES:
         step = _steps(job)[_index(job, _uses(prefix))]
         sites.append((step["with"]["key"], step["with"]["path"]))
     assert len(set(sites)) == 1, f"the three cache steps disagree: {sites}"
@@ -296,6 +299,45 @@ def test_restore_and_save_and_the_touch_job_name_one_entry() -> None:
     assert "hf_prefetch.py key" in str(_steps(TOUCH_JOB)), "the touch job invents its own key"
     assert "${{ steps.hfkey.outputs.key }}" in key
     assert ".hf-cache" in path
+
+
+def test_the_cache_path_is_a_literal_the_two_jobs_resolve_the_same_way() -> None:
+    """An entry is addressed by its key AND by a version hashed from the `path` input.
+
+    So two jobs that agree on the key and differ on the path address different entries.
+    `${{ github.workspace }}` is exactly that difference: it is /__w/<repo>/<repo>
+    inside a job container and /home/runner/work/<repo>/<repo> on a host runner, so a
+    host-based touch job would have missed Monday's entry every week while reporting a
+    plausible run. Equal YAML text is not enough to catch it, which is why the
+    assertion is on the absence of any expression in the path.
+    """
+    for job, prefix in CACHE_SITES:
+        path = _steps(job)[_index(job, _uses(prefix))]["with"]["path"]
+        assert "${{" not in path, (
+            f"{job}'s {prefix} path is an expression ({path!r}); two jobs can resolve it "
+            "differently and then they are not sharing a cache entry"
+        )
+        assert not path.startswith("/"), f"{job}'s {prefix} path is absolute: {path!r}"
+
+
+def test_the_jobs_that_share_the_entry_share_a_container() -> None:
+    """The other half of the cache version is the compression method.
+
+    actions/cache picks zstd or gzip from what the environment has, so a host runner
+    and this image can hash different versions from the same path. Running the touch
+    job in the image that saved the entry settles the path and the compressor at once.
+    """
+    images = {JOBS[job].get("container", {}).get("image") for job, _ in CACHE_SITES}
+    assert len(images) == 1 and None not in images, (
+        f"the jobs sharing the cache entry run in different environments: {images}"
+    )
+
+
+def test_the_touch_job_reads_the_key_from_the_manifest_like_the_notebook_job() -> None:
+    """A second copy of the key would drift from the first the next time a pin moves."""
+    for job in ("weekly-chapters", TOUCH_JOB):
+        step = _steps(job)[_index(job, lambda s: s.get("id") == "hfkey")]
+        assert "hf_prefetch.py key" in str(step["run"])
 
 
 def test_the_touch_job_only_restores() -> None:
