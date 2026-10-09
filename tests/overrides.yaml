@@ -1098,6 +1098,13 @@
     MAX_QUERIES: 10
     USE_LOCAL_MODELS_ONLY: true
     REQUIRE_GPU: false
+  # The weekly job's only standing failure, and the cause is the download size
+  # rather than reachability: 03 and 05 pull ~90 MB each and passed in the same
+  # run (31 s and 48 s) in which this one raised "couldn't connect to
+  # huggingface.co" on the bge-large pull. The weekly job now caches HF_HOME, so
+  # a normal Monday re-reads the cache; these two retries cover the week the key
+  # rolls over and the download happens again on a throttled shared-IP runner.
+  reruns: 2
   tier: weekly
   timeout: 300
 22_rag_financial_research/03_hybrid_retrieval:

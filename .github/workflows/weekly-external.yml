@@ -13,8 +13,12 @@
 # that when fixtures land (Steps 4-9 of the test-infra coverage plan) the
 # weekly job auto-picks them up with no workflow change.
 #
-# Failure handling: any failing NB opens a `weekly-flake` issue (idempotent
-# by NB id in title); pytest-rerunfailures retries flaky NBs per-NB based on
+# Failure handling: each job classifies its JUnit report with
+# .github/scripts/junit_outcomes.py and then files, reopens and CLOSES one issue
+# per failing notebook or source, keyed on the id in the title. A notebook that
+# passes closes its issue, so an open `weekly-flake` issue always means a
+# standing failure rather than a fixed one nobody retired. A skip is not a pass
+# and closes nothing. pytest-rerunfailures retries flaky NBs per-NB based on
 # `reruns: N` in overrides.yaml.
 
 name: Weekly External
@@ -46,6 +50,11 @@ jobs:
     permissions:
       contents: read
       issues: write
+    env:
+      # Under the job container `~` is /root, which actions/cache can save but
+      # which nothing else in this file names. A path under the bind-mounted
+      # workspace is the one both the container and the cache action agree on.
+      HF_HOME: ${{ github.workspace }}/.hf-cache
     steps:
       - name: Install git
         run: |
@@ -68,6 +77,39 @@ jobs:
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
+
+      # Chapter 22 pulls its embedding checkpoints at run time, and this job set no
+      # HF_HOME and cached nothing, so every Monday re-downloaded them inside a fresh
+      # container. 02_domain_embeddings_comparison is the only weekly notebook that
+      # pulls a large one - BAAI/bge-large-en-v1.5, about 1.3 GB - and it is the only
+      # weekly notebook that fails: in run 37320316180 it raised "couldn't connect to
+      # huggingface.co" at cell 27 while 03_hybrid_retrieval (31 s) and
+      # 05_10k_rag_assistant (48 s) pulled their ~90 MB models and passed in the same
+      # job. That is a throttled shared-IP runner losing a long transfer, not an
+      # unreachable host, which is why passing HF_TOKEN on 2026-09-12 did not help.
+      #
+      # Budget, measured 2026-10-09: the repository holds 2.47 GB across 7 caches
+      # against a 10 GB limit, the largest being hf-ch11-12 at 0.76 GB per week. The
+      # weekly checkpoints are ~1.6 GB and `restore-keys` keeps at most two weekly
+      # buckets live, so this lands the repository near 5.7 GB worst case. Re-measure
+      # with `gh api .../actions/cache/usage` rather than trusting this number; over
+      # the limit GitHub evicts least-recently-used and the eviction is silent.
+      #
+      # The key buckets by ISO week for the same reason test.yml's does: the model ids
+      # are literals inside the notebooks, so nothing in the repo declares what to pin,
+      # and a weekly bucket picks up a newly added checkpoint at the cost of one
+      # download instead of freezing the cache forever.
+      - name: HuggingFace cache key
+        id: hfkey
+        run: echo "week=$(date -u +%GW%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache HuggingFace checkpoints
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.hf-cache
+          key: hf-weekly-${{ steps.hfkey.outputs.week }}
+          restore-keys: |
+            hf-weekly-
 
       - name: Record the fixture this job read
         run: |
@@ -129,74 +171,100 @@ jobs:
           path: junit-weekly.xml
           retention-days: 30
 
-      - name: Open issues for failed notebooks
-        if: always() && steps.pytest_chapters.outputs.exit_code != '0'
+      - name: Classify the outcomes
+        id: outcomes
+        if: always()
+        run: |
+          # One parser, in a script with tests, rather than a regex in this file
+          # twice. Those regexes read the `name="` inside `classname="`, so every
+          # weekly failure was filed under the test class and no issue ever named
+          # the notebook that failed; #1046 absorbed all of them. The script also
+          # reports what PASSED, which is what lets a filed issue close itself.
+          echo "json=$(python .github/scripts/junit_outcomes.py junit-weekly.xml --id-style notebook)" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: File, reopen and close `weekly-flake` issues
+        if: always()
         uses: actions/github-script@v7
+        env:
+          OUTCOMES: ${{ steps.outcomes.outputs.json }}
+          TITLE_PREFIX: weekly-flake
+          BODY_INTRO: >-
+            The weekly external workflow failed to execute this notebook.
         with:
           script: |
-            const fs = require('fs');
-            const { execSync } = require('child_process');
-            let xml;
-            try {
-              xml = fs.readFileSync('junit-weekly.xml', 'utf8');
-            } catch (e) {
-              core.info('No junit-weekly.xml found; nothing to file.');
-              return;
-            }
+            const { failed, passed } = JSON.parse(process.env.OUTCOMES);
+            const prefix = process.env.TITLE_PREFIX;
+            const { owner, repo } = context.repo;
+            const runUrl =
+              `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
 
-            // Crude but dependency-free junit parse: pull <testcase ...> blocks
-            // and check each for a child <failure> or <error>.
-            const testcaseRe = /<testcase\b[^>]*>([\s\S]*?)<\/testcase>|<testcase\b[^>]*\/>/g;
-            // Word-boundary, not a bare `name=`: `classname="..."` contains the
-            // substring `name="`, so the old pattern read the class as the test
-            // name and every weekly failure was filed as
-            // `weekly-flake: tests.test_chapter_notebooks` (#1046).
-            const attrRe = (name) => new RegExp(`\\b${name}="([^"]*)"`);
-            const failures = [];
-            let m;
-            while ((m = testcaseRe.exec(xml)) !== null) {
-              const block = m[0];
-              const body = m[1] || '';
-              if (!/<failure\b|<error\b/.test(body)) continue;
-              const nameMatch = block.match(attrRe('name'));
-              const classMatch = block.match(attrRe('classname'));
-              if (nameMatch) {
-                failures.push({
-                  name: nameMatch[1],
-                  classname: classMatch ? classMatch[1] : '',
-                });
+            // Listing beats searching. The search index lags by up to a minute,
+            // so an issue this job just created can come back absent and be
+            // created a second time. Closed issues are listed too, because a
+            // notebook that flaps belongs in one thread that reopens rather than
+            // in a new issue every Monday. listForRepo returns pull requests as
+            // well, so they are dropped here rather than matched on by title.
+            const all = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'all', labels: prefix, per_page: 100,
+            });
+            const byTitle = new Map();
+            for (const issue of all) {
+              if (issue.pull_request) continue;
+              const held = byTitle.get(issue.title);
+              // An open issue wins over a closed one with the same title, and the
+              // newest of two open ones wins, so a historical duplicate cannot
+              // make this comment on a thread nobody is reading.
+              if (!held
+                  || (held.state === 'closed' && issue.state === 'open')
+                  || (held.state === issue.state && issue.number > held.number)) {
+                byTitle.set(issue.title, issue);
               }
             }
-            core.info(`Found ${failures.length} failing testcases.`);
 
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-
-            for (const f of failures) {
-              const nbId = f.name.replace(/^test_[a-z_]+\[/, '').replace(/\]$/, '');
-              const title = `weekly-flake: ${nbId}`;
-              // Search for existing open issue with same title to dedupe.
-              const q = `repo:${owner}/${repo} is:issue is:open in:title "weekly-flake: ${nbId}"`;
-              const existing = await github.rest.search.issuesAndPullRequests({ q });
-              if (existing.data.total_count > 0) {
-                const num = existing.data.items[0].number;
-                core.info(`Existing issue #${num} for ${nbId}; commenting.`);
-                await github.rest.issues.createComment({
-                  owner, repo, issue_number: num,
-                  body: `Failed again in weekly run: ${runUrl}`,
-                });
-              } else {
-                core.info(`Opening new issue for ${nbId}.`);
-                await github.rest.issues.create({
+            for (const id of failed) {
+              const title = `${prefix}: ${id}`;
+              const existing = byTitle.get(title);
+              if (!existing) {
+                const { data } = await github.rest.issues.create({
                   owner, repo, title,
-                  body: `Weekly external workflow failed for \`${nbId}\`.\n\n` +
-                        `Run: ${runUrl}\n\n` +
-                        `Test class: \`${f.classname}\`\n\n` +
-                        `Dedupes by NB id — comments will append on subsequent failures.`,
-                  labels: ['weekly-flake'],
+                  body: `${process.env.BODY_INTRO}\n\n` +
+                        `\`${id}\`\n\nRun: ${runUrl}\n\n` +
+                        `This issue is opened, commented and closed by the weekly ` +
+                        `workflow. It closes on the first run in which this passes, ` +
+                        `so an open one means a standing failure.`,
+                  labels: [prefix],
+                });
+                core.info(`opened #${data.number} for ${id}`);
+                continue;
+              }
+              if (existing.state === 'closed') {
+                await github.rest.issues.update({
+                  owner, repo, issue_number: existing.number, state: 'open',
                 });
               }
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: existing.state === 'closed'
+                  ? `Failed again after closing: ${runUrl}`
+                  : `Failed again in the weekly run: ${runUrl}`,
+              });
+              core.info(`updated #${existing.number} for ${id}`);
+            }
+
+            for (const id of passed) {
+              const existing = byTitle.get(`${prefix}: ${id}`);
+              if (!existing || existing.state !== 'open') continue;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `Passed in the weekly run: ${runUrl}. Closing; it reopens ` +
+                      `if this fails again.`,
+              });
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number,
+                state: 'closed', state_reason: 'completed',
+              });
+              core.info(`closed #${existing.number} for ${id}`);
             }
 
       - name: Fail job if pytest failed
@@ -275,65 +343,102 @@ jobs:
           path: junit-drift.xml
           retention-days: 30
 
-      - name: Open issues for drifted sources
-        if: always() && steps.pytest_drift.outputs.exit_code != '0'
+      - name: Classify the outcomes
+        id: outcomes
+        if: always()
+        run: |
+          # One parser, in a script with tests, rather than a regex in this file
+          # twice. Those regexes read the `name="` inside `classname="`, so every
+          # weekly failure was filed under the test class and no issue ever named
+          # the notebook that failed; #1046 absorbed all of them. The script also
+          # reports what PASSED, which is what lets a filed issue close itself.
+          echo "json=$(python .github/scripts/junit_outcomes.py junit-drift.xml --id-style drift)" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: File, reopen and close `external-drift` issues
+        if: always()
         uses: actions/github-script@v7
+        env:
+          OUTCOMES: ${{ steps.outcomes.outputs.json }}
+          TITLE_PREFIX: external-drift
+          BODY_INTRO: >-
+            The weekly external drift smoke failed for this source: an
+            upstream free data provider appears to have moved, renamed a file,
+            or changed its payload schema.
         with:
           script: |
-            const fs = require('fs');
-            let xml;
-            try {
-              xml = fs.readFileSync('junit-drift.xml', 'utf8');
-            } catch (e) {
-              core.info('No junit-drift.xml found; nothing to file.');
-              return;
+            const { failed, passed } = JSON.parse(process.env.OUTCOMES);
+            const prefix = process.env.TITLE_PREFIX;
+            const { owner, repo } = context.repo;
+            const runUrl =
+              `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            // Listing beats searching. The search index lags by up to a minute,
+            // so an issue this job just created can come back absent and be
+            // created a second time. Closed issues are listed too, because a
+            // notebook that flaps belongs in one thread that reopens rather than
+            // in a new issue every Monday. listForRepo returns pull requests as
+            // well, so they are dropped here rather than matched on by title.
+            const all = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'all', labels: prefix, per_page: 100,
+            });
+            const byTitle = new Map();
+            for (const issue of all) {
+              if (issue.pull_request) continue;
+              const held = byTitle.get(issue.title);
+              // An open issue wins over a closed one with the same title, and the
+              // newest of two open ones wins, so a historical duplicate cannot
+              // make this comment on a thread nobody is reading.
+              if (!held
+                  || (held.state === 'closed' && issue.state === 'open')
+                  || (held.state === issue.state && issue.number > held.number)) {
+                byTitle.set(issue.title, issue);
+              }
             }
 
-            // Dependency-free junit parse: <testcase> blocks with a child
-            // <failure>/<error> are real drift (skips are not failures).
-            const testcaseRe = /<testcase\b[^>]*>([\s\S]*?)<\/testcase>|<testcase\b[^>]*\/>/g;
-            // Same word-boundary as the chapter parser above: without it,
-            // `classname="tests.test_external_drift"` is read as the test name
-            // and the issue is titled `external-drift: tests.test_external_drift`.
-            const attrRe = (name) => new RegExp(`\\b${name}="([^"]*)"`);
-            const failures = [];
-            let m;
-            while ((m = testcaseRe.exec(xml)) !== null) {
-              const block = m[0];
-              const body = m[1] || '';
-              if (!/<failure\b|<error\b/.test(body)) continue;
-              const nameMatch = block.match(attrRe('name'));
-              if (nameMatch) failures.push(nameMatch[1]);
-            }
-            core.info(`Found ${failures.length} drifted source(s).`);
-
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-
-            for (const name of failures) {
-              // test_etf_yahoo_reachable -> etf_yahoo
-              const source = name.replace(/^test_/, '').replace(/_reachable$/, '');
-              const title = `external-drift: ${source}`;
-              const q = `repo:${owner}/${repo} is:issue is:open in:title "external-drift: ${source}"`;
-              const existing = await github.rest.search.issuesAndPullRequests({ q });
-              if (existing.data.total_count > 0) {
-                const num = existing.data.items[0].number;
-                await github.rest.issues.createComment({
-                  owner, repo, issue_number: num,
-                  body: `Drifted again in the weekly run: ${runUrl}`,
-                });
-              } else {
-                await github.rest.issues.create({
+            for (const id of failed) {
+              const title = `${prefix}: ${id}`;
+              const existing = byTitle.get(title);
+              if (!existing) {
+                const { data } = await github.rest.issues.create({
                   owner, repo, title,
-                  body: `The weekly external drift smoke failed for \`${name}\`.\n\n` +
-                        `An upstream free data source appears to have moved, renamed a ` +
-                        `file, or changed its payload schema.\n\n` +
-                        `Run: ${runUrl}\n\n` +
-                        `Dedupes by source — comments append on subsequent failures.`,
-                  labels: ['external-drift', 'weekly-flake'],
+                  body: `${process.env.BODY_INTRO}\n\n` +
+                        `\`${id}\`\n\nRun: ${runUrl}\n\n` +
+                        `This issue is opened, commented and closed by the weekly ` +
+                        `workflow. It closes on the first run in which this passes, ` +
+                        `so an open one means a standing failure.`,
+                  labels: [prefix],
+                });
+                core.info(`opened #${data.number} for ${id}`);
+                continue;
+              }
+              if (existing.state === 'closed') {
+                await github.rest.issues.update({
+                  owner, repo, issue_number: existing.number, state: 'open',
                 });
               }
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: existing.state === 'closed'
+                  ? `Failed again after closing: ${runUrl}`
+                  : `Failed again in the weekly run: ${runUrl}`,
+              });
+              core.info(`updated #${existing.number} for ${id}`);
+            }
+
+            for (const id of passed) {
+              const existing = byTitle.get(`${prefix}: ${id}`);
+              if (!existing || existing.state !== 'open') continue;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `Passed in the weekly run: ${runUrl}. Closing; it reopens ` +
+                      `if this fails again.`,
+              });
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number,
+                state: 'closed', state_reason: 'completed',
+              });
+              core.info(`closed #${existing.number} for ${id}`);
             }
 
       - name: Fail job if drift smoke failed
