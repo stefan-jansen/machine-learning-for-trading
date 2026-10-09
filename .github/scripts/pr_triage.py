@@ -107,7 +107,8 @@ def find(paths: list[str], body: str) -> list[dict[str, str]]:
                     + ", ".join(f"`{s}.ipynb`" for s in unpaired)
                     + ". The `.py` is the source and the `.ipynb` is generated from it, "
                     "with real outputs stamped in `metadata.ml4t_provenance`. Edit the "
-                    "`.py` and run `jupytext --sync`."
+                    "`.py` and sync it; CONTRIBUTING.md gives the command, which differs "
+                    "for a text change and a code change."
                 ),
             }
         )

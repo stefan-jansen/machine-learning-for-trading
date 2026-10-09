@@ -62,12 +62,23 @@ distinguishes a bug from a preference.
 Every notebook is a paired `.py` and `.ipynb`. The `.py` is the source; the `.ipynb` is
 generated and its outputs are a real execution, stamped in `metadata.ml4t_provenance`.
 
-- Edit the `.py`, then run `jupytext --sync`. Never hand-edit the `.ipynb`.
-- Do not clear or regenerate outputs to make a diff look clean. CI checks that a committed
-  `.ipynb` matches the `.py` it was executed from.
-- A text-only change keeps the existing outputs. If your change makes a notebook compute
-  something different, say so in the pull request: the re-execution runs here, on the
-  reference data, and the new outputs are committed with it.
+- Edit the `.py`. Never hand-edit the `.ipynb`.
+- For a **text change** - prose, a figure's alt text, adding or deleting or retagging a
+  markdown cell - fold it in with
+  `python .github/scripts/notebook_provenance.py sync-prose <notebook>.py`, or `sync-alt`
+  if you changed alt text. These keep the existing outputs and the original execution
+  stamp, and they are what the CI gate expects. Editing words inside a markdown cell
+  also survives a plain `jupytext --sync`, but adding, deleting or retagging one does
+  not: the stamp then describes the previous source and the gate rejects the notebook
+  as a stale render even though nothing computed changed. `sync-prose` covers both, so
+  use it for any text change and you will not have to tell them apart.
+- For a **code change**, run `jupytext --sync`. The notebook now needs re-executing, and
+  that runs here on the reference data; say so in the pull request and leave the outputs
+  alone. `notebook_provenance.py clear <notebook>.ipynb` drops the outputs and the stamp
+  so the notebook claims nothing, which the gate accepts.
+- Do not clear or regenerate outputs to make a diff look clean, and do not commit a
+  notebook you re-executed on your own machine: CI checks that a committed `.ipynb` is
+  the paired `.py` executed in a real environment.
 
 ### AI tools
 

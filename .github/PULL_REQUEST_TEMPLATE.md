@@ -29,7 +29,7 @@ computed changes" if that is the case.
 
 - [ ] This pull request fixes **one** defect, described in **one** issue, and closes it.
 - [ ] A test fails before this change and passes after it, or the change computes nothing.
-- [ ] No `.ipynb` was hand-edited: the `.py` changed and `jupytext --sync` ran.
+- [ ] No `.ipynb` was hand-edited: the `.py` changed and it was synced (see CONTRIBUTING.md, which gives the command for a text change and the one for a code change).
 - [ ] Any change to a computed value is stated above, with both values and their source.
 - [ ] This redefines no convention without an issue agreeing the intended behavior first.
 
