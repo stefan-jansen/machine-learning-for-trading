@@ -27,6 +27,7 @@ import json
 import math
 import os
 import random
+import re
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -422,28 +423,108 @@ class WalkForwardConfig:
         return cls(**data)
 
 
+# `labels.buffer` names one duration, and the unit it names decides which guard
+# field carries it. The aliases are kept rather than normalized through pandas
+# because `8H` and `15T` are both deprecated spellings that pandas 2.3 still
+# accepts with a FutureWarning and pandas 3 drops, and `crypto_perps_funding`
+# declares `8H`.
+_BUFFER_UNITS = {
+    "d": "days",
+    "day": "days",
+    "days": "days",
+    "h": "hours",
+    "hour": "hours",
+    "hours": "hours",
+    "t": "minutes",
+    "m": "minutes",
+    "min": "minutes",
+    "mins": "minutes",
+    "minute": "minutes",
+    "minutes": "minutes",
+    "w": "weeks",
+    "week": "weeks",
+    "weeks": "weeks",
+}
+# A month is not a fixed duration. The splitter takes a Timedelta, so a declared
+# month is carried as 30 days; `us_firm_characteristics` declares `1M` and this is
+# the value it has always used. `M` is matched case-sensitively, before the table
+# above, because lowercase `m` is minutes.
+_CALENDAR_MONTH_DAYS = 30
+_BUFFER_RE = re.compile(r"^(\d+)\s*([A-Za-z]+)$")
+_BUFFER_ACCEPTED = (
+    "a whole number and a unit (`21D`, `8H`, `16min`, `5W`, `1M` for a 30-day "
+    "month), or an ISO 8601 duration (`P21D`, `PT16M`)"
+)
+
+
 def _label_horizon_guards(buffer: str) -> dict[str, int]:
     """Turn a ``labels.buffer`` string into the leakage-guard fields.
 
-    A one-character unit is sliced off the end (``21D``, ``8H``, ``60m``, ``15T``,
-    ``1M``). ``min`` has to be recognized first: NASDAQ-100 declares ``16min``, and
-    slicing only the last character asks ``int("16mi")``, so ``get_cv_config``
-    raises before it can set an embargo.
-
-    ``M`` is a calendar month. ``pd.Timedelta`` rejects it as ambiguous, so the
-    guard stores 30 days per month until the splitter accepts calendar months.
+    Raises ``ValueError`` on anything it cannot read. It must never fall through
+    to an empty dict: ``_label_horizon_to_iso`` turned that into ``"P0D"``, so a
+    buffer this function did not recognize became *no embargo at all* with
+    nothing raised and nothing logged. ``nasdaq100_microstructure`` sat in that
+    state, because ``16min`` matched none of the single-character branches.
     """
-    if buffer.endswith("min"):
-        return {"label_horizon_minutes": int(buffer[:-3])}
-    if buffer.endswith("D"):
-        return {"label_horizon_days": int(buffer[:-1])}
-    if buffer.endswith(("h", "H")):
-        return {"label_horizon_hours": int(buffer[:-1])}
-    if buffer.endswith("T") or (buffer.endswith("m") and not buffer.endswith("M")):
-        return {"label_horizon_minutes": int(buffer[:-1])}
-    if buffer.endswith("M"):
-        return {"label_horizon_days": int(buffer[:-1]) * 30}
-    return {}
+    text = str(buffer).strip()
+    if not text:
+        msg = f"labels.buffer is empty; expected {_BUFFER_ACCEPTED}"
+        raise ValueError(msg)
+
+    match = _BUFFER_RE.match(text)
+    if match and match.group(2) == "M":
+        return {"label_horizon_days": int(match.group(1)) * _CALENDAR_MONTH_DAYS}
+    if match and match.group(2).lower() in _BUFFER_UNITS:
+        value, unit = int(match.group(1)), _BUFFER_UNITS[match.group(2).lower()]
+        if unit == "weeks":
+            return {"label_horizon_days": value * 7}
+        return {f"label_horizon_{unit}": value}
+
+    # Anything else - an ISO 8601 duration, a compound like `2h30min` - is handed
+    # to pandas, which is also what the splitter's own config does.
+    try:
+        delta = pd.Timedelta(text)
+    except ValueError as exc:
+        msg = f"Cannot read labels.buffer {text!r}; expected {_BUFFER_ACCEPTED}"
+        raise ValueError(msg) from exc
+    if delta < pd.Timedelta(0):
+        msg = f"labels.buffer {text!r} is negative; an embargo cannot run backwards"
+        raise ValueError(msg)
+    total = delta.total_seconds()
+    if total != int(total):
+        # int() truncates, so a sub-second buffer would become 0 seconds, pass the
+        # whole-days test below and read as `P0D` - the silent no-embargo this
+        # function exists to rule out, reached by a different route.
+        msg = (
+            f"labels.buffer {text!r} is {delta}, which carries a fraction of a second; "
+            f"the leakage guards carry whole days, hours or minutes"
+        )
+        raise ValueError(msg)
+    seconds = int(total)
+    if seconds % 86400 == 0:
+        return {"label_horizon_days": seconds // 86400}
+    if seconds % 3600 == 0:
+        return {"label_horizon_hours": seconds // 3600}
+    if seconds % 60 == 0:
+        return {"label_horizon_minutes": seconds // 60}
+    msg = (
+        f"labels.buffer {text!r} is {delta}, which is not a whole number of "
+        f"minutes; the leakage guards carry days, hours or minutes"
+    )
+    raise ValueError(msg)
+
+
+def _buffer_guards(buffer: str, setup_path: Path) -> dict[str, int]:
+    """``_label_horizon_guards``, with the file that declared the value in the error.
+
+    An end user reading `Cannot read labels.buffer '5 weeks'` has to find which of
+    the nine setups said it; the parser alone does not know.
+    """
+    try:
+        return _label_horizon_guards(buffer)
+    except ValueError as exc:
+        msg = f"{exc} (declared in {setup_path})"
+        raise ValueError(msg) from exc
 
 
 def load_protocol(case_study_id: str) -> dict:
@@ -474,22 +555,32 @@ def load_protocol(case_study_id: str) -> dict:
             "start": ev.get("holdout_start"),
             "end": ev.get("holdout_end"),
         },
-        # "21D", "8h", "15T", "60m", "16min", "1M" — see _label_horizon_guards.
-        "leakage_guards": _label_horizon_guards(labels.get("buffer", "21D")),
+        # "21D", "8h", "15T", "60m", "16min", "1M" - see _label_horizon_guards.
+        "leakage_guards": _buffer_guards(labels.get("buffer", "21D"), path),
     }
 
     return protocol
 
 
 def _label_horizon_to_iso(leakage_guards: dict) -> str:
-    """Convert label horizon to ISO 8601 duration string."""
+    """Convert label horizon to ISO 8601 duration string.
+
+    Raises on guards that carry no horizon. The ``"P0D"`` this used to return is
+    a valid embargo of zero, so an unreadable buffer and a deliberate
+    no-embargo declaration produced the same config and nothing distinguished
+    them. Declare no embargo as ``0D`` to get it.
+    """
     if "label_horizon_days" in leakage_guards:
         return f"P{leakage_guards['label_horizon_days']}D"
     if "label_horizon_hours" in leakage_guards:
         return f"PT{leakage_guards['label_horizon_hours']}H"
     if "label_horizon_minutes" in leakage_guards:
         return f"PT{leakage_guards['label_horizon_minutes']}M"
-    return "P0D"
+    msg = (
+        f"Leakage guards {leakage_guards!r} carry no label horizon, so there is no "
+        f"embargo to apply. Declare `labels.buffer: 0D` for no embargo."
+    )
+    raise ValueError(msg)
 
 
 def get_cv_config(case_study_id: str) -> WalkForwardConfig:
