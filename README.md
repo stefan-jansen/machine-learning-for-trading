@@ -105,6 +105,8 @@ The workflow this repository implements, taught end to end.
 | Oct 10, 2026 | [ML for Trading in the Age of AI Agents](https://maven.com/stefan-jansen/ml4t-ai-agents) | Work through an ETF strategy from idea to a realistic trading simulation. |
 | Dec 3 – Feb 18, 2027 | [Research to Production](https://maven.com/stefan-jansen/research-to-production) | Take one research idea from a question to a costed, monitored strategy, with the evidence trail that makes the result checkable. |
 
+**Free live sessions**, with the recording sent to everyone who registers: [Machine learning for trading: choosing the next experiment](https://maven.com/p/b146f5) (Wed, Oct 28, 11:00 AM ET / 15:00 UTC) · [Anatomy of a machine learning for trading case study](https://maven.com/p/bb56cd) (Wed, Nov 25, 11:00 AM ET / 16:00 UTC)
+
 ### Agentic systems
 
 Designing multi-agent systems whose reasoning can be audited.
@@ -113,7 +115,7 @@ Designing multi-agent systems whose reasoning can be audited.
 |------|----------|---------------------|
 | Nov 21, 2026 | [Agent Engineering: Build, Evaluate, and Deploy AI Agents](https://maven.com/stefan-jansen/agent-engineering) | Go from agent fundamentals to a live multi-agent system, with an evaluation harness that says whether it works. |
 
-**Free live sessions**, with the recording sent to everyone who registers: [AI Agent Architectures: ReAct, Reflection and Planning](https://maven.com/p/b146f5) (Wed, Oct 28, 11:00 AM ET / 15:00 UTC) · [Multi-Agent AI Systems: When They Help and How to Build Them](https://maven.com/p/393eee) (Wed, Nov 11, 11:00 AM ET / 16:00 UTC)
+**Free live sessions**, with the recording sent to everyone who registers: [Multi-Agent AI Systems: When They Help and How to Build Them](https://maven.com/p/393eee) (Wed, Nov 11, 11:00 AM ET / 16:00 UTC)
 
 ### Coding agents
 
@@ -122,6 +124,8 @@ Getting reliable work out of the agents you code with.
 | When | Offering | What you leave with |
 |------|----------|---------------------|
 | Oct 24, 2026 | [Stop Micromanaging Your Coding Agent](https://maven.com/stefan-jansen/loop-engineering) | Get reliable work out of coding agents: harness design, verification, and recovery from a bad run. |
+
+**Free live sessions**, with the recording sent to everyone who registers: [Getting better results from coding agents](https://maven.com/p/166231) (Wed, Oct 21, 11:00 AM ET / 15:00 UTC)
 
 *Between cohorts, the [**Insights** newsletter](https://insights.ml4trading.io/) covers the same ground weekly, source by source.*
 <!-- offerings:all end -->
