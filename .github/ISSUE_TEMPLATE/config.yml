@@ -1,0 +1,3 @@
+# Blank issues stay on: a reader with a question should not have to pick a form.
+# The two templates exist for the cases where a missing field costs a round trip.
+blank_issues_enabled: true

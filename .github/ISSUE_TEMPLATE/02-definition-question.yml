@@ -1,0 +1,46 @@
+name: A convention or definition looks wrong
+description: An annualization factor, a sign or return convention, a default, or a label definition disagrees with the code that uses it or with a source.
+labels: ["definition"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Code elsewhere in this repository depends on these, so changing one needs
+        agreement on the intended behavior before the code moves. Send the derivation
+        rather than a pull request, and once the intended behavior is settled the fix
+        follows as an ordinary defect. One convention per issue.
+  - type: input
+    id: where
+    attributes:
+      label: Where
+      description: The module or notebook and the function, cell, or column name.
+    validations:
+      required: true
+  - type: textarea
+    id: claim
+    attributes:
+      label: What the code does, and what you believe it should do
+      description: Give both, as formulas or as the lines themselves.
+    validations:
+      required: true
+  - type: textarea
+    id: basis
+    attributes:
+      label: What establishes your reading
+      description: A derivation, a cited definition, or the code or text it contradicts.
+    validations:
+      required: true
+  - type: textarea
+    id: effect
+    attributes:
+      label: Compatibility impact
+      description: "Which columns, saved artifacts, or downstream notebooks change if you are right, and whether a stored result would have to be regenerated. Say so if you do not know."
+  - type: dropdown
+    id: ai
+    attributes:
+      label: Did you use AI tools to find or write this up?
+      options:
+        - "No"
+        - "Yes, and I have read and checked what it produced"
+    validations:
+      required: true

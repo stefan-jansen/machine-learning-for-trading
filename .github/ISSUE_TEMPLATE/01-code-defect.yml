@@ -1,0 +1,57 @@
+name: Code defect
+description: Something in this repository raises, hangs, installs wrong, or prints a number its own code does not compute.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This repository takes corrections to the code and to notebook text, not new
+        material. One problem per issue: if you have found several unrelated ones, open
+        one issue each so they can be reviewed and fixed independently. See
+        [CONTRIBUTING.md](https://github.com/stefan-jansen/machine-learning-for-trading/blob/main/CONTRIBUTING.md).
+  - type: input
+    id: where
+    attributes:
+      label: Where
+      description: The notebook, module, or chapter, and the cell or function.
+      placeholder: 09_model_based_features/13_regime_as_feature.py, the CV split cell
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Output of `git rev-parse --short HEAD`.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The smallest command or cell that shows it, as text rather than a screenshot.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What you got
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and where that comes from
+      description: "For anything numeric, say what establishes the expected value: a line of code, a printed formula, or a source."
+    validations:
+      required: true
+  - type: dropdown
+    id: ai
+    attributes:
+      label: Did you use AI tools to find or write this up?
+      options:
+        - "No"
+        - "Yes, and I have read and checked what it produced"
+    validations:
+      required: true

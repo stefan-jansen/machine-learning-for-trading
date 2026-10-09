@@ -1,0 +1,68 @@
+# Mechanical contribution triage, for a maintainer to read.
+#
+# Answers the four questions a reviewer asks before reading any code, and saves the
+# answers as a build artifact and in the run summary. No model and no secret: the
+# checks are decidable from the pull request's own metadata and diff, and a
+# deterministic answer is worth more here than a plausible one.
+#
+# It publishes nothing. No comment, no review, no label, no close, and the token it
+# runs with cannot do any of those: `permissions: contents: read` is the whole grant.
+# The report ends with a reply a maintainer can paste if they want to send it, which
+# is where the decision belongs. An earlier version of this workflow handed the
+# findings to a second job, triggered by this one's completion, that posted and edited
+# a comment on its own; that published a disposition on a contributor's pull request
+# without a maintainer in the loop, and it is deleted rather than disabled.
+#
+# `pull_request_target` is not used either, and would be the wrong answer twice over:
+# it runs with repository secrets in scope for a workflow a contributor can influence,
+# and it exists to get a writable token, which this no longer wants.
+
+name: PR triage
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    name: triage
+    # Outside contributions only. The review program's own pull requests are
+    # tracked in a separate workspace and have no issue in this repository to
+    # close, so running this on them would report a finding that is wrong by
+    # construction, every time.
+    if: >-
+      !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+                github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Collect the findings
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python .github/scripts/pr_triage.py \
+            --pr "$PR_NUMBER" --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --out triage.md
+
+      - name: Put the findings in the run summary
+        # Where a maintainer reads them without downloading a zip. The artifact
+        # stays for the machine-readable copy.
+        run: cat triage.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the findings
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-triage
+          path: |
+            triage.md
+            triage.json
+          retention-days: 7
