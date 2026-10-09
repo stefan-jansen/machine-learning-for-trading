@@ -6,8 +6,10 @@ this is a deterministic check rather than a judgement: an AI-written bundle of
 nine unrelated fixes is identifiable before anyone spends a build on it, which is
 the cost this exists to move back to the contributor.
 
-Writes ``triage.md`` (the comment) and ``triage.json`` (the findings, for the
-posting job). Exits 0 whatever it finds: it reports, it does not gate.
+Writes ``triage.md`` (the report a maintainer reads, with a reply they can paste if
+they choose to send one) and ``triage.json`` (the same findings, machine-readable).
+Nothing here posts, labels, closes or reviews anything, and the workflow that runs it
+holds no token that could. Exits 0 whatever it finds: it reports, it does not gate.
 """
 
 from __future__ import annotations
@@ -145,29 +147,53 @@ def find(paths: list[str], body: str) -> list[dict[str, str]]:
     return findings
 
 
-def render(pr: int, findings: list[dict[str, str]]) -> str:
-    lines = ["<!-- pr-triage -->"]
-    if not findings:
-        lines += [
-            "**Contribution checks pass.** One area, an owning issue, a test, notebook "
-            "pairs intact, AI use stated. A maintainer reviews the code itself from here.",
-        ]
-        return "\n".join(lines) + "\n"
+MARK = {"block": "**Needs a change**", "ask": "**Please fix**", "note": "Note"}
+CONTRIBUTING = (
+    "https://github.com/stefan-jansen/machine-learning-for-trading/blob/main/CONTRIBUTING.md"
+)
 
-    mark = {"block": "**Needs a change**", "ask": "**Please fix**", "note": "Note"}
-    lines += [
-        "Thanks for the pull request. Automated checks against "
-        "[CONTRIBUTING.md](https://github.com/stefan-jansen/machine-learning-for-trading/blob/main/CONTRIBUTING.md) "
-        "found the following. Nothing here is a verdict on the code, and nothing is "
-        "closed automatically.",
+
+def render(pr: int, findings: list[dict[str, str]]) -> str:
+    """The maintainer's report, and under it a reply they can paste or ignore.
+
+    Two audiences in one file deliberately. The findings are addressed to whoever is
+    deciding what to do with the pull request; the reply is addressed to the
+    contributor and is sent by a person or not at all. An earlier version of this was
+    the comment itself, which is why it spoke only to the contributor and promised to
+    update itself.
+    """
+    if not findings:
+        return (
+            f"## Triage: PR #{pr}\n\n"
+            "**Contribution checks pass.** One area, an owning issue, a test, notebook "
+            "pairs intact, AI use stated. Nothing mechanical to raise, so review the "
+            "code itself.\n"
+        )
+
+    lines = [
+        f"## Triage: PR #{pr}",
+        "",
+        f"Mechanical checks against [CONTRIBUTING.md]({CONTRIBUTING}) found "
+        f"{len(findings)} item(s). None of this is a verdict on the code, and nothing "
+        "has been posted, labelled or closed.",
         "",
     ]
     for f in findings:
-        lines.append(f"- {mark[f['level']]}: {f['text']}")
+        lines.append(f"- {MARK[f['level']]} (`{f['id']}`): {f['text']}")
     lines += [
         "",
-        "Push a change and this comment updates itself.",
+        "### Suggested reply",
+        "",
+        "Paste this if you want to send it, after editing whatever does not fit. It is "
+        "a draft, not an action taken.",
+        "",
+        "```markdown",
+        "Thanks for the pull request. Checks against CONTRIBUTING.md raise the "
+        "following before anyone reviews the code itself.",
+        "",
     ]
+    lines += [f"- {f['text']}" for f in findings]
+    lines += ["```", ""]
     return "\n".join(lines) + "\n"
 
 

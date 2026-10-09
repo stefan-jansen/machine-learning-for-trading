@@ -1,19 +1,21 @@
-# Mechanical contribution triage.
+# Mechanical contribution triage, for a maintainer to read.
 #
-# Answers the four questions a reviewer asks before reading any code, and says so
-# in one comment that it edits in place on every push. No model and no secret: the
-# checks below are decidable from the pull request's own metadata and diff, and a
+# Answers the four questions a reviewer asks before reading any code, and saves the
+# answers as a build artifact and in the run summary. No model and no secret: the
+# checks are decidable from the pull request's own metadata and diff, and a
 # deterministic answer is worth more here than a plausible one.
 #
-# It never closes, never blocks a merge and never fails the job. A maintainer still
-# decides; this only makes the decision cheap, and it is what keeps an AI-written
-# bundle from costing an afternoon before anyone knows it is a bundle.
+# It publishes nothing. No comment, no review, no label, no close, and the token it
+# runs with cannot do any of those: `permissions: contents: read` is the whole grant.
+# The report ends with a reply a maintainer can paste if they want to send it, which
+# is where the decision belongs. An earlier version of this workflow handed the
+# findings to a second job, triggered by this one's completion, that posted and edited
+# a comment on its own; that published a disposition on a contributor's pull request
+# without a maintainer in the loop, and it is deleted rather than disabled.
 #
-# `pull_request_target` would be needed to post from a fork PR with a writable
-# token. It is deliberately NOT used: that runs with repository secrets available
-# to a workflow whose body a contributor can influence. This runs on
-# `pull_request` with a read-only token and hands the comment to a second,
-# `workflow_run`-triggered job that checks out nothing from the fork.
+# `pull_request_target` is not used either, and would be the wrong answer twice over:
+# it runs with repository secrets in scope for a workflow a contributor can influence,
+# and it exists to get a writable token, which this no longer wants.
 
 name: PR triage
 
@@ -29,9 +31,8 @@ jobs:
     name: triage
     # Outside contributions only. The review program's own pull requests are
     # tracked in a separate workspace and have no issue in this repository to
-    # close, so running this on them would post a finding that is wrong by
-    # construction, every time, which is how a bot comment becomes something
-    # readers scroll past.
+    # close, so running this on them would report a finding that is wrong by
+    # construction, every time.
     if: >-
       !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
                 github.event.pull_request.author_association)
@@ -51,6 +52,11 @@ jobs:
           python .github/scripts/pr_triage.py \
             --pr "$PR_NUMBER" --base "$BASE_SHA" --head "$HEAD_SHA" \
             --out triage.md
+
+      - name: Put the findings in the run summary
+        # Where a maintainer reads them without downloading a zip. The artifact
+        # stays for the machine-readable copy.
+        run: cat triage.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the findings
         uses: actions/upload-artifact@v4

@@ -1,8 +1,13 @@
-"""The triage comment must name a real problem and stay silent otherwise.
+"""The triage report must name a real problem, stay silent otherwise, and publish nothing.
 
-A bot that asks for a split on a one-defect pull request teaches contributors to
-ignore it, so each case below pins both directions: the finding fires on the shape
-it exists for, and does not fire on the compliant shape.
+A report that asks for a split on a one-defect pull request teaches a maintainer to
+ignore it, so each case below pins both directions: the finding fires on the shape it
+exists for, and does not fire on the compliant shape.
+
+The last group checks the authority rather than the text. Triage is advisory: it saves
+findings for a maintainer and holds no token that could post a comment, a review, a
+label or a close. An earlier version posted and edited a comment by itself from a
+`workflow_run` job, so these assert the capability is gone and not merely unused.
 """
 
 from __future__ import annotations
@@ -79,7 +84,101 @@ def test_silence_about_ai_tools_is_a_note_not_a_blocker() -> None:
     assert "no-ai-disclosure" not in ids(COMPLIANT_FILES, "Closes #1145. No AI was used.")
 
 
-def test_the_comment_carries_the_marker_the_updater_matches_on() -> None:
-    rendered = pr_triage.render(7, pr_triage.find(["a_chapter/x.py"], ""))
-    assert rendered.startswith("<!-- pr-triage -->")
+def test_the_report_states_every_finding_and_drafts_a_reply_for_a_person_to_send() -> None:
+    findings = pr_triage.find(["a_chapter/x.py"], "")
+    rendered = pr_triage.render(7, findings)
+    assert "## Triage: PR #7" in rendered
     assert "Needs a change" in rendered or "Please fix" in rendered
+    # Each finding has to survive into the draft, or the analysis is lost between the
+    # report a maintainer reads and the reply they send.
+    draft = rendered.split("### Suggested reply", 1)[1]
+    for f in findings:
+        assert f["text"] in draft
+    assert "Paste this if you want to send it" in rendered
+
+
+def test_the_report_does_not_claim_to_post_itself() -> None:
+    """It is a file in a build artifact. Wording that promises otherwise is wrong."""
+    rendered = pr_triage.render(7, pr_triage.find(["a_chapter/x.py"], ""))
+    assert "<!-- pr-triage -->" not in rendered, "the comment-dedup marker has no job now"
+    for stale in ("this comment updates itself", "Push a change and this comment"):
+        assert stale not in rendered
+
+
+# ---------------------------------------------------- the authority, not the wording
+
+WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+TRIAGE = WORKFLOWS / "pr-triage.yml"
+
+
+def _workflow(path: Path) -> dict:
+    import yaml
+
+    return yaml.safe_load(path.read_text())
+
+
+def test_triage_runs_with_no_write_permission_at_all() -> None:
+    """The grant is the limit. A prompt or a script cannot exceed it."""
+    wf = _workflow(TRIAGE)
+    assert wf["permissions"] == {"contents": "read"}
+    assert "permissions" not in wf["jobs"]["report"], (
+        "a job-level grant would override the read-only workflow grant"
+    )
+
+
+def test_no_workflow_publishes_the_triage_findings() -> None:
+    """The `workflow_run` publisher is deleted, not disabled.
+
+    A disabled publisher is one edit from posting again, and the commit that removed
+    it is the only thing saying why. A workflow triggered by this one's completion,
+    with pull-requests: write, is the shape to refuse.
+    """
+    import yaml
+
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        wf = yaml.safe_load(path.read_text())
+        triggers = wf.get(True) or wf.get("on") or {}
+        if not isinstance(triggers, dict):
+            continue
+        downstream = triggers.get("workflow_run") or {}
+        assert "PR triage" not in (downstream.get("workflows") or []), (
+            f"{path.name} runs off PR triage and can publish its findings"
+        )
+
+
+def test_the_triage_job_calls_no_publishing_api() -> None:
+    text = TRIAGE.read_text()
+    for forbidden in (
+        "createComment",
+        "updateComment",
+        "createReview",
+        "addLabels",
+        "github-script",
+        "pull-requests: write",
+        "issues: write",
+        "pull_request_target",
+    ):
+        assert forbidden not in text.replace("`pull_request_target` is not used", ""), (
+            f"pr-triage.yml reaches for {forbidden}"
+        )
+
+
+def test_triage_skips_maintainers_and_runs_on_outside_contributions() -> None:
+    """The real `if`, evaluated. The report is wrong by construction on our own PRs.
+
+    Only the one expression shape this gate uses is implemented, and anything else
+    raises: a condition read as false would make the whole table below vacuous.
+    """
+    import json
+    import re
+
+    condition = " ".join(str(_workflow(TRIAGE)["jobs"]["report"]["if"]).split())
+    match = re.fullmatch(
+        r"!contains\(fromJSON\('(\[.*\])'\), github\.event\.pull_request\.author_association\)",
+        condition,
+    )
+    assert match, f"the gate is no longer the shape this test can evaluate: {condition}"
+    excluded = json.loads(match.group(1))
+    assert set(excluded) == {"OWNER", "MEMBER", "COLLABORATOR"}
+    for association in ("CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE"):
+        assert association not in excluded, f"{association} would be skipped"
