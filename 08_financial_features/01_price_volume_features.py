@@ -1168,7 +1168,21 @@ print(f"Cross-sectional ranks for {sample_date}:")
 # high volatility: two assets that rose by the same amount are not equally interesting if
 # one of them did it with several times the dispersion of the other.
 #
-# $$\text{Vol-Scaled Mom} = \frac{r_{21d}}{\sigma_{21d}}$$
+# $\sigma_{21d}$ here is the annualized volatility estimated on a 21-day window, which is
+# what the `vol_21d` column below holds and what a `vol_<h>d` column means throughout this
+# repository: the standard deviation of daily returns over $h$ days, times $\sqrt{252}$.
+# Writing the annualization into the formula is the point - without it the expression and
+# the `vol_scaled_mom` column do not agree:
+#
+# $$\text{Vol-Scaled Mom} = \frac{r_{21d}}{\sigma_{21d}\sqrt{252}}$$
+#
+# The numerator is a 21-day cumulative return and the denominator is an annual rate, so
+# the ratio is not a standardized return and does not compare across horizons. The
+# feature pipelines build the same quantity and call it `sharpe_<h>d`
+# (`case_studies/us_equities_panel/03_financial_features.py`), which is the convention
+# this cell follows. Scaling the denominator by any positive constant leaves the
+# cross-sectional percentile rank below unchanged, so `vol_scaled_rank` is the same
+# either way; `vol_scaled_mom` itself is not.
 
 # %%
 # Vol-scaled momentum: return / realized vol
