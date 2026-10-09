@@ -1098,6 +1098,15 @@
     MAX_QUERIES: 10
     USE_LOCAL_MODELS_ONLY: true
     REQUIRE_GPU: false
+  # The weekly job's only standing failure, and the cause is the download size
+  # rather than reachability: 03 and 05 pull ~90 MB each and passed in the same
+  # run (31 s and 48 s) in which this one raised "couldn't connect to
+  # huggingface.co" on the bge-large pull. The weekly job now prefetches the
+  # pinned revisions into a cache keyed on those pins, so a normal Monday reads
+  # the cache. These two retries bound the remaining case: the run after a pin
+  # moves, when the ~1.3 GB transfer happens again on a shared-IP runner. Three
+  # attempts, 30 s apart (tests/conftest.py applies the `flaky` marker).
+  reruns: 2
   tier: weekly
   timeout: 300
 22_rag_financial_research/03_hybrid_retrieval:
