@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Answer the four questions a reviewer asks before reading a pull request's code.
+
+Each finding below is decidable from the pull request's metadata and its diff, so
+this is a deterministic check rather than a judgement: an AI-written bundle of
+nine unrelated fixes is identifiable before anyone spends a build on it, which is
+the cost this exists to move back to the contributor.
+
+Writes ``triage.md`` (the comment) and ``triage.json`` (the findings, for the
+posting job). Exits 0 whatever it finds: it reports, it does not gate.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+from pathlib import Path
+
+# A pull request "closes" an issue only through a keyword GitHub itself honours.
+# "See #12" or "related to #12" leaves the issue open after the merge.
+CLOSES = re.compile(
+    r"\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b\s*:?\s*"
+    r"(#\d+|https://github\.com/[\w.-]+/[\w.-]+/issues/\d+)",
+    re.IGNORECASE,
+)
+AI_DISCLOSED = re.compile(
+    r"\b(ai|llm|claude|copilot|chatgpt|gpt-|codex|cursor|gemini|agent)\b", re.IGNORECASE
+)
+# A notebook's .ipynb is generated from its .py. A commit carrying the .ipynb
+# alone was hand-edited or re-executed locally, and either one replaces a
+# published result with the contributor's own.
+NOTEBOOK = re.compile(r"^(.+)\.ipynb$")
+
+
+def changed_files(base: str, head: str) -> list[str]:
+    merge_base = subprocess.run(
+        ["git", "merge-base", base, head], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    out = subprocess.run(
+        ["git", "diff", "--name-only", f"{merge_base}..{head}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [line for line in out.stdout.splitlines() if line]
+
+
+def top_level_areas(paths: list[str]) -> set[str]:
+    """The chapter or top-level directory each path belongs to.
+
+    Two chapters in one pull request is the signal that it bundles unrelated
+    fixes. A test beside the fix is not a second area, so ``tests/`` and the
+    repository's shared directories do not count.
+    """
+    shared = {"tests", "utils", "data", ".github", "docs"}
+    areas = set()
+    for path in paths:
+        head = path.split("/")[0]
+        if head in shared or "/" not in path:
+            continue
+        areas.add(head)
+    return areas
+
+
+def find(paths: list[str], body: str) -> list[dict[str, str]]:
+    findings: list[dict[str, str]] = []
+
+    areas = top_level_areas(paths)
+    if len(areas) > 1:
+        findings.append(
+            {
+                "id": "one-change-per-pr",
+                "level": "ask",
+                "text": (
+                    f"This touches {len(areas)} chapters or case studies "
+                    f"({', '.join(sorted(areas))}). CONTRIBUTING.md asks for one defect "
+                    "per pull request: one doubtful change in a bundle blocks every good "
+                    "one beside it. Please split it."
+                ),
+            }
+        )
+
+    if not CLOSES.search(body or ""):
+        findings.append(
+            {
+                "id": "no-owning-issue",
+                "level": "ask",
+                "text": (
+                    "No issue is closed by this. Open one with a minimal reproduction "
+                    "first, then say `Closes #N` here, so the defect is recorded "
+                    "independently of the fix."
+                ),
+            }
+        )
+
+    stems = {m.group(1) for p in paths if (m := NOTEBOOK.match(p))}
+    unpaired = sorted(stem for stem in stems if f"{stem}.py" not in paths)
+    if unpaired:
+        findings.append(
+            {
+                "id": "ipynb-without-py",
+                "level": "block",
+                "text": (
+                    "An `.ipynb` changed without its `.py`: "
+                    + ", ".join(f"`{s}.ipynb`" for s in unpaired)
+                    + ". The `.py` is the source and the `.ipynb` is generated from it, "
+                    "with real outputs stamped in `metadata.ml4t_provenance`. Edit the "
+                    "`.py` and run `jupytext --sync`."
+                ),
+            }
+        )
+
+    touches_code = any(p.endswith((".py", ".ipynb")) and not p.startswith("tests/") for p in paths)
+    has_test = any(p.startswith("tests/") for p in paths)
+    if touches_code and not has_test:
+        findings.append(
+            {
+                "id": "no-test",
+                "level": "ask",
+                "text": (
+                    "No test under `tests/` changed. CONTRIBUTING.md asks for one that "
+                    "fails on `main` and passes here. If the change computes nothing "
+                    "(text, a figure label, a comment), say so and this does not apply."
+                ),
+            }
+        )
+
+    if not AI_DISCLOSED.search(body or ""):
+        findings.append(
+            {
+                "id": "no-ai-disclosure",
+                "level": "note",
+                "text": (
+                    "The description does not say whether AI tools were used. Using them "
+                    "is fine and saying so is required: it tells a reviewer which claims "
+                    "to check rather than read."
+                ),
+            }
+        )
+
+    return findings
+
+
+def render(pr: int, findings: list[dict[str, str]]) -> str:
+    lines = ["<!-- pr-triage -->"]
+    if not findings:
+        lines += [
+            "**Contribution checks pass.** One area, an owning issue, a test, notebook "
+            "pairs intact, AI use stated. A maintainer reviews the code itself from here.",
+        ]
+        return "\n".join(lines) + "\n"
+
+    mark = {"block": "**Needs a change**", "ask": "**Please fix**", "note": "Note"}
+    lines += [
+        "Thanks for the pull request. Automated checks against "
+        "[CONTRIBUTING.md](https://github.com/stefan-jansen/machine-learning-for-trading/blob/main/CONTRIBUTING.md) "
+        "found the following. Nothing here is a verdict on the code, and nothing is "
+        "closed automatically.",
+        "",
+    ]
+    for f in findings:
+        lines.append(f"- {mark[f['level']]}: {f['text']}")
+    lines += [
+        "",
+        "Push a change and this comment updates itself.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pr", type=int, required=True)
+    parser.add_argument("--base", required=True)
+    parser.add_argument("--head", required=True)
+    parser.add_argument("--out", type=Path, default=Path("triage.md"))
+    parser.add_argument("--body", default=None, help="PR body; read from $PR_BODY if absent")
+    args = parser.parse_args(argv)
+
+    import os
+
+    body = args.body if args.body is not None else os.environ.get("PR_BODY", "")
+    paths = changed_files(args.base, args.head)
+    findings = find(paths, body)
+
+    args.out.write_text(render(args.pr, findings))
+    Path("triage.json").write_text(
+        json.dumps({"pr": args.pr, "findings": findings, "files": paths}, indent=2)
+    )
+    for f in findings:
+        print(f"{f['level']}: {f['id']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

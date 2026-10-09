@@ -1,0 +1,62 @@
+# Mechanical contribution triage.
+#
+# Answers the four questions a reviewer asks before reading any code, and says so
+# in one comment that it edits in place on every push. No model and no secret: the
+# checks below are decidable from the pull request's own metadata and diff, and a
+# deterministic answer is worth more here than a plausible one.
+#
+# It never closes, never blocks a merge and never fails the job. A maintainer still
+# decides; this only makes the decision cheap, and it is what keeps an AI-written
+# bundle from costing an afternoon before anyone knows it is a bundle.
+#
+# `pull_request_target` would be needed to post from a fork PR with a writable
+# token. It is deliberately NOT used: that runs with repository secrets available
+# to a workflow whose body a contributor can influence. This runs on
+# `pull_request` with a read-only token and hands the comment to a second,
+# `workflow_run`-triggered job that checks out nothing from the fork.
+
+name: PR triage
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    name: triage
+    # Outside contributions only. The review program's own pull requests are
+    # tracked in a separate workspace and have no issue in this repository to
+    # close, so running this on them would post a finding that is wrong by
+    # construction, every time, which is how a bot comment becomes something
+    # readers scroll past.
+    if: >-
+      !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+                github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Collect the findings
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python .github/scripts/pr_triage.py \
+            --pr "$PR_NUMBER" --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --out triage.md
+
+      - name: Upload the findings
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-triage
+          path: |
+            triage.md
+            triage.json
+          retention-days: 7

@@ -1,0 +1,35 @@
+name: A published number or definition looks wrong
+description: An annualization factor, a sign or return convention, a default, or a label definition disagrees with the text or with a source.
+labels: ["definition"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Changing one of these makes the printed book and the code disagree, so it is not
+        a bug fix and it is not resolved in a pull request. The outcome may be an
+        erratum. Please do not send code for this; send the derivation.
+  - type: input
+    id: where
+    attributes:
+      label: Where
+    validations:
+      required: true
+  - type: textarea
+    id: claim
+    attributes:
+      label: What the code does, and what you believe it should do
+      description: Give both, as formulas or as the lines themselves.
+    validations:
+      required: true
+  - type: textarea
+    id: basis
+    attributes:
+      label: What establishes your reading
+      description: A derivation, a cited definition, or the text it contradicts.
+    validations:
+      required: true
+  - type: textarea
+    id: effect
+    attributes:
+      label: What changes if you are right
+      description: Which printed numbers or figures move, if you know.
