@@ -29,8 +29,8 @@ AI_DISCLOSED = re.compile(
     r"\b(ai|llm|claude|copilot|chatgpt|gpt-|codex|cursor|gemini|agent)\b", re.IGNORECASE
 )
 # A notebook's .ipynb is generated from its .py. A commit carrying the .ipynb
-# alone was hand-edited or re-executed locally, and either one replaces a
-# published result with the contributor's own.
+# alone did not come through jupytext, so the pair is out of sync and the
+# provenance stamp no longer describes the source beside it.
 NOTEBOOK = re.compile(r"^(.+)\.ipynb$")
 
 
@@ -121,8 +121,9 @@ def find(paths: list[str], body: str) -> list[dict[str, str]]:
                 "level": "ask",
                 "text": (
                     "No test under `tests/` changed. CONTRIBUTING.md asks for one that "
-                    "fails on `main` and passes here. If the change computes nothing "
-                    "(text, a figure label, a comment), say so and this does not apply."
+                    "fails before the change and passes with it. If the change computes "
+                    "nothing (text, a figure label, a comment), say so and this does not "
+                    "apply."
                 ),
             }
         )

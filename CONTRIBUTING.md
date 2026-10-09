@@ -1,51 +1,60 @@
 # Contributing
 
-This repository is the companion code for *Machine Learning for Trading, 3rd Edition*
-(MIT Press, July 2026). The book is printed and is not being revised. That shapes what a
-contribution can be here, so please read this before opening a pull request.
-
-The code **is** maintained. Corrections are welcome and they are the point of this
-repository.
+This repository is the maintained code base for *Machine Learning for Trading, 3rd
+Edition*. Corrections are welcome and they are the point of it. Please read this before
+opening an issue or a pull request: it is short, and following it is what makes a
+contribution reviewable.
 
 ## What belongs here
 
-A contribution fixes something a reader hits:
+A contribution fixes something that is wrong:
 
 - Code that raises, hangs, or installs wrong.
+- A computed result that is incorrect, including one that is currently published in a
+  notebook's committed outputs.
 - A notebook whose displayed number does not equal what its own code computes.
 - A broken data path, download, or environment pin.
 - A statement in notebook prose that the code next to it contradicts.
 - A typo in text or a label in a figure.
 
-## What does not
+A verified defect gets corrected even when the correction changes a published number.
+Published output is not a reason to keep incorrect code. What a report needs is the
+expected behavior, the evidence for it, and the compatibility impact: which columns,
+artifacts, or downstream notebooks change, and whether a saved result has to be
+regenerated.
 
-- New chapters, new notebooks, new models, new features, or new datasets. The table of
-  contents is printed; nothing can be added to it.
-- Restructuring, renaming, or reorganizing anything that works.
-- Style preferences. The repository's conventions are deliberate and listed in
+Changing a convention is a different request from fixing a defect. An annualization
+factor, a sign or return convention, a default, or a label definition is used by code
+elsewhere in the repository, so changing one needs agreement on the intended behavior
+before the code moves. Open an issue describing what the quantity should be and why, with
+the derivation. That is not a refusal to fix numerical bugs; it is the step that
+distinguishes a bug from a preference.
+
+## What does not belong here
+
+- New chapters, new notebooks, new models, new features, or new datasets. The scope of the
+  repository is fixed.
+- Restructuring, renaming, or reorganizing code that works.
+- Style preferences. The conventions are deliberate and listed in
   [`.github/copilot-instructions.md`](.github/copilot-instructions.md): `symbol` and
-  `timestamp` as the canonical schema, Polars over pandas, no em dashes, the registry as
-  the only source of results. A pull request that changes one of these to a more common
-  convention will be closed.
+  `timestamp` as the canonical schema, Polars over pandas, the registry as the only source
+  of results. A pull request that changes one of these to a more common convention will be
+  closed.
 - Dependency bumps with no defect behind them.
-
-**Changing a published number is not a bug fix.** An annualization factor, a sign or
-return convention, a default, a label definition: the printed book quotes results computed
-with these, so changing one makes the book and the code disagree. If you believe one is
-wrong, open an issue with the derivation. The outcome may be an erratum rather than a code
-change, and that decision is the author's.
 
 ## How to contribute
 
-1. **Open an issue first**, with a minimal reproduction: the commit you are on, the
-   command or cell you ran, the output you got, and the output you expected. For anything
-   numeric, say where the expected value comes from.
-2. **One defect per pull request**, closing that issue. A pull request bundling unrelated
-   fixes will be closed with a request to split it, because one doubtful change blocks
-   every good one in the same branch and the review cost scales with the worst item.
-3. **Include a test that fails on `main` and passes with your change.** Say in the pull
-   request that you ran it both ways. For a notebook prose fix, instead say which line of
-   code establishes the correct reading.
+1. **Open an issue for one problem**, with a minimal reproduction: the commit you are on,
+   the command or cell you ran, the output you got, and the output you expected. For
+   anything numeric, say where the expected value comes from. An issue listing fifteen
+   unrelated problems is a bundle and will be split before anything is reviewed.
+2. **One pull request addressing that one issue**, and closing it. A pull request bundling
+   unrelated fixes will be closed with a request to split it: one doubtful change blocks
+   every good one in the same branch, and the review cost scales with the worst item.
+3. **Verify the change, and say how.** Include a test that fails before your change and
+   passes after it, and state in the pull request that you ran it both ways. For a prose
+   fix, say which line of code establishes the correct reading. For a changed number, show
+   the old value, the new value, and what produced each.
 4. **Keep the number of open pull requests small** until the first ones are reviewed.
 
 ### Notebooks
@@ -54,24 +63,21 @@ Every notebook is a paired `.py` and `.ipynb`. The `.py` is the source; the `.ip
 generated and its outputs are a real execution, stamped in `metadata.ml4t_provenance`.
 
 - Edit the `.py`, then run `jupytext --sync`. Never hand-edit the `.ipynb`.
-- Do not clear, regenerate, or re-execute outputs to make a diff look clean. CI checks
-  that a committed `.ipynb` matches the `.py` it was executed from, and re-running a
-  notebook on your machine replaces a published result with yours.
-- A text-only change keeps the existing outputs. If your change makes the notebook compute
-  something different, say so in the pull request: it needs a re-execution the maintainer
-  runs.
+- Do not clear or regenerate outputs to make a diff look clean. CI checks that a committed
+  `.ipynb` matches the `.py` it was executed from.
+- A text-only change keeps the existing outputs. If your change makes a notebook compute
+  something different, say so in the pull request: the re-execution runs here, on the
+  reference data, and the new outputs are committed with it.
 
 ### AI tools
 
 You may use them. You answer for what you submit, whoever or whatever wrote it.
 
 - **Say whether you used AI tools, and for which parts.**
-- **Be able to explain every line you submit**, in review, in your own words. A generated
-  reply to a review question that does not engage with the question wastes the reviewer's
-  time and will end the review.
-- **A plausible-looking fix is not a verified one.** The checks above exist because
-  generated patches are cheap to produce and expensive to verify. Running the test both
-  ways is what moves that cost back to you, and it is the one step that cannot be skipped.
+- **Be able to explain every line you submit**, in review, in your own words. A reply to a
+  review question that does not engage with the question ends the review.
+- **A plausible-looking fix is not a verified one.** Running the test both ways is what
+  establishes that a change does what it claims, and it is the step that cannot be skipped.
 
 A pull request that does not follow this may be closed without review. You are welcome to
 reopen it once it does.

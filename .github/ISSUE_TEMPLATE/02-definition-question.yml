@@ -1,17 +1,19 @@
-name: A published number or definition looks wrong
-description: An annualization factor, a sign or return convention, a default, or a label definition disagrees with the text or with a source.
+name: A convention or definition looks wrong
+description: An annualization factor, a sign or return convention, a default, or a label definition disagrees with the code that uses it or with a source.
 labels: ["definition"]
 body:
   - type: markdown
     attributes:
       value: |
-        Changing one of these makes the printed book and the code disagree, so it is not
-        a bug fix and it is not resolved in a pull request. The outcome may be an
-        erratum. Please do not send code for this; send the derivation.
+        Code elsewhere in this repository depends on these, so changing one needs
+        agreement on the intended behavior before the code moves. Send the derivation
+        rather than a pull request, and once the intended behavior is settled the fix
+        follows as an ordinary defect. One convention per issue.
   - type: input
     id: where
     attributes:
       label: Where
+      description: The module or notebook and the function, cell, or column name.
     validations:
       required: true
   - type: textarea
@@ -25,11 +27,20 @@ body:
     id: basis
     attributes:
       label: What establishes your reading
-      description: A derivation, a cited definition, or the text it contradicts.
+      description: A derivation, a cited definition, or the code or text it contradicts.
     validations:
       required: true
   - type: textarea
     id: effect
     attributes:
-      label: What changes if you are right
-      description: Which printed numbers or figures move, if you know.
+      label: Compatibility impact
+      description: "Which columns, saved artifacts, or downstream notebooks change if you are right, and whether a stored result would have to be regenerated. Say so if you do not know."
+  - type: dropdown
+    id: ai
+    attributes:
+      label: Did you use AI tools to find or write this up?
+      options:
+        - "No"
+        - "Yes, and I have read and checked what it produced"
+    validations:
+      required: true

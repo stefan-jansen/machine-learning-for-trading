@@ -5,8 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        The book is printed and is not being revised. This repository takes corrections
-        to the code and to notebook text, not new material. See
+        This repository takes corrections to the code and to notebook text, not new
+        material. One problem per issue: if you have found several unrelated ones, open
+        one issue each so they can be reviewed and fixed independently. See
         [CONTRIBUTING.md](https://github.com/stefan-jansen/machine-learning-for-trading/blob/main/CONTRIBUTING.md).
   - type: input
     id: where
