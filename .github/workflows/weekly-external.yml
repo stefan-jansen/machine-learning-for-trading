@@ -1,6 +1,6 @@
-# ML4T 3rd Edition — Weekly External Workflow (Tier 2)
+# ML4T 3rd Edition - Weekly External Workflow (Tier 2)
 #
-# Runs notebooks tagged `tier: weekly` in tests/overrides.yaml — these have
+# Runs notebooks tagged `tier: weekly` in tests/overrides.yaml - these have
 # external dependencies (IB Gateway, OKX, chromadb, real LLM APIs, real HTTP)
 # that aren't available in the per-commit Tier 1 workflow.
 #
@@ -27,17 +27,34 @@
 # so at most three attempts.
 #
 # Checkpoint downloads are cached on the pinned revisions in
-# .github/weekly-hf-models.yaml, never on a schedule.
+# .github/weekly-hf-models.yaml, never on a schedule. The cache is restored and saved
+# by the notebook job on Monday and touched by a restore-only job on Wednesday and
+# Friday, because GitHub removes an entry nobody has accessed in over seven days and a
+# Monday-only workflow sits exactly on that boundary.
 
 name: Weekly External
 
 on:
   schedule:
-    - cron: '0 6 * * 1'   # Monday 06:00 UTC
+    # Monday runs the notebooks. Wednesday and Friday only restore the checkpoint
+    # cache, so its last-accessed date never reaches seven days. GitHub's documented
+    # policy removes "cache entries that have not been accessed in over 7 days", and a
+    # weekly workflow plus the scheduler's own delay lands on or past that; a single
+    # missed week was enough to throw the 1.659 GB away and pay for it again. With
+    # three days a week, dropping any one scheduled run still leaves a maximum gap of
+    # five days. tests/test_weekly_cache_contract.py computes that from these crons.
+    - cron: '0 6 * * 1'   # Monday 06:00 UTC - notebooks, and the cache save
+    - cron: '0 6 * * 3'   # Wednesday 06:00 UTC - restore only
+    - cron: '0 6 * * 5'   # Friday 06:00 UTC - restore only
   workflow_dispatch:
     inputs:
+      mode:
+        description: "full: run the weekly notebooks. touch: only restore the checkpoint cache."
+        type: choice
+        options: [full, touch]
+        default: full
       test_filter:
-        description: "Optional pytest -k filter to narrow scope"
+        description: "Optional pytest -k filter to narrow scope (mode: full)"
         type: string
         default: ""
 
@@ -51,6 +68,10 @@ env:
 jobs:
   weekly-chapters:
     name: weekly-chapters
+    # Only Monday's schedule runs the notebooks; the midweek crons exist for the cache.
+    if: >-
+      github.event.schedule == '0 6 * * 1'
+      || (github.event_name == 'workflow_dispatch' && inputs.mode != 'touch')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     container:
@@ -115,18 +136,31 @@ jobs:
       # as a stack of ONNX and OpenVINO variants. The selection is 1.659 GB. Measured
       # 2026-10-09 against the Hub's file metadata at the four pinned revisions.
       #
-      # Budget, measured the same day: 2.47 GB across 7 caches against a 10 GB limit,
-      # the largest single entry being hf-ch11-12 at 0.76 GB. Adding 1.659 GB under one
-      # key rather than one per week lands near 4.1 GB; the unrestricted 6.287 GB would
-      # have gone over on its own. Re-measure with `gh api .../actions/cache/usage`;
-      # over the limit GitHub evicts least-recently-used and the eviction is silent.
+      # Budget, measured the same day with `gh api .../actions/cache/usage`:
+      # 2,654,779,421 bytes across 7 entries, which is 2.655 GB decimal and 2.473 GiB,
+      # against a documented 10 GB limit. The largest single entry is hf-ch11-12 at
+      # 814,967,790 bytes. Adding the 1.659 GB selection under one key rather than one
+      # per week lands near 4.3 GB. The unrestricted 6.287 GB would have reached about
+      # 8.94 GB, under the limit rather than over it: the reason to select files is the
+      # three or four redundant copies of the same weights, not a breached cap.
+      # Headroom is thinner than it looks because test.yml's hf-ch* keys carry an ISO
+      # week, so last week's copies sit beside this week's until they age out.
+      # Over the limit GitHub evicts least-recently-used, and that eviction is silent;
+      # nothing here can make a cache survive storage pressure.
       - name: HuggingFace cache key
         id: hfkey
         run: |
           echo "key=$(python .github/scripts/hf_prefetch.py key)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache HuggingFace checkpoints
-        uses: actions/cache@v4
+      # Restore and save are separate actions deliberately. actions/cache declares
+      # `post-if: success()`, so its save runs only when the job succeeded: on a red
+      # weekly run - which is the state this branch exists to fix - a cold cache was
+      # populated by the prefetch below and then thrown away, and the next run paid for
+      # the 1.659 GB again. actions/cache/save placed straight after the prefetch
+      # persists it before a notebook can fail.
+      - name: Restore the HuggingFace checkpoints
+        id: hfcache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/.hf-cache
           key: hf-weekly-${{ steps.hfkey.outputs.key }}
@@ -139,6 +173,16 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python .github/scripts/hf_prefetch.py fetch
+
+      # Only on a miss: saving an existing key is a conflict, and on a hit there is
+      # nothing new to store. No `always()` and no dependence on the pytest outcome,
+      # because this step runs before pytest does.
+      - name: Save the HuggingFace checkpoints
+        if: steps.hfcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/.hf-cache
+          key: hf-weekly-${{ steps.hfkey.outputs.key }}
 
       - name: Report the warm cache
         run: |
@@ -233,17 +277,21 @@ jobs:
           exit 1
 
   # ---------------------------------------------------------------------------
-  # Phase 3 — live external drift smoke.
+  # Phase 3 - live external drift smoke.
   #
   # One tiny REAL pull per free data source (tests/test_external_drift.py, marked
   # `drift`). Catches upstream provider/schema drift: when a source moves,
   # renames a file, or changes its payload shape, the matching test fails and we
-  # file a deduped issue. No billed APIs — key-gated sources (FRED, OANDA) skip
+  # file a deduped issue. No billed APIs - key-gated sources (FRED, OANDA) skip
   # when their free key is absent; geo-restricted sources (Kalshi/Polymarket)
   # skip when blocked. Flake-tolerant via pytest-rerunfailures when available.
   # ---------------------------------------------------------------------------
   weekly-drift:
     name: weekly-drift
+    # Same routing as weekly-chapters: once a week, not on the cache-touch crons.
+    if: >-
+      github.event.schedule == '0 6 * * 1'
+      || (github.event_name == 'workflow_dispatch' && inputs.mode != 'touch')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     container:
@@ -326,3 +374,77 @@ jobs:
         run: |
           echo "Drift smoke exited with code ${{ steps.pytest_drift.outputs.exit_code }}"
           exit 1
+
+  # ---------------------------------------------------------------------------
+  # Cache retention.
+  #
+  # GitHub "will remove any cache entries that have not been accessed in over 7 days"
+  # (docs: Actions > dependency caching > usage limits and eviction policy). A workflow
+  # that runs only on Monday therefore touches its entry every 168 hours, with the
+  # scheduler's own queueing delay on top, so the checkpoint cache can expire between
+  # two consecutive green runs and a single missed week guarantees it. A stable key and
+  # a working offline load say nothing about remote retention.
+  #
+  # This job restores the same entry, under the identical key and path, on Wednesday
+  # and Friday. It is a real restore and not `lookup-only`, because a lookup is not
+  # documented to update the last-accessed date and nothing here would prove it did.
+  # It runs no notebooks, downloads no models and saves no cache, so the only cost is
+  # the archive download.
+  #
+  # A miss is reported and does not fail the job: it is the normal state after a pin
+  # moves, and Monday repopulates. Nothing here protects the entry from storage-pressure
+  # eviction, which deletes by last-accessed date regardless of how recent that is.
+  # ---------------------------------------------------------------------------
+  hf-cache-touch:
+    name: hf-cache-touch
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule != '0 6 * * 1')
+      || (github.event_name == 'workflow_dispatch' && inputs.mode == 'touch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+
+      # No container here. The job needs the key and nothing else, the key is a sha256
+      # over the manifest's own text, and the runner image ships git. Installing pyyaml
+      # explicitly rather than hoping the system python carries it: a missing import
+      # exits non-zero and is visible, which an assumed one would not be.
+      - name: HuggingFace cache key
+        id: hfkey
+        run: |
+          python3 -m pip install --quiet pyyaml
+          echo "key=$(python3 .github/scripts/hf_prefetch.py key)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the HuggingFace checkpoints
+        id: hfcache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.hf-cache
+          key: hf-weekly-${{ steps.hfkey.outputs.key }}
+
+      - name: Report what the restore touched
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          key="hf-weekly-${{ steps.hfkey.outputs.key }}"
+          if [ "${{ steps.hfcache.outputs.cache-hit }}" != "true" ]; then
+            echo "::warning::no cache under $key; Monday's run will repopulate it"
+            printf 'hf cache MISS on %s\n' "$key" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # du, not the action's own word for it: a restore that unpacked nothing and a
+          # restore that unpacked 1.6 GB both report cache-hit true.
+          printf 'hf cache HIT on %s, %s on disk\n' \
+            "$key" "$(du -sh "$GITHUB_WORKSPACE/.hf-cache" | cut -f1)" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          # The measurement that decides whether this job does its job. If
+          # last_accessed_at does not move to today, a restore does not count as an
+          # access and the retention approach here is wrong, not merely unproven.
+          gh api "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq ".actions_caches[] | select(.key == \"$key\")
+                  | \"last_accessed_at \(.last_accessed_at)  size \(.size_in_bytes)\"" \
+            | tee -a "$GITHUB_STEP_SUMMARY"

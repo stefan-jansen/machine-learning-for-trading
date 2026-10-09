@@ -18,8 +18,10 @@
 # same weights three or four times over - safetensors, pytorch_model.bin, a stack of
 # ONNX variants, OpenVINO, and for two of them flax, rust and tf copies. The selection
 # below is 1.659 GB and keeps `model.safetensors` plus the config and tokenizer files
-# for every one of them. Downloading all of it would also have put the repository's
-# Actions cache over its 10 GB limit on its own.
+# for every one of them. The reason to select is the redundancy, not a breached cap:
+# measured the same day, the repository held 2,654,779,421 bytes of Actions cache
+# (2.655 GB decimal, 2.473 GiB) against a documented 10 GB limit, so even the
+# unrestricted 6.287 GB would have fitted, at about 8.94 GB and with no headroom.
 #
 # sentence-transformers (and llama-index's HuggingFaceEmbedding, which wraps it) reads
 # config.json, config_sentence_transformers.json, modules.json, sentence_bert_config.json,

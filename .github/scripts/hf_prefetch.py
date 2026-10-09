@@ -14,12 +14,16 @@ Two commands, both reading .github/weekly-hf-models.yaml:
     ``actions/cache``. It changes when a pin or the selection changes and at no other
     time, so a warm run is warm. A date-bucketed key would discard the whole cache on
     a schedule, which is the cost this removes; a key over the pins alone would serve
-    a cache built under a narrower selection to a run that needs a wider one.
+    a cache built under a narrower selection to a run that needs a wider one. The key
+    being stable is not retention: GitHub deletes an entry nobody has accessed in over
+    seven days, which is why weekly-external.yml restores it on three days a week.
 
 ``fetch``
     ``snapshot_download`` each repo at its pinned revision, restricted to the files
     the loaders open. Unrestricted, these four repositories are 6.287 GB because each
-    ships its weights in three or four formats; the selection is 1.659 GB. The
+    ships its weights in three or four formats; the selection is 1.659 GB. Both figures
+    fit the repository's 10 GB cache limit beside the 2.655 GB already there, so the
+    selection buys headroom and transfer time rather than rescuing a breached cap. The
     notebooks pin the same revisions, so a prefetched revision is the one they
     resolve.
 
