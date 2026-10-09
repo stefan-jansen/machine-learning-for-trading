@@ -707,10 +707,19 @@ jobs:
           # all - and a missing ruff exits 1, exactly as a lint finding does, so the first
           # version of that job reported three assertion failures rather than a missing
           # dependency. It is a single small wheel and it is not a lint step here.
+          #
+          # `huggingface-hub` is here so the manifest selection is checked rather than
+          # trusted. tests/test_weekly_hf_manifest.py applies the manifest's
+          # allow_patterns through `filter_repo_objects`, the same matcher
+          # `snapshot_download` uses, because a reimplementation of the glob rules would
+          # agree with itself while disagreeing with the Hub - and the selection is what
+          # decides whether the prefetch leaves the loaders a weight file to read. It is
+          # pure Python and brings no model runtime with it.
           uv pip install --constraint /tmp/locked-constraints.txt \
             pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow nest-asyncio ruff \
-            ml4t-diagnostic jupytext papermill ipykernel ml4t-backtest ml4t-data ml4t-engineer databento
+            ml4t-diagnostic jupytext papermill ipykernel ml4t-backtest ml4t-data ml4t-engineer databento \
+            huggingface-hub
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}

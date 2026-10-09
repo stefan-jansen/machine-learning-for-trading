@@ -113,6 +113,14 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      - name: Record the fixture this job read
+        run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
+
       # Chapter 22 pulls its embedding checkpoints at run time, and this job set no
       # cache directory and cached nothing, so every Monday re-downloaded them inside a
       # fresh container. 02_domain_embeddings_comparison pulls BAAI/bge-large-en-v1.5,
@@ -195,14 +203,6 @@ jobs:
           # otherwise, and "the cache works" is the claim the step above rests on.
           printf 'hf cache %s\n' "$(du -sh "$HF_HOME" 2>/dev/null | cut -f1)" \
             | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Record the fixture this job read
-        run: |
-          # tee, not a plain redirect: the summary is where a reader looks, and the log is
-          # where this is greppable and where a broken command would be visible at all. A
-          # step whose whole output goes somewhere no API exposes cannot be checked.
-          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
-            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Seed case study intermediates
         run: |
