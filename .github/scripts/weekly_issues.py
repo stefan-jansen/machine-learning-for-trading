@@ -138,8 +138,22 @@ def already_reported(comments: list[str], run_url: str) -> bool:
 
     A re-run of a failed job keeps the same run id, so without this a job re-run
     posts the same "failed again" line a second time on every standing issue.
+
+    The match needs a boundary. A run URL ends in the run id, and a plain substring
+    test makes `.../runs/1` match a comment about `.../runs/10`, which would suppress
+    a real notification rather than a duplicate one. Suppressing wrongly is the worse
+    error of the two, so the character after the URL has to be a non-digit.
     """
-    return any(run_url and run_url in c for c in comments)
+    if not run_url:
+        return False
+    for body in comments:
+        start = 0
+        while (at := body.find(run_url, start)) != -1:
+            after = at + len(run_url)
+            if after >= len(body) or not body[after].isdigit():
+                return True
+            start = after
+    return False
 
 
 def reconcile(
@@ -304,13 +318,31 @@ class RestIssues:
             out.extend(batch)
             page += 1
 
+    # The comments endpoint returns oldest first and takes no sort parameter, so
+    # page 1 is the OLDEST hundred. Reading only that page would miss every recent
+    # run URL on a thread with more than a hundred comments, and a re-run of a job
+    # would post a duplicate - which is the thing this lookup exists to prevent.
+    # Paginate to the end instead, with a cap so a pathological thread cannot turn
+    # one dedup check into hundreds of requests.
+    COMMENT_PAGE_CAP = 20
+
     def comments(self, number: int) -> list[str]:
-        # Only the last page. The dedup question is whether THIS run was already
-        # reported, and a re-run follows the comment it would duplicate.
-        batch = self._call(
-            "GET", f"/repos/{self.repo}/issues/{number}/comments?per_page=100&page=1"
+        out: list[str] = []
+        for page in range(1, self.COMMENT_PAGE_CAP + 1):
+            batch = self._call(
+                "GET",
+                f"/repos/{self.repo}/issues/{number}/comments?per_page=100&page={page}",
+            )
+            if not batch:
+                return out
+            out.extend(c.get("body") or "" for c in batch)
+            if len(batch) < 100:
+                return out
+        print(
+            f"::warning::#{number} has more than {self.COMMENT_PAGE_CAP * 100} comments; "
+            f"only the first were read, so a duplicate comment is possible"
         )
-        return [c.get("body") or "" for c in batch or []]
+        return out
 
     def create(self, title: str, body: str, labels: list[str]) -> int:
         created = self._call(

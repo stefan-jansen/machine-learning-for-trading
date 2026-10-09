@@ -364,3 +364,67 @@ def test_retirement_does_not_fire_twice_on_a_rerun() -> None:
 
 def test_the_drift_job_has_its_own_class_name_issue_to_retire() -> None:
     assert weekly_issues.LEGACY_IDS["external-drift"] == "tests.test_external_drift"
+
+
+# ------------------------------------------- the comment lookup reaches the recent ones
+
+
+class FakeTransport:
+    """Stands in for the HTTP call, so RestIssues' real pagination is exercised."""
+
+    def __init__(self, pages: list[list[dict]]) -> None:
+        self.pages = pages
+        self.requested: list[str] = []
+
+    def __call__(self, method: str, path: str, payload: dict | None = None) -> object:
+        self.requested.append(path)
+        page = int(path.rsplit("page=", 1)[1])
+        return self.pages[page - 1] if page <= len(self.pages) else []
+
+
+def rest_with(pages: list[list[dict]]) -> tuple[object, FakeTransport]:
+    client = weekly_issues.RestIssues("o/r", "token")
+    transport = FakeTransport(pages)
+    client._call = transport  # noqa: SLF001 - the seam this test exists to drive
+    return client, transport
+
+
+def test_the_comment_lookup_reads_past_the_first_page() -> None:
+    """Page 1 is the OLDEST hundred: the endpoint returns oldest first and has no sort.
+
+    Reading only page 1 would miss every recent run URL on a long thread, so a job
+    re-run would comment a second time - the duplicate this lookup prevents.
+    """
+    old_page = [{"body": f"old {i}"} for i in range(100)]
+    recent = [{"body": f"Failed again in the weekly run: {RUN}"}]
+    client, transport = rest_with([old_page, recent])
+    bodies = client.comments(1046)
+    assert len(transport.requested) == 2, "it stopped at the first page"
+    assert weekly_issues.already_reported(bodies, RUN)
+
+
+def test_the_comment_lookup_stops_on_a_short_page() -> None:
+    client, transport = rest_with([[{"body": "only one"}]])
+    assert client.comments(1046) == ["only one"]
+    assert len(transport.requested) == 1
+
+
+def test_the_comment_lookup_is_capped(capsys: pytest.CaptureFixture[str]) -> None:
+    """A pathological thread must not turn one dedup check into endless requests."""
+    full = [{"body": "x"} for _ in range(100)]
+    client, transport = rest_with([full] * 50)
+    client.comments(1046)
+    assert len(transport.requested) == weekly_issues.RestIssues.COMMENT_PAGE_CAP
+    assert "::warning::" in capsys.readouterr().out
+
+
+def test_a_longer_run_id_does_not_suppress_a_shorter_one() -> None:
+    """`runs/1` is a substring of `runs/10`, and suppressing wrongly loses a report."""
+    assert not weekly_issues.already_reported(["Failed again: .../runs/10"], ".../runs/1")
+    assert weekly_issues.already_reported(["Failed again: .../runs/1"], ".../runs/1")
+    assert weekly_issues.already_reported(["Failed: .../runs/1 and more"], ".../runs/1")
+    assert weekly_issues.already_reported(["a: .../runs/10", "b: .../runs/1"], ".../runs/1")
+
+
+def test_no_run_url_suppresses_nothing() -> None:
+    assert not weekly_issues.already_reported(["anything"], "")
