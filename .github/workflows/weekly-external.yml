@@ -147,7 +147,11 @@ jobs:
             // Crude but dependency-free junit parse: pull <testcase ...> blocks
             // and check each for a child <failure> or <error>.
             const testcaseRe = /<testcase\b[^>]*>([\s\S]*?)<\/testcase>|<testcase\b[^>]*\/>/g;
-            const attrRe = (name) => new RegExp(`${name}="([^"]*)"`);
+            // Word-boundary, not a bare `name=`: `classname="..."` contains the
+            // substring `name="`, so the old pattern read the class as the test
+            // name and every weekly failure was filed as
+            // `weekly-flake: tests.test_chapter_notebooks` (#1046).
+            const attrRe = (name) => new RegExp(`\\b${name}="([^"]*)"`);
             const failures = [];
             let m;
             while ((m = testcaseRe.exec(xml)) !== null) {
@@ -288,7 +292,10 @@ jobs:
             // Dependency-free junit parse: <testcase> blocks with a child
             // <failure>/<error> are real drift (skips are not failures).
             const testcaseRe = /<testcase\b[^>]*>([\s\S]*?)<\/testcase>|<testcase\b[^>]*\/>/g;
-            const attrRe = (name) => new RegExp(`${name}="([^"]*)"`);
+            // Same word-boundary as the chapter parser above: without it,
+            // `classname="tests.test_external_drift"` is read as the test name
+            // and the issue is titled `external-drift: tests.test_external_drift`.
+            const attrRe = (name) => new RegExp(`\\b${name}="([^"]*)"`);
             const failures = [];
             let m;
             while ((m = testcaseRe.exec(xml)) !== null) {
