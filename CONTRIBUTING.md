@@ -10,17 +10,17 @@ contribution reviewable.
 A contribution fixes something that is wrong:
 
 - Code that raises, hangs, or installs wrong.
-- A computed result that is incorrect, including one that is currently published in a
-  notebook's committed outputs.
+- A computed result that is incorrect, including one a notebook's committed outputs
+  currently show.
 - A notebook whose displayed number does not equal what its own code computes.
 - A broken data path, download, or environment pin.
 - A statement in notebook prose that the code next to it contradicts.
 - A typo in text or a label in a figure.
 
-A verified defect gets corrected even when the correction changes a published number.
-Published output is not a reason to keep incorrect code. What a report needs is the
-expected behavior, the evidence for it, and the compatibility impact: which columns,
-artifacts, or downstream notebooks change, and whether a saved result has to be
+A verified defect gets corrected even when the correction changes a number the committed
+outputs show. A committed output is not a reason to keep incorrect code. What a report
+needs is the expected behavior, the evidence for it, and the compatibility impact: which
+columns, artifacts, or downstream notebooks change, and whether a saved result has to be
 regenerated.
 
 Changing a convention is a different request from fixing a defect. An annualization
