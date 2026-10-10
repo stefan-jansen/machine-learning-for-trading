@@ -125,7 +125,7 @@ dependencies = [
     # Data Sources
     # ===================
     "yfinance>=0.2",
-    "edgartools>=5.9",
+    "edgartools>=5.61.1",
     # sec-edgar-api: removed — no notebook imports it (they use edgartools).
     # sec-edgar-api 1.1.0 is broken with pyrate-limiter 4.x anyway.
     "secedgar>=0.6",
