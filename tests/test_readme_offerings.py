@@ -14,8 +14,10 @@ render from `collect`'s third list.
 """
 
 import importlib.util
+import re
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 REPO = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(
@@ -173,9 +175,10 @@ def test_an_undated_offering_shares_the_dated_table():
     lessons, cohorts, standing = offerings.collect(props, NOW)
     block = offerings.render_all(lessons, cohorts, standing)
     assert "| When | Offering | What you leave with |" in block
-    assert (
-        "| Self-paced | [Foundations](https://maven.com/stefan-jansen/ml4t-foundations) |" in block
-    )
+    assert "| Self-paced | [Foundations](" in block
+    target = urlsplit(re.search(r"\[Foundations\]\(([^)]+)\)", block).group(1))
+    assert target.netloc == "maven.com"
+    assert target.path == "/stefan-jansen/ml4t-foundations"
     assert "| Offering | How it runs | What you leave with |" not in block
     assert "Nothing is on the calendar right now" not in block
 
@@ -221,7 +224,9 @@ def test_an_unmapped_slug_still_renders():
         [_cohort(12, "2026-10-03T14:00:00Z")],
     )
     block = offerings.render_all(*offerings.collect(props, NOW))
-    assert "[Brand New](https://maven.com/stefan-jansen/brand-new-course)" in block
+    target = urlsplit(re.search(r"\[Brand New\]\(([^)]+)\)", block).group(1))
+    assert target.netloc == "maven.com"
+    assert target.path == "/stefan-jansen/brand-new-course"
 
 
 def test_a_theme_with_nothing_scheduled_renders_no_heading():
@@ -261,3 +266,74 @@ def test_a_free_lesson_is_themed_by_title_most_specific_first():
     assert theme("Why Multi-Agent Systems Break, and How To Fix It") == "agents"
     # Negative control: no keyword at all falls back rather than being dropped.
     assert theme("A session about nothing in particular") == offerings.OTHER_THEME
+
+
+def test_generated_paid_links_preserve_the_direct_course_and_campaign_across_refreshes():
+    props = _props(
+        [_course(10, "research-to-production", "R2P", None, fmt="full_course")],
+        [_cohort(10, "2026-12-03T17:00:00Z")],
+    )
+    block = offerings.render_all(*offerings.collect(props, NOW))
+    target = urlsplit(re.search(r"\[Research to Production\]\(([^)]+)\)", block).group(1))
+    assert (target.netloc, target.path) == ("maven.com", "/stefan-jansen/research-to-production")
+    assert parse_qs(target.query) == {
+        "utm_source": ["github"],
+        "utm_medium": ["readme"],
+        "utm_campaign": ["r2p_20261203"],
+        "utm_content": ["readme_offering_research_to_production"],
+    }
+    assert offerings.tag_readme_urls(block, block) == offerings.tag_readme_urls(
+        offerings.tag_readme_urls(block, block), block
+    )
+
+
+def test_a_multicohort_row_does_not_claim_its_single_link_promotes_one_specific_cohort():
+    props = _props(
+        [_course(11, "agent-engineering", "Agent Engineering", None)],
+        [_cohort(11, "2026-10-03T14:00:00Z"), _cohort(11, "2026-11-21T14:00:00Z")],
+    )
+    block = offerings.render_all(*offerings.collect(props, NOW))
+    target = urlsplit(re.search(r"\[Agent Engineering\]\(([^)]+)\)", block).group(1))
+    assert parse_qs(target.query)["utm_campaign"] == ["agent_workshop"]
+
+
+def test_a_tag_only_refresh_cannot_change_the_copy_discount_destination_or_affiliate():
+    props = _props(
+        [_course(10, "research-to-production", "R2P", None, fmt="full_course")],
+        [_cohort(10, "2026-12-03T17:00:00Z")],
+    )
+    original = (
+        "[Course](https://maven.com/stefan-jansen/research-to-production?promoCode=R2P-OCT) "
+        "[Primer](https://ml4trading.io/primer/) [Book](https://amzn.to/4eigy2F)\n"
+    )
+    block = offerings.render_all(*offerings.collect(props, NOW))
+    refreshed = offerings.tag_readme_urls(original, block)
+    target = urlsplit(re.search(r"\[Course\]\(([^)]+)\)", refreshed).group(1))
+    assert parse_qs(target.query)["promoCode"] == ["R2P-OCT"]
+    assert parse_qs(target.query)["utm_campaign"] == ["r2p_20261203"]
+    assert "[Book](https://amzn.to/4eigy2F)" in refreshed
+    pattern = r"https://[^\s)]+"
+    assert re.sub(pattern, "URL", original) == re.sub(pattern, "URL", refreshed)
+    primer = urlsplit(re.search(r"\[Primer\]\(([^)]+)\)", refreshed).group(1))
+    assert primer.path == "/primer/"
+    assert parse_qs(primer.query)["utm_source"] == ["github"]
+
+
+def test_a_generated_free_lesson_has_its_native_campaign_and_stays_a_direct_signup_link():
+    props = _props([], [])
+    props["free_items"] = {
+        "items": [
+            {
+                "title": "Agents for research",
+                "slug": "166231",
+                "start_datetime": "2026-10-21T15:00:00Z",
+                "duration_minutes": 30,
+            }
+        ]
+    }
+    block = offerings.render_all(*offerings.collect(props, NOW))
+    target = urlsplit(re.search(r"\[Agents for research\]\(([^)]+)\)", block).group(1))
+    assert target.netloc == "maven.com"
+    assert target.path == "/p/166231"
+    assert parse_qs(target.query)["utm_campaign"] == ["agent_ll_20261021"]
+    assert parse_qs(target.query)["utm_content"] == ["readme_lesson_166231"]
