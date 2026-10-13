@@ -334,7 +334,7 @@ fig.add_vline(
     annotation_font_color=COLORS["amber"],
 )
 fig.update_layout(
-    title="Every Frames row is dated by a later comparative, not by the original filing",
+    title="Days from fiscal quarter end to the date the row became public",
     xaxis_title="Filing lag (days between fiscal-quarter end and announcement)",
     yaxis_title="Company-quarters",
     height=420,
