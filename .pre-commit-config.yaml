@@ -47,7 +47,11 @@ repos:
       - id: notebook-pair-sync
         name: notebook/py pair opens in JupyterLab
         language: system
-        entry: python3 .github/scripts/check_notebook_pair_sync.py
+        # `uv run`, not bare `python3`: this is the one gate here that needs a
+        # third-party import (jupytext), and the system python3 does not carry it.
+        # With bare python3 the script fell back to the `jupytext` on PATH, and a
+        # stale console script there made the gate pass pairs it never compared.
+        entry: uv run --no-sync python .github/scripts/check_notebook_pair_sync.py
         files: \.(ipynb|py)$
 
       # A committed notebook must not carry the Plotly figure JSON beside the static
