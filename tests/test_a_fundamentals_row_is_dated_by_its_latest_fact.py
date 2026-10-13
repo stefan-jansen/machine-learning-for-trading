@@ -131,3 +131,27 @@ def test_filing_dates_read_the_paged_submissions_documents(monkeypatch):
 def test_cik_732717_is_labelled_as_the_filer_that_files():
     """CIK 732717 is AT&T Inc.; it shipped labelled COST."""
     assert downloader.DEFAULT_CIK_TO_TICKER[732717] == "T"
+
+
+def test_a_partly_resolved_row_is_not_dated_by_the_filing_that_did_resolve(tmp_path):
+    """The gap RoboRev found: dating by the latest *resolved* fact is lookahead.
+
+    If the comparative that supplied the restated value is the accession whose
+    filing date is missing, taking the latest of what remains hands the row the
+    original's date while it still carries the restated number - the defect this
+    module exists to prevent, arrived at from the other side.
+    """
+    original = "0000320193-24-000123"
+    comparative = "0000320193-25-000456"
+    # Only the original resolves.
+    downloader._save_cached_filing_dates(tmp_path, 320193, {original: "2024-11-01"})
+
+    dated = downloader._add_filing_dates(_panel([original, comparative]), tmp_path)
+
+    assert dated["filing_date"][0] is None, (
+        "dated 2024-11-01 while carrying a value from a 2025 filing: a row whose "
+        "facts do not all resolve has no knowable knowledge time"
+    )
+    assert dated["accession"][0] in {original, comparative}, (
+        "the row must still record provenance even when it cannot be dated"
+    )

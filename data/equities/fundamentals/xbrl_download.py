@@ -377,8 +377,19 @@ def _add_filing_dates(
         .last()
     )
 
-    # Rows whose accessions all failed to resolve keep an accession for
-    # provenance and carry a null filing date, which the as-of query drops.
+    # How many of the row's facts could not be dated at all. Taking the latest of
+    # only those that resolved would be worse than not dating the row: if the
+    # comparative is the one missing, the row keeps the restated value and gets the
+    # original's date, which is the lookahead this function exists to prevent. A
+    # row whose facts do not all resolve has no knowable knowledge time.
+    unresolved = (
+        resolved.group_by("_row", maintain_order=True)
+        .agg(pl.col("filing_date").null_count().alias("unresolved"))
+        .select("_row", "unresolved")
+    )
+
+    # An undated row still records an accession, so its provenance survives; the
+    # as-of query drops it on the null date.
     fallback = (
         resolved.sort(["_row", "accession"])
         .group_by("_row", maintain_order=True)
@@ -389,9 +400,16 @@ def _add_filing_dates(
     return (
         indexed.drop("accessions")
         .join(dated, on="_row", how="left")
+        .join(unresolved, on="_row", how="left")
         .join(fallback, on="_row", how="left")
-        .with_columns(pl.col("accession").fill_null(pl.col("fallback_accession")))
-        .drop("_row", "fallback_accession")
+        .with_columns(
+            pl.when(pl.col("unresolved") > 0)
+            .then(pl.lit(None, dtype=pl.String))
+            .otherwise(pl.col("filing_date"))
+            .alias("filing_date"),
+            pl.col("accession").fill_null(pl.col("fallback_accession")),
+        )
+        .drop("_row", "unresolved", "fallback_accession")
     )
 
 

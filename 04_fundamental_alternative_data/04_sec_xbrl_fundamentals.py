@@ -437,7 +437,13 @@ known_wrong.select(cols).head(5)
 
 # %% [markdown]
 # Comparing the two — every row here is a symbol the lookahead-biased approach
-# would have used a fresher quarter than was actually available:
+# would have used a fresher quarter than was actually available.
+#
+# The join has to start from the biased answer, not the correct one. A symbol can have
+# nothing admissible on this date at all, and an inner join from the correct side would
+# drop exactly those symbols - the ones where the bias is largest, because the biased
+# query picks a quarter for them that the market could not see any part of. Counting a
+# missing correct quarter as a mismatch is what keeps them in the total.
 
 # %%
 correct_dates = known_correct.select(["symbol", "fiscal_quarter_end"]).rename(
@@ -446,10 +452,15 @@ correct_dates = known_correct.select(["symbol", "fiscal_quarter_end"]).rename(
 wrong_dates = known_wrong.select(["symbol", "fiscal_quarter_end"]).rename(
     {"fiscal_quarter_end": "wrong_qtr"}
 )
-mismatches = correct_dates.join(wrong_dates, on="symbol").filter(
-    pl.col("correct_qtr") != pl.col("wrong_qtr")
+mismatches = wrong_dates.join(correct_dates, on="symbol", how="left").filter(
+    pl.col("correct_qtr").is_null() | (pl.col("correct_qtr") != pl.col("wrong_qtr"))
 )
-print(f"{len(mismatches)} symbols where lookahead bias would change the chosen quarter:")
+n_nothing_known = mismatches.filter(pl.col("correct_qtr").is_null()).height
+print(
+    f"{len(mismatches)} of {wrong_dates.height} symbols where lookahead bias would change "
+    f"the chosen quarter"
+)
+print(f"  of those, {n_nothing_known} had nothing admissible on this date at all")
 mismatches
 
 # %% [markdown]
