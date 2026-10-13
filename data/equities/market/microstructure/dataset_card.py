@@ -405,7 +405,8 @@ for name, data_path in [
     profile_path = get_profile_path(data_path)
     profile = load_profile(profile_path)
     if profile is None:
-        print(f"No {name} profile at {profile_path}")
+        rel = profile_path.relative_to(ML4T_DATA_PATH)
+        print(f"No {name} profile at $ML4T_DATA_PATH/{rel}")
     else:
         print(f"=== {name} Profile ===")
         print(f"Written by {profile.source}")
