@@ -246,7 +246,8 @@ for provider, subdir in [("Fama-French", "fama-french"), ("AQR", "aqr")]:
     profile_path = get_profile_path(ML4T_DATA_PATH / "factors" / subdir)
     profile = load_profile(profile_path)
     if profile is None:
-        print(f"No {provider} profile at {profile_path}")
+        rel = profile_path.relative_to(ML4T_DATA_PATH)
+        print(f"No {provider} profile at $ML4T_DATA_PATH/{rel}")
     else:
         print(f"=== {provider} Profile ===")
         print(f"Written by {profile.source}")
