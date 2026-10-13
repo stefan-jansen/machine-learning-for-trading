@@ -1566,6 +1566,12 @@ def load_sec_xbrl_fundamentals(
     Note:
         Use `announcement_date` for point-in-time backtesting — not
         `fiscal_quarter_end`, which introduces lookahead bias.
+
+        `announcement_date` is the filing date of the last fact in the
+        row, so it is the date on which every value in that row was
+        public. One row per company-quarter: the Frames API carries only
+        the latest filed value for a period, so the panel cannot show
+        what a period reported before a restatement.
     """
     path = ML4T_DATA_PATH / "equities" / "fundamentals" / "xbrl" / "fundamentals.parquet"
     if not path.exists():
