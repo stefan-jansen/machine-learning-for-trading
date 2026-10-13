@@ -38,11 +38,11 @@
 # After completing this notebook, you will be able to:
 #
 # - Read a quarterly fundamentals panel that carries both the period a value describes and the
-#   date the filing reporting it was submitted.
+#   date every value in that row was public.
 # - Measure how completely each reported concept covers the companies and quarters in a panel,
 #   and say why a concept is missing where it is.
-# - Measure the delay between a fiscal quarter's end and the filing that reports it, and
-#   recognize the two populations that delay is drawn from.
+# - Measure the delay between a fiscal quarter's end and the date its row became public, and
+#   explain why a Frames-sourced panel is not point-in-time safe on its own.
 # - Write an as-of query that returns only what was public on a given date, filtering on the
 #   filing date and ranking on the period.
 # - Show what the same query returns when it filters on the period instead, and count the
@@ -81,6 +81,11 @@
 # | `announcement_date` | When SEC filing was submitted (e.g., 2024-05-02) |
 #
 # For backtesting, use `announcement_date` as the point when data becomes available.
+#
+# A row is filled from several Frames calls, and its facts can come from different filings, so
+# `announcement_date` is the filing date of the **last** fact the row carries - the date on
+# which everything in it was public. Dating the row any earlier would hand a backtest a number
+# before it existed.
 #
 # ## Data Sources
 #
@@ -261,21 +266,22 @@ show_plotly_with_alt(
     "Heatmap of company against calendar quarter, shaded where total assets were reported and annotated with the number of filings in each cell. Almost every cell is filled, with a scattering of blanks and a few cells holding two filings.",
 )
 
-# A cell counts once however many rows sit in it. Some hold two - an original filing and an
-# amendment that maps to the same calendar quarter, which is where a "2" in the grid comes
-# from - and summing the counts would read a restatement as extra coverage.
+# The grid is keyed on calendar quarter, and a filer on a 52/53-week calendar can close two
+# fiscal periods inside one of them - AAPL and AMD both do in 2023Q3 - which is where a "2"
+# comes from. Those are two distinct periods, not two versions of one, so the cell is more
+# densely covered than its neighbours rather than doubly reported.
 total_cells = matrix.size
 filled_cells = int((matrix > 0).sum())
 print(f"Company-quarter cells: {total_cells}")
 print(f"Cells reporting total assets: {filled_cells} ({filled_cells / total_cells:.1%})")
 
 # %% [markdown]
-# ## 3. How long the market waits
+# ## 3. How stale a Frames panel is
 #
-# The gap between the period end and the filing date is the window during which the quarter has
-# happened and nobody outside the company knows its numbers. Its size is what decides how far a
-# fundamental has to be lagged before a backtest may use it, and its shape is what decides
-# whether a single lag is adequate at all.
+# The gap between a period end and the date the row became public decides how far a fundamental
+# has to be lagged before a backtest may use it. For a panel built from original filings that
+# gap is the statutory window - forty days for a large filer's 10-Q. This panel is not built
+# from original filings, and the measurement below is what that costs.
 
 # %%
 filing_lag = (
@@ -291,16 +297,22 @@ filing_lag = (
 filing_lag.select("lag_days").describe()
 
 # %% [markdown]
-# The median is the routine case: a 10-Q is due within forty days of quarter end for a large
-# filer, and most land close to that. The mean sits far above the median, which is the
-# signature of a second population rather than a wide first one. That population is
-# restatements and late-attributed facts: the Frames API returns the accession number of the
-# filing where a fact appears, and a fact restated in a later document is dated to the later
-# document. Treating that as knowledge time is conservative, in the sense that it makes the
-# number available later than it really was, which is the direction a backtest can survive.
+# Not one row is inside the statutory window. The minimum is over a year, where a large
+# filer's 10-Q is due within forty days of quarter end.
 #
-# A distribution with two populations is exactly the case a single summary statistic hides,
-# so the histogram is what settles it.
+# That is not a filing delay, it is what the Frames API returns. Frames answers with each fact
+# as it appears in the *latest* filing reporting the period, and for every quarter here at
+# least one concept - normally the income statement - has since been re-reported in a
+# comparative filed a year later. The row carries that restated figure, so the row was not
+# public until that comparative was filed, and dating it by the last of its filings is the only
+# honest answer. Dating it by the earliest instead would publish a restated number under the
+# original's date, which is exactly the lookahead Figure 4.1 of the chapter illustrates.
+#
+# This is the chapter's point about Frames made concrete: it is built for cross-sectional
+# snapshots and prototyping, and it is not point-in-time safe on its own. A panel that has to
+# answer "what was known on this date" has to be reconstructed from filing-level records, where
+# each fact keeps the value and the date of the filing that first reported it. The histogram
+# shows the shape of the cost: one late cluster, not a statutory window with a tail.
 
 # %%
 lags = filing_lag["lag_days"].to_list()
@@ -309,7 +321,7 @@ median_lag = filing_lag["lag_days"].median()
 fig = go.Figure(
     data=go.Histogram(
         x=lags,
-        xbins={"start": 0, "end": 800, "size": 20},
+        xbins={"start": 0, "end": 1200, "size": 25},
         marker_color=COLORS["blue"],
     )
 )
@@ -322,7 +334,7 @@ fig.add_vline(
     annotation_font_color=COLORS["amber"],
 )
 fig.update_layout(
-    title="Routine filings cluster soon after quarter end; amendments trail",
+    title="Days from fiscal quarter end to the date the row became public",
     xaxis_title="Filing lag (days between fiscal-quarter end and announcement)",
     yaxis_title="Company-quarters",
     height=420,
@@ -330,7 +342,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Histogram of the number of days between a fiscal quarter end and the filing that reported it, with a dashed rule at the median. A tall cluster sits near one month and a long thin tail runs out past a year.",
+    "Histogram of the number of days between a fiscal quarter end and the date every value in its row was public, with a dashed rule at the median. Nothing falls inside the first year; the mass sits in a cluster a little past one year, with a thinner spread running out beyond three.",
 )
 
 # %% [markdown]
@@ -348,9 +360,9 @@ show_plotly_with_alt(
 # Conflating them fails in both directions. Filtering on valid time admits quarters that had
 # ended but had not been filed, which is the classic lookahead. Sorting on knowledge time
 # returns the most recently *announced* row rather than the most recent *quarter*, so a
-# restatement or a late-attributed fact walks the answer backwards in fiscal time - and the
-# long tail measured in Part 3 says that is a normal event in this panel rather than an edge
-# case. Filter on `announcement_date`; rank on `fiscal_quarter_end`.
+# quarter dated by a late comparative walks the answer backwards in fiscal time - and Part 3
+# says that is every row in this panel rather than an edge case. Filter on
+# `announcement_date`; rank on `fiscal_quarter_end`.
 
 
 # %%
@@ -363,9 +375,11 @@ def query_fundamentals_as_of(df: pl.DataFrame, as_of_date: str) -> pl.DataFrame:
     query_date = pl.lit(as_of_date).str.to_date()
     return (
         df.filter(pl.col("announcement_date") <= query_date)
-        # Two rows can describe the same quarter - an original filing and a later
-        # restatement of it. Ordering on the filing date within the quarter makes the
-        # restatement win, and makes the choice deterministic rather than incidental.
+        # The panel holds one row per company-quarter, so this sort makes the choice
+        # deterministic rather than breaking a tie between versions. A Frames-sourced
+        # panel carries only the latest filed value for a period and cannot show what
+        # that period said before a restatement; reconstructing the earlier version
+        # needs the companyfacts API, which returns every filing of every fact.
         .sort(["symbol", "fiscal_quarter_end", "announcement_date"])
         .group_by("symbol", maintain_order=True)
         .last()
@@ -423,7 +437,13 @@ known_wrong.select(cols).head(5)
 
 # %% [markdown]
 # Comparing the two — every row here is a symbol the lookahead-biased approach
-# would have used a fresher quarter than was actually available:
+# would have used a fresher quarter than was actually available.
+#
+# The join has to start from the biased answer, not the correct one. A symbol can have
+# nothing admissible on this date at all, and an inner join from the correct side would
+# drop exactly those symbols - the ones where the bias is largest, because the biased
+# query picks a quarter for them that the market could not see any part of. Counting a
+# missing correct quarter as a mismatch is what keeps them in the total.
 
 # %%
 correct_dates = known_correct.select(["symbol", "fiscal_quarter_end"]).rename(
@@ -432,10 +452,15 @@ correct_dates = known_correct.select(["symbol", "fiscal_quarter_end"]).rename(
 wrong_dates = known_wrong.select(["symbol", "fiscal_quarter_end"]).rename(
     {"fiscal_quarter_end": "wrong_qtr"}
 )
-mismatches = correct_dates.join(wrong_dates, on="symbol").filter(
-    pl.col("correct_qtr") != pl.col("wrong_qtr")
+mismatches = wrong_dates.join(correct_dates, on="symbol", how="left").filter(
+    pl.col("correct_qtr").is_null() | (pl.col("correct_qtr") != pl.col("wrong_qtr"))
 )
-print(f"{len(mismatches)} symbols where lookahead bias would change the chosen quarter:")
+n_nothing_known = mismatches.filter(pl.col("correct_qtr").is_null()).height
+print(
+    f"{len(mismatches)} of {wrong_dates.height} symbols where lookahead bias would change "
+    f"the chosen quarter"
+)
+print(f"  of those, {n_nothing_known} had nothing admissible on this date at all")
 mismatches
 
 # %% [markdown]
@@ -448,10 +473,12 @@ mismatches
 #    `revenues` is null for filers who tag their top line under the post-ASC-606 concept, so
 #    measure coverage per concept before treating a null as a gap, and read the pattern of the
 #    nulls before imputing anything.
-# 3. The delay between a quarter ending and its filing arriving is drawn from two populations,
-#    not one. Routine reports land inside the statutory window; restatements and facts
-#    attributed to a later document arrive much later, and a mean computed over both describes
-#    neither. Look at the distribution, not the average.
+# 3. A Frames-sourced panel is not point-in-time safe, and measuring it says so: no row here
+#    is dated inside the statutory filing window, because Frames returns each fact as last
+#    filed and every quarter has at least one concept re-reported a year later. Frames is for
+#    cross-sectional snapshots and prototyping. A panel that must answer what was known on a
+#    date has to be reconstructed from filing-level records, where each fact keeps the value
+#    and the date of the filing that first reported it.
 # 4. An as-of query filters on knowledge time and ranks on valid time. Filtering on valid time
 #    admits quarters that had not been filed yet, which is lookahead. Ranking on knowledge time
 #    returns the most recently announced row rather than the most recent quarter, so it walks
