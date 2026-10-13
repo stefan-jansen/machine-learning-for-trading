@@ -7,7 +7,12 @@ dependencies = [
     "numpy==1.26.4",
     "pandas==2.2.0",
     "polars>=1.38,<2.0",
-    "pyarrow>=15.0",
+    # pyarrow 26.0.0 raises ImportError("pyarrow requires NumPy 2.0 or newer") on
+    # import. numpy cannot move here: tfcausalimpact needs pandas<=2.2, and 2.2.0 is
+    # a numpy-1 build, so this environment is pinned to numpy 1.26.4 and the pyarrow
+    # it loads has to be one that still runs on the numpy 1.x ABI. 25.0.0 imports;
+    # 26.0.0 is the first that does not.
+    "pyarrow>=15.0,<26",
     "matplotlib>=3.8",
     "plotly>=5.20,<7",
     "tfcausalimpact==0.0.18",
