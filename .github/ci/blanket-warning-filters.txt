@@ -31,9 +31,9 @@
 #     its own decision; a warnings fix must not be what triggers it.
 #   - Seven belong to `nasdaq100_microstructure` and `us_equities_panel`, which have runs in
 #     flight against their worktrees and registries.
-#   - `crypto_perps_funding/_archive/11_autoencoder.py` is archived, and the two
-#     `20_strategy_synthesis` notebooks import nothing from `case_studies`, so the policy
-#     helper is the wrong dependency for them and they need a chapter-side equivalent.
+#   - The two `20_strategy_synthesis` notebooks import nothing from `case_studies`, so the
+#     policy helper is the wrong dependency for them and they need a chapter-side
+#     equivalent.
 #
 # The four stage-04 notebooks in ml4t/agent-workspace#1095 are the sharpest case: they fork a
 # worker pool from a process holding a BLAS thread pool and filter the 3.14 warning that says
@@ -45,7 +45,6 @@
 20_strategy_synthesis/04_signal_to_strategy.py
 case_studies/cme_futures/18_holdout_backtest.py
 case_studies/crypto_perps_funding/18_holdout_backtest.py
-case_studies/crypto_perps_funding/_archive/11_autoencoder.py
 case_studies/etfs/15_portfolio_management.py
 case_studies/etfs/16_risk_management.py
 case_studies/etfs/17_costs.py
