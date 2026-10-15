@@ -570,7 +570,10 @@ show_plotly_with_alt(
 # **Known limitations.** One chronological split of one ETF panel, one label horizon,
 # one seed, and one block count. The comparison is against one baseline, and a single
 # split cannot rank architectures; `12_case_study_insights` is where these families are
-# compared across case studies under walk-forward validation. Deterministic PyTorch
+# compared across case studies under walk-forward validation. The TSMixer fitted there
+# is not this architecture: it is the Darts `TSMixerModel`, a forecaster that predicts
+# the next 21 daily returns and compounds them into the 21-day label, rather than
+# mapping one window to one cross-sectional return. Deterministic PyTorch
 # algorithms and a fixed cuBLAS workspace make repeated execution reproduce on the same
 # software and GPU; another environment will differ in the final decimals.
 #

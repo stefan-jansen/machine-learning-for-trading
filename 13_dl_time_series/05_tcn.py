@@ -575,7 +575,10 @@ show_plotly_with_alt(
 # one seed, and a single dilation schedule - the receptive field was designed to cover
 # the window rather than searched for. The comparison is against one baseline, and a
 # single split cannot rank architectures; `12_case_study_insights` is where these
-# families are compared across case studies under walk-forward validation. Repeated
+# families are compared across case studies under walk-forward validation. The TCN
+# fitted there is a different block from this one: batch normalisation after each
+# convolution, plain dropout, and a mean over the whole window instead of the final
+# causal state (`case_studies/config/tcn/tcn.py`). Repeated
 # execution reproduces on the same software and GPU; another environment will differ in
 # the final decimals.
 #
