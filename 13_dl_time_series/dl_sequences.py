@@ -166,7 +166,8 @@ def create_sequences_multi_asset(
     """Create sequences WITH symbol tracking for multi-asset learning.
 
     Creates sliding window sequences from each symbol independently,
-    then pools them together while preserving symbol identity.
+    then pools them together while preserving symbol identity. Each window is the
+    `lookback` rows ending on the row the target is dated, inclusive.
 
     Args:
         df: DataFrame with features, target, canonical time column, and asset
@@ -204,8 +205,15 @@ def create_sequences_multi_asset(
         targets = sym_df[target_col].to_numpy()
         timestamps = sym_df[timestamp_col].to_numpy()
 
+        # The window ends ON the target row, not before it. `targets[i]` is a forward
+        # return dated i, so the features at i are known when that prediction is made,
+        # and the models these windows are scored against read them: the ridge baseline
+        # below flattens this same window, the tabular families take row i as their
+        # design row, and the Darts forecasters condition on the series through i. A
+        # window of [i - lookback, i) would predict a return dated i from features that
+        # stop the period before it.
         for i in range(lookback, len(features)):
-            X_list.append(features[i - lookback : i])
+            X_list.append(features[i - lookback + 1 : i + 1])
             y_list.append(float(targets[i]))
             dates_list.append(timestamps[i])
             symbols_list.append(symbol)
@@ -269,8 +277,9 @@ def create_patched_sequences_multi_asset(
         targets = sym_df[target_col].to_numpy()
         timestamps = sym_df[timestamp_col].to_numpy()
 
+        # Same alignment as create_sequences_multi_asset: the window ends on row i.
         for i in range(lookback, len(features)):
-            seq = features[i - lookback : i]
+            seq = features[i - lookback + 1 : i + 1]
             patched = seq.reshape(n_patches, patch_size * len(feature_cols))
             X_list.append(patched)
             y_list.append(float(targets[i]))
