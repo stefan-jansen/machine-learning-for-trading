@@ -38,7 +38,7 @@
 #
 # ## Models Compared
 # 1. **LightGBM**: Production GBM baseline
-# 2. **MLP**: Sklearn neural network (minimal baseline)
+# 2. **MLP**: PyTorch neural network (minimal baseline)
 # 3. **TabM**: Rank-one adapter MLP ensemble (Gorishniy et al., ICLR 2025)
 # 4. **TabPFN**: Foundation model for small tabular data (if installed)
 #
