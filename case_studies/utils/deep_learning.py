@@ -1831,14 +1831,14 @@ def _get_model_registry() -> dict[str, type[nn.Module]]:
     from case_studies.config.nlinear.nlinear import NLinear
     from case_studies.config.patchtst.patchtst import PatchTST
     from case_studies.config.tcn.tcn import TCNRegressor
-    from case_studies.config.tsmixer.tsmixer import TSMixerRegressor
 
+    # No tsmixer: `_CONFIG_LIBRARY_OVERRIDES` routes that config name to Darts, so a
+    # native implementation of it was unreachable and never produced a registered run.
     return {
         "nlinear": NLinear,
         "lstm": LSTMRegressor,
         "patchtst": PatchTST,
         "tcn": TCNRegressor,
-        "tsmixer": TSMixerRegressor,
     }
 
 
