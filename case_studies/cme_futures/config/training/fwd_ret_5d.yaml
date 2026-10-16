@@ -50,6 +50,8 @@ gbm:
 deep_learning:
 - nlinear
 - lstm_h64
+- tsmixer
+- nbeats
 tabular_dl:
 - tabm_s
 - tabm_m
