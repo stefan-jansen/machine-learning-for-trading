@@ -1554,6 +1554,14 @@ case_studies/cme_futures/08_tabular_dl:
   # population rather than publish into the canonical one. Pairing them also keeps
   # `tests/generate_intermediates.py --no-skip-dl` working, which reads this file with
   # `research_preview=False` and so reaches the guard in canonical mode.
+  # vram_gb: free VRAM this run needs before nb-run lets it start. Measured 2026-10-16 on the
+  # RTX 3090 with torch.cuda.max_memory_allocated over three optimizer steps of the widest
+  # registered preset at this case study's own width, which is the shape the canonical run
+  # trains: tabm_l at hidden 256, 16 members, batch 4096 peaked at 0.80 GiB. The activations
+  # dominate, so the peak is within 0.01 GiB across all eight case studies whatever their
+  # feature count. Declared value is that peak plus the CUDA context and allocator
+  # fragmentation, rounded up.
+  vram_gb: 3
   parameters:
     DEVICE: cpu
     POPULATION_NAME: cme_futures-tabular_dl-preview
@@ -1822,6 +1830,14 @@ case_studies/crypto_perps_funding/08_tabular_dl:
 # slower. Tighten against the first green `cs-crypto_perps_funding` if it proves generous. If one
 # of them fails on something other than time, the CPU path has surfaced something real and a
 # bigger number is not the answer.
+  # vram_gb: free VRAM this run needs before nb-run lets it start. Measured 2026-10-16 on the
+  # RTX 3090 with torch.cuda.max_memory_allocated over three optimizer steps of the widest
+  # registered preset at this case study's own width, which is the shape the canonical run
+  # trains: tabm_l at hidden 256, 16 members, batch 4096 peaked at 0.80 GiB. The activations
+  # dominate, so the peak is within 0.01 GiB across all eight case studies whatever their
+  # feature count. Declared value is that peak plus the CUDA context and allocator
+  # fragmentation, rounded up.
+  vram_gb: 3
   parameters:
     # Stated for the reason 06_linear records: LABELS is not a reduction, so without this the
     # harness fallback would fit five names here too. Without it this would register a
@@ -2047,6 +2063,14 @@ case_studies/etfs/08_tabular_dl:
   # pm_helpers folds those two into PREVIEW_REDUCTIONS at run time, but
   # test_every_declared_parameter_reaches_its_notebook reads the notebook's source
   # and sees two names it never binds.
+  # vram_gb: free VRAM this run needs before nb-run lets it start. Measured 2026-10-16 on the
+  # RTX 3090 with torch.cuda.max_memory_allocated over three optimizer steps of the widest
+  # registered preset at this case study's own width, which is the shape the canonical run
+  # trains: tabm_l at hidden 256, 16 members, batch 4096 peaked at 0.80 GiB. The activations
+  # dominate, so the peak is within 0.01 GiB across all eight case studies whatever their
+  # feature count. Declared value is that peak plus the CUDA context and allocator
+  # fragmentation, rounded up.
+  vram_gb: 3
   parameters:
     DEVICE: cpu
     POPULATION_NAME: etfs-tabular_dl-preview
@@ -2494,6 +2518,14 @@ case_studies/fx_pairs/07_gbm:
       max_symbols: 5
   timeout: 180
 case_studies/fx_pairs/08_tabular_dl:
+  # vram_gb: free VRAM this run needs before nb-run lets it start. Measured 2026-10-16 on the
+  # RTX 3090 with torch.cuda.max_memory_allocated over three optimizer steps of the widest
+  # registered preset at this case study's own width, which is the shape the canonical run
+  # trains: tabm_l at hidden 256, 16 members, batch 4096 peaked at 0.80 GiB. The activations
+  # dominate, so the peak is within 0.01 GiB across all eight case studies whatever their
+  # feature count. Declared value is that peak plus the CUDA context and allocator
+  # fragmentation, rounded up.
+  vram_gb: 3
   parameters:
     BATCH_SIZE: 32
     MAX_FOLDS: 2
@@ -3002,6 +3034,14 @@ case_studies/sp500_equity_option_analytics/08_tabular_dl:
   # exercises the per-epoch prediction sets this notebook is about. Declaring n_epochs here
   # would override that patch rather than add to it - 50 epochs at interval 25 is the same
   # two checkpoints for twenty-five times the training.
+  # vram_gb: free VRAM this run needs before nb-run lets it start. Measured 2026-10-16 on the
+  # RTX 3090 with torch.cuda.max_memory_allocated over three optimizer steps of the widest
+  # registered preset at this case study's own width, which is the shape the canonical run
+  # trains: tabm_l at hidden 256, 16 members, batch 4096 peaked at 0.80 GiB. The activations
+  # dominate, so the peak is within 0.01 GiB across all eight case studies whatever their
+  # feature count. Declared value is that peak plus the CUDA context and allocator
+  # fragmentation, rounded up.
+  vram_gb: 3
   parameters:
     DEVICE: cpu
     POPULATION_NAME: sp500_equity_option_analytics-tabular_dl-preview
@@ -3499,6 +3539,14 @@ case_studies/sp500_options/08_tabular_dl:
   # than left as MAX_FOLDS / MAX_SYMBOLS: pm_helpers folds those two into
   # PREVIEW_REDUCTIONS at run time, but test_every_declared_parameter_reaches_its_notebook
   # reads the notebook's source and sees two names it never binds.
+  # vram_gb: free VRAM this run needs before nb-run lets it start. Measured 2026-10-16 on the
+  # RTX 3090 with torch.cuda.max_memory_allocated over three optimizer steps of the widest
+  # registered preset at this case study's own width, which is the shape the canonical run
+  # trains: tabm_l at hidden 256, 16 members, batch 4096 peaked at 0.80 GiB. The activations
+  # dominate, so the peak is within 0.01 GiB across all eight case studies whatever their
+  # feature count. Declared value is that peak plus the CUDA context and allocator
+  # fragmentation, rounded up.
+  vram_gb: 3
   parameters:
     DEVICE: cpu
     POPULATION_NAME: sp500-options-tabular-dl-preview
@@ -3854,6 +3902,14 @@ case_studies/us_equities_panel/08_tabular_dl:
   # from the published config, and N_EPOCHS is now PREVIEW_N_EPOCHS because the
   # shortened schedule is part of the preview identity. DEVICE is explicit so a
   # runner without CUDA does not fall back silently.
+  # vram_gb: free VRAM this run needs before nb-run lets it start. Measured 2026-10-16 on the
+  # RTX 3090 with torch.cuda.max_memory_allocated over three optimizer steps of the widest
+  # registered preset at this case study's own width, which is the shape the canonical run
+  # trains: tabm_l at hidden 256, 16 members, batch 4096 peaked at 0.80 GiB. The activations
+  # dominate, so the peak is within 0.01 GiB across all eight case studies whatever their
+  # feature count. Declared value is that peak plus the CUDA context and allocator
+  # fragmentation, rounded up.
+  vram_gb: 3
   parameters:
     DEVICE: cpu
     CONFIG_NAMES: [tabm_s]
@@ -4199,6 +4255,14 @@ case_studies/us_firm_characteristics/07_tabular_dl:
   # fit is dominated by fixed cost at either width. Four dedicated cores here approximate a
   # four-core runner rather than equal one, so 300 keeps room rather than tracking the
   # measurement. Re-base on the first green `cs-us_firm_characteristics` runs.
+  # vram_gb: free VRAM this run needs before nb-run lets it start. Measured 2026-10-16 on the
+  # RTX 3090 with torch.cuda.max_memory_allocated over three optimizer steps of the widest
+  # registered preset at this case study's own width, which is the shape the canonical run
+  # trains: tabm_l at hidden 256, 16 members, batch 4096 peaked at 0.80 GiB. The activations
+  # dominate, so the peak is within 0.01 GiB across all eight case studies whatever their
+  # feature count. Declared value is that peak plus the CUDA context and allocator
+  # fragmentation, rounded up.
+  vram_gb: 3
   parameters:
     DEVICE: cpu
     POPULATION_NAME: us_firm_characteristics-tabular_dl-preview
