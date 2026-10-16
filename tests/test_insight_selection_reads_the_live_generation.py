@@ -89,10 +89,16 @@ def _register(case_dir: Path, config_name: str, daily_ic: float, lineage: str) -
     return prediction_hash
 
 
-def _publish(case_dir: Path, population_hash: str, members: list[str], supersedes: str | None):
+def _publish(
+    case_dir: Path,
+    population_hash: str,
+    members: list[str],
+    supersedes: str | None,
+    name: str = "test-deep_learning-validation-v1",
+):
     snapshot = {
         "schema_version": 1,
-        "name": "test-deep_learning-validation-v1",
+        "name": name,
         "member_kind": "prediction",
         "members": members,
         "supersedes": supersedes,
@@ -148,6 +154,77 @@ def test_the_rank1_selector_drops_a_retired_generation(tmp_path, monkeypatch) ->
     assert selected["prediction_hash"].to_list() == [live]
     assert selected["ic_mean_daily"].to_list() == [LIVE_IC]
     assert retired not in selected["prediction_hash"].to_list()
+
+
+def test_the_rank1_selector_drops_a_refit_a_stale_case_wide_snapshot_still_lists(
+    tmp_path, monkeypatch
+) -> None:
+    """A second name listing the retired member must not return it to the ranking.
+
+    The family's own population advances on a refit. A case-wide population published by a
+    later stage does not, so until that stage is re-run its live snapshot still lists the
+    generation the refit replaced - beside the other families' live sets, which is why it
+    cannot simply be ignored. Deciding retirement from the union of names keeps the retired
+    fit rankable and reports nothing wrong.
+
+    Measured on ``fx_pairs`` 2026-10-16, after the TabM refit: the union form found 180
+    retired prediction sets and the per-name form 252, the 72 it missed being the superseded
+    TabM generation that ``fx_pairs:validation-predictions`` froze in September. The
+    chapter-12 TabM cell for fx_pairs was that generation, at ``tabm_s`` +0.00554 against
+    the live ``tabm_l`` +0.00119.
+    """
+    retired, live = _two_generations(tmp_path)
+    _publish(
+        tmp_path,
+        "pop000000000c",
+        [retired, "gbm_live_hash"],
+        supersedes=None,
+        name="test:validation-predictions",
+    )
+    monkeypatch.setattr("case_studies.utils.insight_chapter.get_case_study_dir", lambda _: tmp_path)
+    monkeypatch.setattr(
+        "case_studies.utils.insight_chapter._resolve_label", lambda *_args, **_kw: "fwd_ret_5d"
+    )
+
+    selected = collect_rank1_per_cs(["test"], "deep_learning")
+
+    assert selected["prediction_hash"].to_list() == [live]
+    assert selected["ic_mean_daily"].to_list() == [LIVE_IC]
+
+
+def test_a_case_wide_snapshot_that_advanced_too_still_ranks_the_live_generation(
+    tmp_path, monkeypatch
+) -> None:
+    """The negative selftest: the rule must not retire a generation both names publish.
+
+    Where the family notebook advances the case-wide population as well - what
+    crypto_perps_funding does - both names name the new generation. Nothing is retired but
+    the old one, and the selector reads the same answer as before. A rule that retired on
+    the presence of any superseding edge under any name would take the live fit here too.
+    """
+    retired, live = _two_generations(tmp_path)
+    _publish(
+        tmp_path,
+        "pop000000000c",
+        [retired, "gbm_live_hash"],
+        supersedes=None,
+        name="test:validation-predictions",
+    )
+    _publish(
+        tmp_path,
+        "pop000000000d",
+        [live, "gbm_live_hash"],
+        supersedes="pop000000000c",
+        name="test:validation-predictions",
+    )
+    monkeypatch.setattr("case_studies.utils.insight_chapter.get_case_study_dir", lambda _: tmp_path)
+    monkeypatch.setattr(
+        "case_studies.utils.insight_chapter._resolve_label", lambda *_args, **_kw: "fwd_ret_5d"
+    )
+
+    selected = collect_rank1_per_cs(["test"], "deep_learning")
+
+    assert selected["prediction_hash"].to_list() == [live]
 
 
 def test_the_rank1_selector_carries_the_auc_columns_the_book_tables_print(
