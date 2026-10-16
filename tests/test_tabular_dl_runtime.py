@@ -731,7 +731,7 @@ def test_direct_registered_batch_preserves_completed_sibling_on_later_failure(
     registered: list[str] = []
 
     def train_candidate(*, model, X_val, **_kwargs):
-        hidden_dim = int(model.backbone[0].out_features)
+        hidden_dim = int(model.hidden[0].weight.shape[0])
         if hidden_dim == 8:
             raise RuntimeError("injected later candidate failure")
         predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100

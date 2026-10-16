@@ -394,7 +394,7 @@ def test_tabm_cv_releases_each_prepared_fold_after_all_candidates(
         return fold
 
     def fake_train_tabm_fold(*, model, X_val, val_dates, **kwargs):
-        hidden_dim = int(model.backbone[0].out_features)
+        hidden_dim = int(model.hidden[0].weight.shape[0])
         training_order.append((str(val_dates[0])[:10], hidden_dim))
         predictions = np.asarray(X_val[:, 0], dtype=np.float64)
         return {1: 0.1}, {1: predictions}, {1: 0.01}
@@ -496,7 +496,7 @@ def test_tabm_candidate_failure_preserves_completed_sibling(tmp_path, monkeypatc
     fail_small = True
 
     def candidate_train(*, model, X_val, val_dates, state_callback=None, **kwargs):
-        hidden_dim = int(model.backbone[0].out_features)
+        hidden_dim = int(model.hidden[0].weight.shape[0])
         validation_date = str(val_dates[0])[:10]
         calls.append((hidden_dim, validation_date))
         if hidden_dim == 4 and fail_small:
@@ -555,7 +555,7 @@ def test_tabm_batch_matches_individual_resolved_execution(tmp_path, monkeypatch)
     def deterministic_train(*, model, X_val, state_callback=None, **kwargs):
         if state_callback is not None:
             state_callback(1, model)
-        hidden_dim = int(model.backbone[0].out_features)
+        hidden_dim = int(model.hidden[0].weight.shape[0])
         predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100
         return {1: 0.1}, {1: predictions}, {1: 0.01}
 
@@ -750,7 +750,7 @@ def test_tabm_candidate_order_does_not_change_identities_or_predictions(
     def deterministic_train(*, model, X_val, state_callback=None, **kwargs):
         if state_callback is not None:
             state_callback(1, model)
-        hidden_dim = int(model.backbone[0].out_features)
+        hidden_dim = int(model.hidden[0].weight.shape[0])
         predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100
         return {1: 0.1}, {1: predictions}, {1: 0.01}
 
@@ -797,7 +797,7 @@ def test_tabm_variants_from_one_named_preset_keep_separate_identities(
     def deterministic_train(*, model, X_val, state_callback=None, **kwargs):
         if state_callback is not None:
             state_callback(1, model)
-        hidden_dim = int(model.backbone[0].out_features)
+        hidden_dim = int(model.hidden[0].weight.shape[0])
         predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100
         return {1: 0.1}, {1: predictions}, {1: 0.01}
 

@@ -23,8 +23,8 @@ from case_studies.utils.tabular_dl import (
 )
 from utils.modeling import seed_everything
 
-PINNED_RUNNER_VERSION = 1
-PINNED_TABM_STATE_VERSION = 1
+PINNED_RUNNER_VERSION = 2
+PINNED_TABM_STATE_VERSION = 2
 
 # The architecture, as the exact integers a build cannot change: every parameter tensor
 # by name and shape, and the total parameter count.
@@ -44,19 +44,20 @@ PINNED_TABM_STATE_VERSION = 1
 # the expected value and then comparing it against itself is a tautology that passes
 # whatever the architecture becomes, which is the failure this file exists to prevent.
 PINNED_PARAMETER_SHAPES = {
-    "adapters": (3, 8),
-    "backbone.0.weight": (8, 6),
-    "backbone.0.bias": (8,),
-    "backbone.3.weight": (8, 8),
-    "backbone.3.bias": (8,),
-    "heads.0.weight": (1, 8),
-    "heads.0.bias": (1,),
-    "heads.1.weight": (1, 8),
-    "heads.1.bias": (1,),
-    "heads.2.weight": (1, 8),
-    "heads.2.bias": (1,),
+    "hidden.0.weight": (8, 6),
+    "hidden.0.input_adapter": (3, 6),
+    "hidden.0.output_adapter": (3, 8),
+    "hidden.0.bias": (3, 8),
+    "hidden.1.weight": (8, 8),
+    "hidden.1.input_adapter": (3, 8),
+    "hidden.1.output_adapter": (3, 8),
+    "hidden.1.bias": (3, 8),
+    "head.weight": (1, 8),
+    "head.input_adapter": (3, 8),
+    "head.output_adapter": (3, 1),
+    "head.bias": (3, 1),
 }
-PINNED_PARAMETER_COUNT = 179
+PINNED_PARAMETER_COUNT = 288
 
 N_FEATURES = 6
 HIDDEN_DIM = 8
@@ -111,7 +112,7 @@ class TestTheDeclaredVersion:
         assert TABM_STATE_VERSION == PINNED_TABM_STATE_VERSION
 
     def test_the_architecture_keeps_its_declared_shape(self) -> None:
-        """Covers the backbone, the rank-1 adapters and the per-member heads.
+        """Covers the shared weight matrices, the per-member adapters and the biases.
 
         Shapes and a parameter count rather than a digest of the forward pass: the
         digest is floating point and differs between torch builds, so it failed in the

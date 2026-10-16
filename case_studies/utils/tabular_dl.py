@@ -19,6 +19,7 @@ import gc
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import platform
 import time
@@ -69,8 +70,8 @@ DEFAULT_TABM_NUM_THREADS = 8
 # distinction inside `tabular_dl` that the catalog's blank `model_class` column hid.
 TABM_MODEL_CLASS = "TabMModel"
 TABPFN_MODEL_CLASS = "TabPFNRegressor"
-TABM_RUNNER_VERSION = 1
-TABM_STATE_VERSION = 1
+TABM_RUNNER_VERSION = 2
+TABM_STATE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -1735,11 +1736,57 @@ def _configure_torch_runtime(runtime_spec: dict[str, Any]) -> torch.device:
 # ---------------------------------------------------------------------------
 
 
-class TabMModel(nn.Module):
-    """Rank-1 adapter MLP ensemble for tabular data.
+class _BatchEnsembleLinear(nn.Module):
+    """One shared weight matrix that ``n_members`` members use differently.
 
-    Shared backbone + M rank-1 scaling vectors = efficient deep ensemble.
-    From Gorishniy et al. (ICLR 2025).
+    Member ``i`` computes ``s_i * (W @ (r_i * x)) + b_i`` from per-member rank-one
+    adapters ``r_i`` and ``s_i`` and a per-member bias (BatchEnsemble, Wen, Tran and Ba,
+    ICLR 2020), which is how TabM makes k models out of one set of weights.
+
+    The adapters multiply this layer's input and output, so the nonlinearity that
+    follows sees a different pre-activation for each member. That placement is what
+    keeps the ensemble from collapsing: a single adapter applied after the last
+    nonlinearity is absorbed into the output heads, because
+    ``mean_i(W_i @ (a_i * h) + b_i)`` equals ``mean_i(W_i @ diag(a_i)) @ h + mean_i(b_i)``,
+    one linear readout of one shared trunk.
+    """
+
+    def __init__(self, n_in: int, n_out: int, n_members: int) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(n_out, n_in))
+        self.input_adapter = nn.Parameter(torch.empty(n_members, n_in))
+        self.output_adapter = nn.Parameter(torch.empty(n_members, n_out))
+        self.bias = nn.Parameter(torch.empty(n_members, n_out))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        bound = 1.0 / math.sqrt(self.weight.shape[1])
+        nn.init.uniform_(self.bias, -bound, bound)
+        # Random signs rather than small random values. An adapter drawn near zero
+        # starts its member near dead, and the ensemble spends its early epochs
+        # rediscovering one shared function.
+        with torch.no_grad():
+            for adapter in (self.input_adapter, self.output_adapter):
+                adapter.copy_(torch.randint(0, 2, adapter.shape).to(adapter) * 2.0 - 1.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """``(members, batch, n_in) -> (members, batch, n_out)``."""
+        adapted = x * self.input_adapter.unsqueeze(1)
+        return adapted @ self.weight.T * self.output_adapter.unsqueeze(1) + self.bias.unsqueeze(1)
+
+
+class TabMModel(nn.Module):
+    """TabM: k MLPs that share their weight matrices and differ by rank-one adapters.
+
+    Every linear layer carries per-member adapters and a per-member bias, so each of the
+    k members is a different function of the input while the weight matrices are shared.
+    Training optimises the mean of the k per-member losses, so every member has its own
+    objective to overfit in its own direction; the prediction is the mean of the k member
+    outputs. From Gorishniy, Kotelnikov and Babenko (ICLR 2025).
+
+    ``forward`` returns that mean, which is the model's prediction. ``forward_members``
+    returns the k member outputs and is what the training loss reads.
     """
 
     def __init__(
@@ -1751,30 +1798,25 @@ class TabMModel(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
-
-        # Shared backbone
-        self.backbone = nn.Sequential(
-            nn.Linear(n_features, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
+        self.n_members = int(n_members)
+        self.hidden = nn.ModuleList(
+            [
+                _BatchEnsembleLinear(n_features, hidden_dim, self.n_members),
+                _BatchEnsembleLinear(hidden_dim, hidden_dim, self.n_members),
+            ]
         )
+        self.dropout = nn.Dropout(dropout)
+        self.head = _BatchEnsembleLinear(hidden_dim, output_dim, self.n_members)
 
-        # Per-member rank-1 adapters (scaling vectors for last hidden layer)
-        self.adapters = nn.Parameter(torch.randn(n_members, hidden_dim) * 0.1)
-
-        # Per-member output heads
-        self.heads = nn.ModuleList([nn.Linear(hidden_dim, output_dim) for _ in range(n_members)])
+    def forward_members(self, x: torch.Tensor) -> torch.Tensor:
+        """``(batch, n_features) -> (members, batch, output_dim)``."""
+        h = x.unsqueeze(0).expand(self.n_members, -1, -1)
+        for layer in self.hidden:
+            h = self.dropout(torch.relu(layer(h)))
+        return self.head(h)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.backbone(x)  # (batch, hidden)
-        outputs = []
-        for i in range(len(self.heads)):
-            h_adapted = h * self.adapters[i].unsqueeze(0)  # rank-1 scaling
-            outputs.append(self.heads[i](h_adapted))
-        output = torch.stack(outputs, dim=0).mean(dim=0)
+        output = self.forward_members(x).mean(dim=0)
         return output.squeeze(-1) if output.shape[-1] == 1 else output
 
 
@@ -1901,8 +1943,18 @@ def _train_tabm_fold(
             else:
                 y_batch = torch.as_tensor(y_train[batch_idx], dtype=torch.float32, device=device)
 
-            pred = model(X_batch)
-            loss = criterion(pred, y_batch)
+            members = model.forward_members(X_batch)
+            # The mean of the k per-member losses, not one loss on the averaged output.
+            # Each member has to fit the target on its own, which is what makes the
+            # members diverge and the average worth taking.
+            if is_classification:
+                loss = criterion(
+                    members.reshape(-1, members.shape[-1]), y_batch.repeat(members.shape[0])
+                )
+            else:
+                loss = criterion(
+                    members.squeeze(-1), y_batch.unsqueeze(0).expand(members.shape[0], -1)
+                )
 
             optimizer.zero_grad()
             loss.backward()
