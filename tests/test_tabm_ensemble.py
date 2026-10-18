@@ -15,7 +15,12 @@ they still decide the question for an implementation that reaches the defect ano
 
 from __future__ import annotations
 
+# ruff: noqa: E402  # pytest.importorskip must run before the torch-backed imports
 import numpy as np
+import pytest
+
+pytest.importorskip("torch")
+
 import torch
 
 from case_studies.utils.tabular_dl import TabMModel, _train_tabm_fold
