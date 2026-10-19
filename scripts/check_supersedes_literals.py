@@ -104,6 +104,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from case_studies.research.population import SUPERSEDES_LIVE  # noqa: E402
 from case_studies.utils.registry.store import current_causal_identities  # noqa: E402
+from scripts.registry_store_root import registry_store_root  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -948,8 +949,17 @@ def check_all(*, repo_root: Path, artifacts_root: Path, only: str | None = None)
     return findings
 
 
-def _default_artifacts_root() -> Path:
-    return Path.home() / "ml4t" / "artifacts" / "case_studies"
+def default_artifacts_root() -> Path:
+    """The tree the registries actually live in, derived from a RESOLVED ``run_log``.
+
+    Never a fixed absolute path, and never the unresolved checkout. This was a hardcoded
+    ``~/ml4t/artifacts/case_studies`` until 2026-10-19, which the 2026-09-24 storage
+    consolidation had deleted, so every run of this script reported ``no registry on disk``
+    for all nine case studies and signed off with the one line it exists to print:
+    ``0 live generation(s) declared nowhere``. What that cost, and why the root is derived
+    rather than chosen: :mod:`scripts.registry_store_root`.
+    """
+    return registry_store_root(REPO_ROOT)
 
 
 def undeclared_fix(finding: Finding) -> str:
@@ -1078,7 +1088,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--artifacts-root",
         type=Path,
-        default=_default_artifacts_root(),
+        default=default_artifacts_root(),
         help="where the per-case-study run_log/ directories live",
     )
     parser.add_argument("--json", action="store_true", help="emit findings as JSON")
