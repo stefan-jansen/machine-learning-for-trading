@@ -25,6 +25,7 @@ import pytest
 
 from case_studies.research.population import SUPERSEDES_LIVE
 from case_studies.utils.registry.specs import IDENTITY_VERSION
+from scripts import check_supersedes_literals
 from scripts.check_supersedes_literals import STATUSES, check_all, check_case_study
 
 _SCHEMA = """
@@ -606,3 +607,72 @@ def test_a_multi_label_repair_says_which_entry_to_replace(capsys, tree):
 
     assert "replace the 'fwd_ret_21d' entry in the mapping" in message
     assert "leaving the other entries as they are" in message
+
+
+def _symlinked_tree(tmp_path: Path) -> tuple[Path, Path]:
+    """A `--case-study` worktree with one live candidate set and nothing declaring it.
+
+    The shape every production run of this script has, and the shape of the run that paid for
+    these two tests: `case_studies/<cs>/run_log` is a symlink out to the store, the notebook
+    freezes a set whose name it states, and its `SUPERSEDES_SETS` is the empty mapping that
+    `CandidateSet.create` refuses once the members move.
+    """
+    repo, store = tmp_path / "repo", tmp_path / "store"
+    _registry(store, "etfs", [("aaaa", "etfs-gbm-v1", None)])
+    db = sqlite3.connect(store / "etfs" / "run_log" / "registry.db")
+    db.execute(
+        "CREATE TABLE candidate_set_names "
+        "(name TEXT, set_hash TEXT, supersedes_hash TEXT, created_at TEXT, git_commit TEXT)"
+    )
+    db.execute(
+        "INSERT INTO candidate_set_names VALUES ('etfs-gbm-v1', 'aaaa', NULL, '2026-01-01', 'abc')"
+    )
+    db.commit()
+    db.close()
+    directory = repo / "case_studies" / "etfs"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "07_gbm.py").write_text(
+        '# %% tags=["parameters"]\n'
+        "SUPERSEDES_SETS: dict = {}\n"
+        "\n# %%\n"
+        'set_name = f"etfs-gbm-v1"\n'
+        "study.predictions.freeze(rows, name=set_name, "
+        "supersedes=candidate_set_supersedes(study, name=set_name, declared=SUPERSEDES_SETS.get(set_name, '')))\n"
+    )
+    (directory / "run_log").symlink_to(store / "etfs" / "run_log")
+    return repo, store
+
+
+def test_the_default_root_follows_a_symlinked_run_log(tmp_path, monkeypatch):
+    """The root is derived from where a registry IS, never from a path chosen in advance."""
+    repo, store = _symlinked_tree(tmp_path)
+    monkeypatch.setattr(check_supersedes_literals, "REPO_ROOT", repo)
+
+    assert check_supersedes_literals.default_artifacts_root() == store.resolve()
+
+
+def test_a_default_root_that_does_not_exist_reads_as_a_clean_scan(tmp_path, monkeypatch):
+    """The 2026-10-19 miss, as the defect itself produced it.
+
+    The default was a fixed `~/ml4t/artifacts/case_studies`, which the 2026-09-24 storage
+    consolidation deleted. Every case study then reported `no-registry` and the scan signed
+    off with no undeclared generation - and `us_equities_panel/08_tabular_dl` fitted 48 folds
+    over 13 h 49 m before being refused at the freeze for the two candidate-set lineages this
+    same tree names when the root points at the store.
+    """
+    repo, store = _symlinked_tree(tmp_path)
+    monkeypatch.setattr(check_supersedes_literals, "REPO_ROOT", repo)
+
+    deleted_root = tmp_path / "ml4t" / "artifacts" / "case_studies"
+    assert not deleted_root.exists()
+    blind = check_all(repo_root=repo, artifacts_root=deleted_root)
+    # Not even `no-registry`: that status is per declared literal, and a notebook that
+    # declares nothing has none. The undeclared-head pass is the only thing that could have
+    # spoken here, and it returns early when the registry is unreadable, so the scan is
+    # silent rather than wrong - which is why nobody saw it for three weeks.
+    assert blind == []
+
+    seeing = check_all(
+        repo_root=repo, artifacts_root=check_supersedes_literals.default_artifacts_root()
+    )
+    assert any(f.status == "undeclared" and f.label == "etfs-gbm-v1" for f in seeing)
