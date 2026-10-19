@@ -1,0 +1,80 @@
+{
+  "source_url": "https://maven.com/stefan-jansen",
+  "captured_on": "2026-10-19",
+  "courses": [],
+  "paid_workshop_courses": [
+    {
+      "course_id": 21365,
+      "course_slug": "research-to-production",
+      "course_name": "ML for Trading: From Research to Production",
+      "course_format": "full_course",
+      "course_description": "Conduct rigorous, iterative research across the full trading pipeline, with a working codebase and nine case studies in different markets."
+    },
+    {
+      "course_id": 21363,
+      "course_slug": "agent-engineering",
+      "course_name": "Agent Engineering: Build, Evaluate, and Deploy AI Agents",
+      "course_format": "workshop",
+      "course_description": "From agent fundamentals to a live multi-agent system"
+    },
+    {
+      "course_id": 22503,
+      "course_slug": "ml4t-ai-agents",
+      "course_name": "ML for Trading in the Age of AI Agents",
+      "course_format": "workshop",
+      "course_description": "Work through an ETF strategy from idea to a realistic trading simulation"
+    },
+    {
+      "course_id": 21178,
+      "course_slug": "loop-engineering",
+      "course_name": "Stop Micromanaging Your Coding Agent",
+      "course_format": "workshop",
+      "course_description": "What to set up so your coding agent can work without you watching every step."
+    }
+  ],
+  "course_cohorts": [
+    {
+      "course_id": 21363,
+      "start_date": "2026-11-21T15:00:00Z",
+      "end_date": "2026-11-21T20:30:00Z",
+      "type": "live",
+      "visibility": "listed",
+      "attrs": {
+        "is_live": true
+      }
+    },
+    {
+      "course_id": 21178,
+      "start_date": "2026-10-24T14:00:00Z",
+      "end_date": "2026-10-24T18:00:00Z",
+      "type": "live",
+      "visibility": "listed",
+      "attrs": {
+        "is_live": false
+      }
+    },
+    {
+      "course_id": 22503,
+      "start_date": "2026-12-12T15:00:00Z",
+      "end_date": "2026-12-12T19:30:00Z",
+      "type": "live",
+      "visibility": "listed",
+      "attrs": {
+        "is_live": true
+      }
+    },
+    {
+      "course_id": 21365,
+      "start_date": "2026-12-03T17:00:00Z",
+      "end_date": "2027-02-18T21:00:00Z",
+      "type": "live",
+      "visibility": "listed",
+      "attrs": {
+        "is_live": true
+      }
+    }
+  ],
+  "free_items": {
+    "items": []
+  }
+}

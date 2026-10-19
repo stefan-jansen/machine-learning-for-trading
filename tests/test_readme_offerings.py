@@ -14,6 +14,7 @@ render from `collect`'s third list.
 """
 
 import importlib.util
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,6 +26,20 @@ offerings = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(offerings)
 
 NOW = datetime(2026, 9, 24, tzinfo=UTC)
+
+
+def test_closed_future_workshop_is_not_advertised_as_an_upcoming_offering():
+    props = json.loads((REPO / "tests/fixtures/maven_closed_workshop_2026_10_19.json").read_text())
+    _, cohorts, standing = offerings.collect(props, datetime(2026, 10, 19, tzinfo=UTC))
+    assert {row["slug"] for row in cohorts} == {
+        "agent-engineering",
+        "research-to-production",
+        "ml4t-ai-agents",
+    }
+    assert all(row["slug"] != "loop-engineering" for row in standing)
+    rendered = offerings.render_all([], cohorts, standing)
+    assert "loop-engineering" not in rendered
+    assert "Nov 21, 2026" in rendered
 
 
 def _course(

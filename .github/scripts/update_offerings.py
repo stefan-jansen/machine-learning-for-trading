@@ -189,6 +189,8 @@ def collect(props: dict, now: datetime) -> tuple[list[dict], list[dict], list[di
         # unlisted one is not on sale. Neither is a date a reader can act on.
         if cohort.get("visibility") != "listed" or cohort.get("type") != "live":
             continue
+        if (cohort.get("attrs") or {}).get("is_live") is False:
+            continue
         course = courses_by_id.get(cohort.get("course_id"))
         if course is None:
             continue
