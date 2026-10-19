@@ -72,6 +72,7 @@ import yaml
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
+    SUPERSEDES_LIVE,
     declared_labels,
     load_model_configs,
     model_requests,
@@ -93,7 +94,10 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = ""
+# That this run intends to extend the lineage published under this population's name, stated
+# without quoting a hash the registry moves on every publish. `supersedes_for_run` resolves it
+# and withholds it on a first run, a reader's clean clone, or a preview.
+SUPERSEDES_POPULATION: str = SUPERSEDES_LIVE
 # The device to fit on. Empty means the one declared in config/setup.yaml.
 DEVICE: str = ""
 

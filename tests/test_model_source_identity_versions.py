@@ -23,8 +23,14 @@ PINNED_SEQUENCE_RUNNER = 1
 # deliberately: it exists to make a bump a decision someone writes down, not to prevent one.
 PINNED_SEQUENCE_PREPARATION = 3
 PINNED_SEQUENCE_STATE = 1
-PINNED_TABM_RUNNER = 1
-PINNED_TABM_STATE = 1
+# Both 2 since the TabM ensemble was corrected: the class that shipped averaged its member
+# heads inside `forward`, which is a linear map of a linear map, so k members collapsed to one
+# effective head and no member was distinguished by the fit. The faithful model puts per-member
+# rank-one adapters in every linear layer and optimises the mean of the k member losses, so every
+# TabM fit is a different computation and the state layout differs too. Fits made under the
+# collapsed implementation cannot be migrated and are re-run.
+PINNED_TABM_RUNNER = 2
+PINNED_TABM_STATE = 2
 PINNED_LATENT_ADAPTER = 1
 # 1 -> 2 on 2026-09-10: the block-permutation refutation compares HAC t-statistics rather
 # than raw effects (ml4t/agent-workspace#1120). Permuting the treatment frees it from the
@@ -87,8 +93,8 @@ def test_tabm_identity_is_declared() -> None:
     assert tabular_dl.TABM_RUNNER_VERSION == PINNED_TABM_RUNNER
     assert tabular_dl.TABM_STATE_VERSION == PINNED_TABM_STATE
     assert tabular_dl._tabm_source_identity() == {
-        "tabm_runner": 1,
-        "tabm_state": 1,
+        "tabm_runner": 2,
+        "tabm_state": 2,
     }
 
 

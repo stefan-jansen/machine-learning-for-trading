@@ -89,6 +89,7 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
+    SUPERSEDES_LIVE,
     declared_labels,
     load_model_configs,
     model_requests,
@@ -97,6 +98,7 @@ from case_studies.research import (
     primary_label,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -107,7 +109,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_POPULATION: str = SUPERSEDES_LIVE
 DEVICE: str = ""
 
 # %%
@@ -265,14 +267,18 @@ plan.select(
 # whole call rather than publishing a population one member short. Everything that finished stays
 # registered, and re-running trains only what is missing.
 #
-# `SUPERSEDES_POPULATION` names the population hash this run replaces, and is empty because this is
-# the first generation to be published under this name. A population is the set of prediction
-# identities, so anything that moves a training identity - a changed epoch schedule as much as a
-# changed configuration menu - produces a different population under the same name, and the
-# registry refuses to write it without being told which snapshot it supersedes. That lineage is the
-# only record of which generation is which, and the hash is part of what a snapshot is hashed over,
-# so a later run that changed something must carry the value it replaced rather than an empty one.
-# A reduced-scale run passes it empty whatever the default is: a population produced under a
+# `SUPERSEDES_POPULATION` declares that this run intends to extend the lineage published under
+# this name, and `SUPERSEDES_LIVE` states that without quoting a hash. A population is the set of
+# prediction identities, so anything that moves a training identity - a changed epoch schedule as
+# much as a changed configuration menu - produces a different population under the same name, and
+# the registry refuses to write it without being told which snapshot it supersedes. That lineage
+# is the only record of which generation is which, and it is written into
+# `official_populations.supersedes_hash` rather than recoverable from this source. A quoted hash
+# has to equal a value the registry moves on every publish; `supersedes_for_run` resolves the
+# declaration against the registry instead, and withholds it where offering it would be refused -
+# on a reader's clean clone, where `run_log/` is gitignored and no generation exists, and under a
+# caller's own `POPULATION_NAME`.
+# A reduced-scale run resolves to nothing whatever the default is: a population produced under a
 # reduction is thrown away with the workspace it was written to, so it has no lineage to extend.
 #
 # The default name is the contract with the notebooks downstream - `13_model_analysis` and
@@ -285,7 +291,12 @@ execution, population = run_model_population(
     study,
     resolved,
     population_name=population_name,
-    supersedes=SUPERSEDES_POPULATION or None,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION or None,
+        execution_tier=EXECUTION_TIER,
+    ),
 )
 
 reused = sum(1 for item in execution.diagnostics if item.get("reused"))

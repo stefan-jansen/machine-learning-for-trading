@@ -70,7 +70,10 @@ def test_run_tabm_cv_returns_fold_metrics_after_training(tmp_path):
     validation = dataset[dataset["timestamp"] >= timestamps[10]].sort_values(
         ["timestamp", "symbol"]
     )
-    raw = validation[["feature"]].to_numpy(dtype=np.float32)
+    # float64, as the pipeline scales in: casting to float32 before scaling perturbs the
+    # input by ~1e-8 and makes this comparison a tolerance on the network's sensitivity
+    # rather than a check that the checkpoint reproduces its published predictions.
+    raw = validation[["feature"]].to_numpy(dtype=np.float64)
     imputed = np.where(np.isnan(raw), preprocessing["imputer_statistics"], raw)
     transformed = (imputed - preprocessing["scaler_mean"]) / preprocessing["scaler_scale"]
     actual = _predict_in_chunks(restored, transformed, torch.device("cpu"))
@@ -84,7 +87,12 @@ def test_run_tabm_cv_returns_fold_metrics_after_training(tmp_path):
         .to_numpy()
     )
 
-    np.testing.assert_allclose(actual, expected, rtol=1e-7, atol=1e-8)
+    # float32 round-off, not agreement to the bit: the restored model and the training run
+    # reach the same prediction through the same float32 forward pass over inputs that agree
+    # to float32 precision, and the three adapter layers accumulate ~3e-08 of difference on
+    # outputs of order 0.1 (measured 2026-10-15). A wrong checkpoint, a wrong epoch or wrong
+    # preprocessing moves these by 1e-2 or more.
+    np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
     assert metadata["checkpoint_value"] == 1
 
 

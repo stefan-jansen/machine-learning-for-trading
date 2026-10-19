@@ -100,15 +100,19 @@ from case_studies.cme_futures.research_workflow import (
     run_official_model_catalog,
     run_resolved_model_requests,
 )
+from case_studies.research import SUPERSEDES_LIVE, supersedes_for_run
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
 PREVIEW_REDUCTIONS: dict = {}
-# The population hash this run replaces, read from the registry and set by a person. A
-# first population takes None; a re-run whose membership has changed is refused without
-# the hash it supersedes, and the refusal names the value required.
-SUPERSEDES_POPULATION: str | None = None
+# That this run intends to extend the lineage published under this population's name.
+# `SUPERSEDES_LIVE` says so without quoting a hash: a re-run whose membership has changed is
+# refused without the generation it supersedes, and a quoted hash has to equal a value the
+# registry moves on every publish. `supersedes_for_run` resolves it against the registry and
+# withholds it where offering it would be refused - a reader's clean clone, a caller's own
+# `POPULATION_NAME`, a preview.
+SUPERSEDES_POPULATION: str | None = SUPERSEDES_LIVE
 # The device to fit on. Empty means the device this population was published on.
 DEVICE: str = ""
 # The population this run publishes into. Empty publishes the canonical one, which a run
@@ -207,7 +211,12 @@ if EXECUTION_TIER == "canonical":
         requests,
         population_name=population_name,
         resolved_requests=resolved,
-        supersedes=SUPERSEDES_POPULATION,
+        supersedes=supersedes_for_run(
+            study,
+            population_name=population_name,
+            declared=SUPERSEDES_POPULATION,
+            execution_tier=EXECUTION_TIER,
+        ),
     )
 else:
     if WORKSPACE is None or not PREVIEW_REDUCTIONS:

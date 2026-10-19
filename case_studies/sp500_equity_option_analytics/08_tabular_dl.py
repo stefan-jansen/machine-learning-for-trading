@@ -90,6 +90,7 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
+    SUPERSEDES_LIVE,
     declared_labels,
     load_model_configs,
     model_requests,
@@ -98,6 +99,7 @@ from case_studies.research import (
     primary_label,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -108,7 +110,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_POPULATION: str = SUPERSEDES_LIVE
 DEVICE: str = ""
 
 # %%
@@ -285,12 +287,16 @@ plan.select(
 # restricted to these 72 identities. Both are being migrated to resolve the population by name, and
 # until they are, the guarantee this call gives is completeness rather than exclusivity.
 #
-# `SUPERSEDES_POPULATION` names the population hash this run replaces, and is empty because this is
-# the first generation published under this name. A population is the set of prediction identities,
-# so anything that moves a training identity - a changed epoch schedule or device as much as a
-# changed configuration menu - produces a different population under the same name, and the registry
-# refuses to write it without being told which snapshot it supersedes. That lineage is the only
-# record of which generation is which.
+# `SUPERSEDES_POPULATION` declares that this run intends to extend the lineage published under
+# this name, and `SUPERSEDES_LIVE` states that without quoting a hash. A population is the set of
+# prediction identities, so anything that moves a training identity - a changed epoch schedule or
+# device as much as a changed configuration menu - produces a different population under the same
+# name, and the registry refuses to write it without being told which snapshot it supersedes. That
+# lineage is the only record of which generation is which, and it is written into
+# `official_populations.supersedes_hash` rather than recoverable from this source. A quoted hash
+# has to equal a value the registry moves on every publish; `supersedes_for_run` resolves the
+# declaration against the registry instead, and withholds it on a reader's clean clone, under a
+# caller's own `POPULATION_NAME`, and in a preview, which has no lineage to extend.
 #
 # The default name is the one the downstream notebooks will resolve, rather than a label of
 # convenience, which is why a run that narrows the member set or changes the device has to pass its
@@ -302,7 +308,12 @@ execution, population = run_model_population(
     study,
     resolved,
     population_name=population_name,
-    supersedes=SUPERSEDES_POPULATION or None,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION or None,
+        execution_tier=EXECUTION_TIER,
+    ),
 )
 
 reused = sum(1 for item in execution.diagnostics if item.get("reused"))
