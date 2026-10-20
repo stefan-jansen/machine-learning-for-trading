@@ -92,7 +92,7 @@ why.
 ## Courses and Workshops
 
 Live cohorts, one-day workshops, and free sessions, all scheduled on
-[Maven](https://maven.com/stefan-jansen). The listing below is generated daily from that schedule.
+[Maven](https://maven.com/stefan-jansen?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_stefan_jansen). The listing below is generated daily from that schedule.
 
 <!-- offerings:all start -->
 ### Machine Learning for Trading
@@ -101,11 +101,11 @@ The workflow this repository implements, taught end to end.
 
 | When | Offering | What you leave with |
 |------|----------|---------------------|
-| Self-paced | [Foundations](https://maven.com/stefan-jansen/ml4t-foundations) | Build the ML for Trading pipeline yourself, end to end, and the evidence to say what it does and does not establish. |
-| Dec 3 – Feb 18, 2027 | [Research to Production](https://maven.com/stefan-jansen/research-to-production) | Take one research idea from a question to a costed, monitored strategy, with the evidence trail that makes the result checkable. |
-| Dec 12, 2026 | [ML for Trading in the Age of AI Agents](https://maven.com/stefan-jansen/ml4t-ai-agents) | Work through an ETF strategy from idea to a realistic trading simulation. |
+| Self-paced | [Foundations](https://maven.com/stefan-jansen/ml4t-foundations?utm_source=github&utm_medium=readme&utm_campaign=foundations_self_paced&utm_content=readme_offering_ml4t_foundations) | Build the ML for Trading pipeline yourself, end to end, and the evidence to say what it does and does not establish. |
+| Dec 3 – Feb 18, 2027 | [Research to Production](https://maven.com/stefan-jansen/research-to-production?utm_source=github&utm_medium=readme&utm_campaign=r2p_20261203&utm_content=readme_offering_research_to_production) | Take one research idea from a question to a costed, monitored strategy, with the evidence trail that makes the result checkable. |
+| Dec 12, 2026 | [ML for Trading in the Age of AI Agents](https://maven.com/stefan-jansen/ml4t-ai-agents?utm_source=github&utm_medium=readme&utm_campaign=trading_workshop_20261212&utm_content=readme_offering_ml4t_ai_agents) | Work through an ETF strategy from idea to a realistic trading simulation. |
 
-**Free live sessions**, with the recording sent to everyone who registers: [How to Run ML for Trading Research with AI Agents](https://maven.com/p/b146f5) (Wed, Oct 28, 11:00 AM ET / 15:00 UTC) · [Anatomy of a machine learning for trading case study](https://maven.com/p/bb56cd) (Wed, Nov 25, 11:00 AM ET / 16:00 UTC)
+**Free live sessions**, with the recording sent to everyone who registers: [How to Run ML for Trading Research with AI Agents](https://maven.com/p/b146f5?utm_source=github&utm_medium=readme&utm_campaign=trading_ll_20261028&utm_content=readme_lesson_b146f5) (Wed, Oct 28, 11:00 AM ET / 15:00 UTC) · [From ML Forecasts to Trading Results](https://maven.com/p/f68a50?utm_source=github&utm_medium=readme&utm_campaign=trading_ll_20261104&utm_content=readme_lesson_f68a50) (Wed, Nov 4, 10:00 AM ET / 15:00 UTC) · [Build an ML for Trading Research Workflow with AI Agents](https://maven.com/p/b7d06f?utm_source=github&utm_medium=readme&utm_campaign=trading_ll_20261118&utm_content=readme_lesson_b7d06f) (Wed, Nov 18, 10:00 AM ET / 15:00 UTC) · [Open-Source Tools for ML Trading Research](https://maven.com/p/bb56cd?utm_source=github&utm_medium=readme&utm_campaign=trading_ll_20261125&utm_content=readme_lesson_bb56cd) (Wed, Nov 25, 11:00 AM ET / 16:00 UTC)
 
 ### Agentic systems
 
@@ -113,11 +113,11 @@ Designing multi-agent systems whose reasoning can be audited.
 
 | When | Offering | What you leave with |
 |------|----------|---------------------|
-| Nov 21, 2026 | [Agent Engineering: Build, Evaluate, and Deploy AI Agents](https://maven.com/stefan-jansen/agent-engineering) | Go from agent fundamentals to a live multi-agent system, with an evaluation harness that says whether it works. |
+| Nov 21, 2026 | [Agent Engineering: Build, Evaluate, and Deploy AI Agents](https://maven.com/stefan-jansen/agent-engineering?utm_source=github&utm_medium=readme&utm_campaign=agent_workshop_20261121&utm_content=readme_offering_agent_engineering) | Go from agent fundamentals to a live multi-agent system, with an evaluation harness that says whether it works. |
 
-**Free live sessions**, with the recording sent to everyone who registers: [How to Build Reliable AI Agents with Harness Engineering](https://maven.com/p/166231) (Wed, Oct 21, 11:00 AM ET / 15:00 UTC) · [Multi-Agent AI Systems: When They Help and How to Build Them](https://maven.com/p/393eee) (Wed, Nov 11, 11:00 AM ET / 16:00 UTC)
+**Free live sessions**, with the recording sent to everyone who registers: [How to Build Reliable AI Agents with Harness Engineering](https://maven.com/p/166231?utm_source=github&utm_medium=readme&utm_campaign=agent_ll_20261021&utm_content=readme_lesson_166231) (Wed, Oct 21, 11:00 AM ET / 15:00 UTC) · [Multi-Agent AI Systems: When They Help and How to Build Them](https://maven.com/p/393eee?utm_source=github&utm_medium=readme&utm_campaign=agent_ll_20261111&utm_content=readme_lesson_393eee) (Wed, Nov 11, 11:00 AM ET / 16:00 UTC)
 
-*Between cohorts, the [**Insights** newsletter](https://insights.ml4trading.io/) covers the same ground weekly, source by source.*
+*Between cohorts, the [**Insights** newsletter](https://insights.ml4trading.io/?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_home) covers the same ground weekly, source by source.*
 <!-- offerings:all end -->
 
 ---
@@ -334,32 +334,32 @@ preamble. Full details in the **[Docker environments guide](envs/README.md)**.
 
 ## Companion Resources
 
-The [companion website](https://ml4trading.io) carries three things the chapters lean on but do not
+The [companion website](https://ml4trading.io?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_home) carries three things the chapters lean on but do not
 reprint.
 
-- **[112 primers](https://ml4trading.io/primer/)** are free, open explainers, one page per concept,
+- **[112 primers](https://ml4trading.io/primer/?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_primer)** are free, open explainers, one page per concept,
   covering what a chapter assumes you already know: limit order book mechanics, bitemporal data
   models, fractional differencing, multiple testing in factor research, conformal prediction, the
   deflated Sharpe ratio, hierarchical risk parity, Almgren-Chriss execution, walk-forward
   validation. Nothing to install and nothing to sign up for.
-- **[61 agent skills](https://ml4trading.io/skills/)** are task recipes for coding agents, each
+- **[61 agent skills](https://ml4trading.io/skills/?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_skills)** are task recipes for coding agents, each
   carrying the same guards against lookahead bias, leakage, and multiple testing that the task needs
   when a person does it by hand. They span the research loop: building bars and triple-barrier
   labels, feature selection, purged walk-forward CV, cost models and tear sheets, position sizing,
   kill switches, live monitoring. Browsing the catalog is free; opening a skill's detail requires a
   website account.
-- **[Six Python libraries](https://ml4trading.io/libraries/)** carry the pipeline the notebooks are
+- **[Six Python libraries](https://ml4trading.io/libraries/?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_libraries)** carry the pipeline the notebooks are
   built on, one per stage of the workflow. Each is a production package, documented and usable on
   its own:
 
 | Library                                                     | Stage      | What it does                                                                   |
 |-------------------------------------------------------------|------------|--------------------------------------------------------------------------------|
-| [`ml4t-data`](https://ml4trading.io/docs/data/)             | Data       | Unified market-data acquisition from 19+ providers behind one interface        |
-| [`ml4t-engineer`](https://ml4trading.io/docs/engineer/)     | Signal     | Features, labels, alternative bars, and leakage-safe dataset preparation       |
-| [`ml4t-models`](https://ml4trading.io/docs/models/)         | Models     | Finance-native latent factors, SDFs, direct prediction, and portfolio learning |
-| [`ml4t-diagnostic`](https://ml4trading.io/docs/diagnostic/) | Evaluation | Feature validation, strategy diagnostics, and the Deflated Sharpe Ratio        |
-| [`ml4t-backtest`](https://ml4trading.io/docs/backtest/)     | Strategy   | Event-driven backtesting with realistic execution                              |
-| [`ml4t-live`](https://ml4trading.io/docs/live/)             | Deployment | Production trading with broker integrations                                    |
+| [`ml4t-data`](https://ml4trading.io/docs/data/?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_docs_data)             | Data       | Unified market-data acquisition from 19+ providers behind one interface        |
+| [`ml4t-engineer`](https://ml4trading.io/docs/engineer/?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_docs_engineer)     | Signal     | Features, labels, alternative bars, and leakage-safe dataset preparation       |
+| [`ml4t-models`](https://ml4trading.io/docs/models/?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_docs_models)         | Models     | Finance-native latent factors, SDFs, direct prediction, and portfolio learning |
+| [`ml4t-diagnostic`](https://ml4trading.io/docs/diagnostic/?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_docs_diagnostic) | Evaluation | Feature validation, strategy diagnostics, and the Deflated Sharpe Ratio        |
+| [`ml4t-backtest`](https://ml4trading.io/docs/backtest/?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_docs_backtest)     | Strategy   | Event-driven backtesting with realistic execution                              |
+| [`ml4t-live`](https://ml4trading.io/docs/live/?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_docs_live)             | Deployment | Production trading with broker integrations                                    |
 
 ---
 
@@ -387,7 +387,7 @@ machine-learning-for-trading/
 Found an error, a broken link, or have a suggestion? Early feedback is especially valuable before the book launches.
 
 - **Issues**: [open a GitHub issue](https://github.com/stefan-jansen/machine-learning-for-trading/issues)
-- **Website and contact**: [ml4trading.io](https://ml4trading.io)
+- **Website and contact**: [ml4trading.io](https://ml4trading.io?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_home)
 
 ---
 
@@ -402,6 +402,6 @@ covers the code, not this file. See [data/README.md](data/README.md#attribution)
 
 <p align="center">
   <a href="https://amzn.to/4eigy2F">Get the book</a> •
-  <a href="https://ml4trading.io">ml4trading.io</a> •
+  <a href="https://ml4trading.io?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_home">ml4trading.io</a> •
   <a href="https://github.com/stefan-jansen/machine-learning-for-trading">GitHub</a>
 </p>
