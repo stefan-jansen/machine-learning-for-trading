@@ -19,8 +19,8 @@ intro. A cron that runs daily cannot keep a callout about a session that starts 
 which it did on the Sep 30 session. The courses section carries the same sessions
 with their dates attached, where a past one is visibly past.
 
-Nothing outside those markers is touched, so the file stays hand-edited
-everywhere else.
+Outside those markers, only tracking queries on existing marketing URLs change;
+the visible copy and affiliate links stay hand-edited.
 
     update_offerings.py            # rewrite README.md in place
     update_offerings.py --check    # exit 1 if the block is out of date
@@ -34,6 +34,7 @@ convert without knowing US daylight-saving rules.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -41,14 +42,17 @@ import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 PROFILE_URL = "https://maven.com/stefan-jansen"
-COURSES_URL = (
-    "https://ml4trading.io/courses/"
-    "?utm_source=github&utm_medium=readme&utm_campaign=ml4t3e&utm_content=offerings"
-)
+COURSES_URL = "https://ml4trading.io/courses/"
 README = Path(__file__).resolve().parents[2] / "README.md"
+_tag_spec = importlib.util.spec_from_file_location(
+    "marketing_links", Path(__file__).with_name("marketing_links.py")
+)
+marketing_links = importlib.util.module_from_spec(_tag_spec)
+_tag_spec.loader.exec_module(marketing_links)
 EASTERN = ZoneInfo("America/New_York")
 USER_AGENT = "ml4t-readme-offerings"
 
@@ -317,6 +321,8 @@ def render_all(lessons: list[dict], cohorts: list[dict], standing: list[dict]) -
                 "when": "Self-paced" if "Self-paced" in item["mode"] else "Waitlist",
                 "title": display_name(item["slug"], item["title"]),
                 "url": item["url"],
+                "campaign": marketing_links.campaign_for_url(item["url"]),
+                "content": "readme_offering_" + item["slug"].replace("-", "_"),
                 "blurb": blurb_for(item),
             }
         )
@@ -332,14 +338,22 @@ def render_all(lessons: list[dict], cohorts: list[dict], standing: list[dict]) -
                 "theme": theme,
                 "sort": (1, item["start"].isoformat()),
                 "spans": [],
+                "starts": [],
                 "title": display_name(item["slug"], item["title"]),
                 "url": item["url"],
                 "blurb": blurb_for(item),
             }
         row["spans"].append(span(item["start"], item["end"]))
+        row["starts"].append(item["start"])
     for row in merged.values():
         theme = row.pop("theme")
         row["when"] = " · ".join(row.pop("spans"))
+        starts = set(row.pop("starts"))
+        row["campaign"] = marketing_links.campaign_for_url(
+            row["url"], next(iter(starts)) if len(starts) == 1 else None
+        )
+        slug = urlsplit(row["url"]).path.rsplit("/", 1)[-1]
+        row["content"] = "readme_offering_" + slug.replace("-", "_")
         by_theme[theme]["offerings"].append(row)
     for lesson in lessons:
         by_theme[theme_for_lesson(lesson["title"])]["lessons"].append(lesson)
@@ -358,15 +372,25 @@ def render_all(lessons: list[dict], cohorts: list[dict], standing: list[dict]) -
                 "|------|----------|---------------------|",
             ]
             for item in sorted(group["offerings"], key=lambda x: x["sort"]):
-                out.append(
-                    f"| {item['when']} | [{item['title']}]({item['url']}) | {item['blurb']} |"
+                url = marketing_links.build(
+                    item["url"], "github", "readme", item["campaign"], item["content"]
                 )
+                out.append(f"| {item['when']} | [{item['title']}]({url}) | {item['blurb']} |")
             out.append("")
 
         if group["lessons"]:
-            sessions = " · ".join(
-                f"[{x['title']}]({x['url']}) ({when(x['start'])})" for x in group["lessons"]
-            )
+            session_links = []
+            for lesson in group["lessons"]:
+                lesson_id = urlsplit(lesson["url"]).path.split("/")[2]
+                url = marketing_links.build(
+                    lesson["url"],
+                    "github",
+                    "readme",
+                    marketing_links.campaign_for_url(lesson["url"], lesson["start"]),
+                    "readme_lesson_" + lesson_id,
+                )
+                session_links.append(f"[{lesson['title']}]({url}) ({when(lesson['start'])})")
+            sessions = " · ".join(session_links)
             out += [
                 f"**Free live sessions**, with the recording sent to everyone who registers: {sessions}",
                 "",
@@ -386,6 +410,34 @@ def render_all(lessons: list[dict], cohorts: list[dict], standing: list[dict]) -
     return "\n".join(out)
 
 
+def tag_readme_urls(text: str, rendered_block: str) -> str:
+    """Tag direct destinations while preserving every visible word."""
+    url_pattern = re.compile(r'https://[^\s)<>"\']+')
+    planned = {}
+    for url in url_pattern.findall(rendered_block):
+        parts = urlsplit(url)
+        tags = parse_qs(parts.query)
+        if "utm_campaign" in tags and "utm_content" in tags:
+            planned[(parts.hostname, parts.path)] = (
+                tags["utm_campaign"][0],
+                tags["utm_content"][0],
+            )
+
+    def tagged(match):
+        url = match.group()
+        parts = urlsplit(url)
+        if parts.hostname not in {"maven.com", "ml4trading.io", "insights.ml4trading.io"}:
+            return url
+        path_id = re.sub(r"[^a-z0-9]+", "_", parts.path.lower()).strip("_") or "home"
+        campaign, content = planned.get(
+            (parts.hostname, parts.path),
+            (marketing_links.campaign_for_url(url), "readme_resources_" + path_id),
+        )
+        return marketing_links.build(url, "github", "readme", campaign, content)
+
+    return url_pattern.sub(tagged, text)
+
+
 def splice(text: str, name: str, body: str) -> str:
     start, end = f"<!-- offerings:{name} start -->", f"<!-- offerings:{name} end -->"
     pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.S)
@@ -398,6 +450,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true", help="exit 1 if README is out of date")
     ap.add_argument("--print", dest="show", action="store_true", help="render to stdout only")
+    ap.add_argument(
+        "--tag-only", action="store_true", help="Update URLs without changing copy or dates"
+    )
     args = ap.parse_args()
 
     try:
@@ -409,13 +464,16 @@ def main() -> int:
     now = datetime.now(UTC)
     lessons, cohorts, standing = collect(props, now)
     allblock = render_all(lessons, cohorts, standing)
+    allblock = tag_readme_urls(allblock, allblock)
 
     if args.show:
         print(allblock)
         return 0
 
     original = README.read_text()
-    updated = splice(original, "all", allblock)
+    updated = tag_readme_urls(
+        original if args.tag_only else splice(original, "all", allblock), allblock
+    )
 
     if updated == original:
         print("README offerings are current")
