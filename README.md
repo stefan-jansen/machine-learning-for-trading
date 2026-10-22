@@ -115,7 +115,7 @@ Designing multi-agent systems whose reasoning can be audited.
 |------|----------|---------------------|
 | Nov 21, 2026 | [Agent Engineering: Build, Evaluate, and Deploy AI Agents](https://maven.com/stefan-jansen/agent-engineering?utm_source=github&utm_medium=readme&utm_campaign=agent_workshop_20261121&utm_content=readme_offering_agent_engineering) | Go from agent fundamentals to a live multi-agent system, with an evaluation harness that says whether it works. |
 
-**Free live sessions**, with the recording sent to everyone who registers: [How to Build Reliable AI Agents with Harness Engineering](https://maven.com/p/166231?utm_source=github&utm_medium=readme&utm_campaign=agent_ll_20261021&utm_content=readme_lesson_166231) (Wed, Oct 21, 11:00 AM ET / 15:00 UTC) · [Multi-Agent AI Systems: When They Help and How to Build Them](https://maven.com/p/393eee?utm_source=github&utm_medium=readme&utm_campaign=agent_ll_20261111&utm_content=readme_lesson_393eee) (Wed, Nov 11, 11:00 AM ET / 16:00 UTC)
+**Free live sessions**, with the recording sent to everyone who registers: [Multi-Agent AI Systems: When They Help and How to Build Them](https://maven.com/p/393eee?utm_source=github&utm_medium=readme&utm_campaign=agent_ll_20261111&utm_content=readme_lesson_393eee) (Wed, Nov 11, 11:00 AM ET / 16:00 UTC)
 
 *Between cohorts, the [**Insights** newsletter](https://insights.ml4trading.io/?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_home) covers the same ground weekly, source by source.*
 <!-- offerings:all end -->
