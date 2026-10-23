@@ -51,34 +51,49 @@ def retired_prediction_hashes(connection: sqlite3.Connection) -> set[str]:
     metrics. Any ``max``, ``first`` or ``ORDER BY created_at`` picks arbitrarily and looks
     like it worked.
 
-    A hash is retired when it appears in some prediction population and in no current one,
-    where current means nothing supersedes it. A hash in no population at all is not
-    retired: nothing has declared it so, and a registry may hold results a study never
-    published under a name.
+    **The question is asked per population name**, and reduced by :func:`_retired`, which
+    :func:`superseded_members` also calls - a name is one publisher's answer to one
+    question, and a member is retired when the name that published it has moved past it.
+    Within a name the comparison is member-wise, so a refit that moves three of ten
+    identities retires three.
 
-    Returns an empty set when the registry declares no populations, which includes a clean
-    clone with no ``official_populations`` table at all - there, nothing has been retired
-    because nothing has been published.
+    Asking it globally instead - retired by someone, listed by nobody in force - is the
+    form this function carried until 2026-10-16, and it is wrong for the reason
+    :func:`superseded_members` records from 2026-08-25: the same identity is legitimately
+    listed under several names, and a snapshot frozen under an unrelated name goes on
+    listing a generation its own publisher has replaced. Measured on ``fx_pairs`` on
+    2026-10-16, after the tabular_dl refit: the global form returned 180 retired hashes
+    and the per-name form 252, and the 72 it missed were the superseded TabM generation,
+    still listed by the case-wide ``fx_pairs:validation-predictions`` snapshot that
+    ``13_backtest`` froze in September. Every reader here ranked that generation as
+    current, and the chapter-12 TabM cell for fx_pairs was the retired one.
+
+    A hash in no population at all is not retired: nothing has declared it so, and a
+    registry may hold results a study never published under a name.
+
+    Returns an empty set when the registry has no ``official_populations`` table, which is
+    what a clean clone has - ``run_log/`` is gitignored, so nothing has been published
+    there. A table that exists but lacks a column the reduction needs raises instead of
+    reporting nothing retired, because an unreadable lineage and an empty one are
+    different answers and only one of them is safe to rank on.
     """
-    try:
-        rows = connection.execute(
-            "SELECT population_hash, supersedes_hash, member_kind, snapshot_json "
-            "FROM official_populations"
-        ).fetchall()
-    except sqlite3.OperationalError:
+    declared = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'official_populations'"
+    ).fetchone()
+    if not declared:
         return set()
 
-    superseded = {row[1] for row in rows if row[1]}
-    published: set[str] = set()
-    live: set[str] = set()
-    for population_hash, _, member_kind, snapshot_json in rows:
+    rows: list[tuple[str, str, str | None]] = []
+    members: dict[str, set[str]] = {}
+    for population_hash, name, supersedes, member_kind, snapshot_json in connection.execute(
+        "SELECT population_hash, name, supersedes_hash, member_kind, snapshot_json "
+        "FROM official_populations"
+    ):
         if member_kind != "prediction":
             continue
-        members = set(json.loads(snapshot_json)["members"])
-        published |= members
-        if population_hash not in superseded:
-            live |= members
-    return published - live
+        rows.append((population_hash, name, supersedes))
+        members[population_hash] = set(json.loads(snapshot_json)["members"])
+    return set(_retired(rows, members))
 
 
 SUPERSEDES_LIVE = "live"

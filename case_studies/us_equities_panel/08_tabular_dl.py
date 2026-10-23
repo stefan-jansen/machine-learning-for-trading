@@ -91,6 +91,7 @@ import polars as pl
 import yaml
 
 from case_studies.research import (
+    SUPERSEDES_LIVE,
     candidate_set_supersedes,
     open_study,
     plan_models,
@@ -109,7 +110,7 @@ COMMON_OVERRIDES = {}
 CONFIG_OVERRIDES = {}
 DIAGNOSTIC_CONFIG_NAMES = ["tabm_s"]
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION = ""
+SUPERSEDES_POPULATION = SUPERSEDES_LIVE
 SUPERSEDES_SETS: dict = {}
 DEVICE = "cuda"
 EXECUTION_TIER = "canonical"
@@ -296,12 +297,14 @@ planned_population
 # declaration that is verified and then discarded with its workspace, so no notebook here has to
 # branch on the tier to decide what to publish.
 #
-# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is a set of
-# prediction identities, so anything that moves a training identity - a changed preset as much as a
-# changed menu - produces a different population under the same name, and the registry refuses to
-# write it without being told which snapshot it supersedes. Leaving it empty is right for a first
-# run and for a reader's clean clone, and `supersedes_for_run` withholds a declared hash wherever
-# offering it would be refused.
+# `SUPERSEDES_POPULATION` declares that this run intends to extend the lineage published under
+# this name. A population is a set of prediction identities, so anything that moves a training
+# identity - a changed preset as much as a changed menu - produces a different population under
+# the same name, and the registry refuses to write it without being told which snapshot it
+# supersedes. `SUPERSEDES_LIVE` declares the intent without quoting a hash, which would have to
+# equal a value the registry moves on every publish, and `supersedes_for_run` withholds the
+# declaration wherever offering it would be refused - a first run, a reader's clean clone, a
+# preview.
 
 # %%
 population_name = POPULATION_NAME or "us-equities-tabular-dl-checkpoints-v1"

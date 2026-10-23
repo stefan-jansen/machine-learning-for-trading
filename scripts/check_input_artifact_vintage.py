@@ -76,6 +76,7 @@ from case_studies.utils.registry.registration import (  # noqa: E402
     _registered_artifact_shas,
     input_artifact_vintage_conflicts,
 )
+from scripts.registry_store_root import registry_store_root  # noqa: E402
 from utils.artifact_specs import load_feature_spec, load_label_spec  # noqa: E402
 from utils.modeling import (
     _sha256_file,  # noqa: E402
@@ -107,7 +108,14 @@ class Finding:
 
 
 def _default_artifacts_root() -> Path:
-    return Path.home() / "ml4t" / "artifacts" / "case_studies"
+    """Derived from a resolved ``run_log``, never a fixed path.
+
+    This was a hardcoded ``~/ml4t/artifacts/case_studies`` until 2026-10-19, which the
+    2026-09-24 consolidation had deleted, so every run reported ``0 artifact/label pair(s)``
+    and exited zero whatever the registries held. :mod:`scripts.registry_store_root` has the
+    measurement and what it cost.
+    """
+    return registry_store_root(REPO_ROOT)
 
 
 def _relative(spec: dict | None, default: str) -> str:

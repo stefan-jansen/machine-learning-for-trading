@@ -140,10 +140,17 @@ print(f"ETFs: {len(df):,} rows, {len(FEATURE_COLS)} features, {n_folds} walk-for
 #
 # ### TabM: Rank-one Adapter MLP Ensemble
 #
-# TabM (Gorishniy et al., ICLR 2025) maintains a shared MLP backbone with
-# $M$ rank-one scaling adapters. Each adapter creates a diverse ensemble member
-# trained simultaneously. Individual members overfit; their average generalizes.
-# This implements the core idea with PyTorch directly.
+# TabM (Gorishniy et al., ICLR 2025) trains $M$ MLPs that share their weight
+# matrices and differ by rank-one adapters. Every linear layer multiplies its
+# input and its output by a per-member vector, so the nonlinearity that follows
+# sees a different pre-activation for each member and the members are different
+# functions of the input. The loss is the mean of the $M$ per-member losses, so
+# each member fits the target on its own and they overfit in different
+# directions; the prediction averages them. Placing the adapters after the last
+# nonlinearity instead, or training one loss on the averaged output, leaves a
+# single MLP: $\mathrm{mean}_i(W_i (a_i \odot h)) = \mathrm{mean}_i(W_i
+# \mathrm{diag}(a_i)) h$ is one linear readout of one backbone. This implements
+# the core idea with PyTorch directly.
 
 
 # %% [markdown]
@@ -151,37 +158,57 @@ print(f"ETFs: {len(df):,} rows, {len(FEATURE_COLS)} features, {n_folds} walk-for
 
 
 # %%
-class TabMModel(torch.nn.Module):
-    """Rank-1 adapter MLP ensemble for tabular data.
+class BatchEnsembleLinear(torch.nn.Module):
+    """One shared weight matrix that M members use differently.
 
-    Shared backbone + M rank-1 scaling vectors = efficient deep ensemble.
+    Member i computes s_i * (W @ (r_i * x)) + b_i from per-member rank-one
+    adapters r_i and s_i and a per-member bias (BatchEnsemble, Wen et al. 2020).
+    The adapters sit on this layer's input and output, before the nonlinearity
+    that follows, which is what keeps the members from collapsing into one
+    effective model.
     """
+
+    def __init__(self, n_in, n_out, n_members):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.empty(n_out, n_in))
+        torch.nn.init.kaiming_uniform_(self.weight, a=5**0.5)
+        bound = 1.0 / n_in**0.5
+        self.bias = torch.nn.Parameter(torch.empty(n_members, n_out).uniform_(-bound, bound))
+        # Random signs, not small random values: an adapter near zero starts its
+        # member near dead and every member relearns the same shared function.
+        signs = torch.randint(0, 2, (2, n_members, max(n_in, n_out))).float() * 2 - 1
+        self.input_adapter = torch.nn.Parameter(signs[0, :, :n_in].clone())
+        self.output_adapter = torch.nn.Parameter(signs[1, :, :n_out].clone())
+
+    def forward(self, x):
+        """(members, batch, n_in) -> (members, batch, n_out)."""
+        adapted = x * self.input_adapter.unsqueeze(1)
+        return adapted @ self.weight.T * self.output_adapter.unsqueeze(1) + self.bias.unsqueeze(1)
+
+
+class TabMModel(torch.nn.Module):
+    """M MLPs sharing their weight matrices, differing by rank-one adapters."""
 
     def __init__(self, n_features, hidden_dim=64, n_members=8):
         super().__init__()
         self.n_members: int = int(n_members)
-
-        # Shared backbone
-        self.backbone = torch.nn.Sequential(
-            torch.nn.Linear(n_features, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.ReLU(),
+        self.hidden = torch.nn.ModuleList(
+            [
+                BatchEnsembleLinear(n_features, hidden_dim, self.n_members),
+                BatchEnsembleLinear(hidden_dim, hidden_dim, self.n_members),
+            ]
         )
+        self.head = BatchEnsembleLinear(hidden_dim, 1, self.n_members)
 
-        # Per-member rank-1 adapters (scaling vectors for last hidden layer)
-        self.adapters = torch.nn.Parameter(torch.randn(n_members, hidden_dim) * 0.1)
-
-        # Per-member output heads
-        self.heads = torch.nn.ModuleList([torch.nn.Linear(hidden_dim, 1) for _ in range(n_members)])
+    def forward_members(self, x):
+        """(batch, n_features) -> (members, batch, 1). What the loss reads."""
+        h = x.unsqueeze(0).expand(self.n_members, -1, -1)
+        for layer in self.hidden:
+            h = torch.relu(layer(h))
+        return self.head(h)
 
     def forward(self, x):
-        h = self.backbone(x)  # (batch, hidden)
-        outputs = []
-        for i in range(self.n_members):
-            h_adapted = h * self.adapters[i].unsqueeze(0)  # rank-1 scaling
-            outputs.append(self.heads[i](h_adapted))
-        return torch.stack(outputs, dim=0).mean(dim=0)  # average ensemble
+        return self.forward_members(x).mean(dim=0)  # the ensemble prediction
 
 
 # %% [markdown]
@@ -209,8 +236,12 @@ def train_tabm(X_train, y_train, X_val, y_val, n_features, epochs=200, lr=1e-3, 
     for _ in range(epochs):
         model.train()
         optimizer.zero_grad()
-        pred = model(X_t)
-        train_loss = torch.nn.functional.l1_loss(pred, y_t)
+        members = model.forward_members(X_t)
+        # The mean of the M per-member losses, not one loss on their average: each
+        # member has to fit the target itself for the average to be worth taking.
+        train_loss = torch.nn.functional.l1_loss(
+            members, y_t.unsqueeze(0).expand(model.n_members, -1, -1)
+        )
         train_loss.backward()
         optimizer.step()
 

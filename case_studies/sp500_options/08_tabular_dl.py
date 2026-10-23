@@ -63,6 +63,7 @@ import plotly.graph_objects as go
 import polars as pl
 
 from case_studies.research import (
+    SUPERSEDES_LIVE,
     declared_labels,
     load_model_configs,
     model_requests,
@@ -85,7 +86,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_POPULATION: str = SUPERSEDES_LIVE
 DEVICE: str = ""
 
 # %%
@@ -210,9 +211,12 @@ plan.select(
 # best of a hyperparameter search as a single experiment. The stopping point is a free parameter
 # like any other, so it is carried into the comparison and paid for there.
 #
-# `SUPERSEDES_POPULATION` names an earlier snapshot this run replaces. It is empty because this
-# population has no predecessor; a re-fit under a corrected parameter would set it, and the value
-# is part of what the population is hashed over.
+# `SUPERSEDES_POPULATION` declares that this run intends to extend the lineage published under
+# this name, which is what a re-fit under a corrected parameter has to say: the value is part of
+# what the population is hashed over, and the registry refuses a changed member list that names
+# no predecessor. `SUPERSEDES_LIVE` says it without quoting a hash, which would have to equal a
+# value the registry moves on every publish, and `supersedes_for_run` withholds it on a reader's
+# clean clone and in a preview, where there is no lineage to extend.
 
 # %%
 population_name = POPULATION_NAME or "sp500-options-tabular-dl-validation-v1"

@@ -87,6 +87,7 @@ import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import (
     ALL_LABELS,
+    OFFICIAL_POPULATION,
     declared_contracts,
     freeze_official_model_population,
     model_request_catalog,
@@ -95,14 +96,18 @@ from case_studies.crypto_perps_funding.research_workflow import (
     plan_specs,
     run_model_plan,
 )
+from case_studies.research import SUPERSEDES_LIVE, supersedes_for_run
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
-SUPERSEDES_POPULATION: str = ""
-# The generation of this notebook's own checkpoint population that this run replaces, if any.
-# Distinct from SUPERSEDES_POPULATION above, which is the case-wide official model population:
-# the two are separate declarations and a refit can move either without moving the other.
-SUPERSEDES_MODEL_POPULATION: str = ""
+# That this run intends to extend the lineage published under the case-wide official model
+# population's name. `SUPERSEDES_LIVE` says so without quoting a hash, which would have to equal
+# a value the registry moves on every publish; `supersedes_for_run` resolves it against the
+# registry and withholds it on a clean clone or under a preview.
+SUPERSEDES_POPULATION: str = SUPERSEDES_LIVE
+# The same declaration for this notebook's own checkpoint population, which is a separate
+# lineage: a refit can move either without moving the other.
+SUPERSEDES_MODEL_POPULATION: str = SUPERSEDES_LIVE
 WORKSPACE = os.environ.get("ML4T_OUTPUT_DIR", "")
 LABELS = ALL_LABELS
 PREVIEW_REDUCTIONS = {}
@@ -133,7 +138,15 @@ OVERRIDES = {"class_weight": "balanced", "device": "cuda"}
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 official_population = (
-    freeze_official_model_population(study, supersedes=SUPERSEDES_POPULATION or None)
+    freeze_official_model_population(
+        study,
+        supersedes=supersedes_for_run(
+            study,
+            population_name=OFFICIAL_POPULATION,
+            declared=SUPERSEDES_POPULATION or None,
+            execution_tier=EXECUTION_TIER,
+        ),
+    )
     if EXECUTION_TIER == "canonical"
     else None
 )
@@ -198,7 +211,12 @@ if official_population is not None:
 # %% tags=["results"]
 execution = run_model_plan(
     plan,
-    supersedes=SUPERSEDES_MODEL_POPULATION or None,
+    supersedes=supersedes_for_run(
+        study,
+        population_name="crypto-tabm-validation-predictions-v1",
+        declared=SUPERSEDES_MODEL_POPULATION or None,
+        execution_tier=EXECUTION_TIER,
+    ),
     population_name="crypto-tabm-validation-predictions-v1"
     if EXECUTION_TIER == "canonical"
     else None,
