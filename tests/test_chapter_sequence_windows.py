@@ -119,3 +119,44 @@ def test_both_builders_cover_the_same_rows(dl_sequences, panel: pl.DataFrame) ->
         plain[0][order_plain].reshape(len(plain[0]), -1),
         patched[0][order_patched].reshape(len(patched[0]), -1),
     )
+
+
+def test_the_earliest_window_is_the_one_that_fits(dl_sequences, panel: pl.DataFrame) -> None:
+    """The first full window ends on row lookback - 1, not on row lookback.
+
+    Moving the window's end onto the target row freed one row at the start of each
+    symbol: rows 0 to lookback - 1 are a complete window dated lookback - 1. Both
+    loops kept starting at lookback, so each symbol's oldest usable sample was
+    dropped - silently, because the output is still well formed.
+    """
+    lookback = 4
+    for builder, args in (
+        (dl_sequences.create_sequences_multi_asset, ()),
+        (dl_sequences.create_patched_sequences_multi_asset, (2,)),
+    ):
+        X, _, timestamps, symbols = builder(panel, ["f0", "f1"], "target", lookback, *args)
+        for symbol in ("AAA", "BBB"):
+            own = timestamps[symbols == symbol]
+            expected = panel.filter(pl.col("symbol") == symbol).sort("timestamp")["timestamp"]
+            assert own.min() == expected[lookback - 1]
+            assert len(own) == len(expected) - (lookback - 1)
+        assert len(X) == 2 * (panel.height // 2 - (lookback - 1))
+
+
+def test_a_symbol_with_exactly_one_window_is_kept(dl_sequences, panel: pl.DataFrame) -> None:
+    """lookback rows are one window, and the length guard used to reject them.
+
+    The guard required lookback + 1 rows, which was right when the window stopped
+    before the target row and is one too many now. A symbol with exactly enough
+    history for a single sample was dropped from the panel entirely.
+    """
+    lookback = 4
+    short = panel.filter(pl.col("symbol") == "AAA").sort("timestamp").head(lookback)
+    for builder, args in (
+        (dl_sequences.create_sequences_multi_asset, ()),
+        (dl_sequences.create_patched_sequences_multi_asset, (2,)),
+    ):
+        X, y, timestamps, _ = builder(short, ["f0", "f1"], "target", lookback, *args)
+        assert len(X) == 1
+        assert timestamps[0] == short["timestamp"][lookback - 1]
+        assert y[0] == pytest.approx(short["target"][lookback - 1])

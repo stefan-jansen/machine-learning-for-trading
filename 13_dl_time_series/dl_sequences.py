@@ -198,7 +198,8 @@ def create_sequences_multi_asset(
     for symbol in symbols:
         sym_df = df.filter(pl.col(symbol_col) == symbol).sort(timestamp_col)
 
-        if len(sym_df) < lookback + 1:
+        # lookback rows are one window: rows 0 to lookback - 1 end on row lookback - 1.
+        if len(sym_df) < lookback:
             continue
 
         features = sym_df.select(feature_cols).to_numpy()
@@ -212,7 +213,7 @@ def create_sequences_multi_asset(
         # design row, and the Darts forecasters condition on the series through i. A
         # window of [i - lookback, i) would predict a return dated i from features that
         # stop the period before it.
-        for i in range(lookback, len(features)):
+        for i in range(lookback - 1, len(features)):
             X_list.append(features[i - lookback + 1 : i + 1])
             y_list.append(float(targets[i]))
             dates_list.append(timestamps[i])
@@ -270,7 +271,8 @@ def create_patched_sequences_multi_asset(
     for symbol in symbols:
         sym_df = df.filter(pl.col(symbol_col) == symbol).sort(timestamp_col)
 
-        if len(sym_df) < lookback + 1:
+        # lookback rows are one window: rows 0 to lookback - 1 end on row lookback - 1.
+        if len(sym_df) < lookback:
             continue
 
         features = sym_df.select(feature_cols).to_numpy()
@@ -278,7 +280,7 @@ def create_patched_sequences_multi_asset(
         timestamps = sym_df[timestamp_col].to_numpy()
 
         # Same alignment as create_sequences_multi_asset: the window ends on row i.
-        for i in range(lookback, len(features)):
+        for i in range(lookback - 1, len(features)):
             seq = features[i - lookback + 1 : i + 1]
             patched = seq.reshape(n_patches, patch_size * len(feature_cols))
             X_list.append(patched)
