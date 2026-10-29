@@ -646,6 +646,15 @@
     N_HEADS: 2
     N_LAYERS: 1
   timeout: 300
+# VRAM for the six 13_dl_time_series stems that build windows through dl_sequences.py.
+# Each imports torch and declares no PUBLISHED_DEVICE, so nb-run's VRAM gate could not tell
+# whether the run needed the card and warned on every launch. Measured 2026-10-23 on the RTX
+# 3090 by sampling nvidia-smi every 5 s through a full re-render of all six, sequentially, and
+# subtracting the idle baseline of another tenant's 2,209 MiB: 06_tsmixer 3,307 MiB (Darts and
+# lightning, the widest), 10_uncertainty 1,696, 04_transformers 1,487, 07_mamba_ssm 1,119,
+# 05_tcn ~1,050, 08_cnn_image_encoding 962. Declared value is that peak plus the CUDA context
+# and allocator fragmentation, rounded up. These are the chapter presets, not the CI parameters
+# above, which train far smaller models.
 13_dl_time_series/04_transformers:
   parameters:
     BATCH_SIZE: 64
@@ -656,6 +665,7 @@
     N_LAYERS: 1
     PATCH_SIZE: 6
   timeout: 300
+  vram_gb: 3
 13_dl_time_series/05_tcn:
   parameters:
     BATCH_SIZE: 64
@@ -663,6 +673,7 @@
     LOOKBACK: 12
     N_CHANNELS: 16
   timeout: 300
+  vram_gb: 3
 13_dl_time_series/06_tsmixer:
   parameters:
     BATCH_SIZE: 64
@@ -671,6 +682,7 @@
     LOOKBACK: 12
     N_LAYERS: 1
   timeout: 300
+  vram_gb: 5
 13_dl_time_series/07_mamba_ssm:
   parameters:
     BATCH_SIZE: 64
@@ -683,6 +695,7 @@
     MAX_VAL_SAMPLES: 2000
     N_LAYERS: 1
   timeout: 300
+  vram_gb: 3
 13_dl_time_series/08_cnn_image_encoding:
   parameters:
     BATCH_SIZE: 64
@@ -693,6 +706,7 @@
     MAX_TRAIN_SAMPLES: 5000
     MAX_VAL_SAMPLES: 2000
   timeout: 300
+  vram_gb: 3
 13_dl_time_series/09_foundation_models:
   parameters:
     BATCH_SIZE: 64
@@ -714,6 +728,7 @@
     MC_SAMPLES: 5
     N_ENSEMBLE: 2
   timeout: 300
+  vram_gb: 3
 13_dl_time_series/11_library_landscape:
   parameters:
     BATCH_SIZE: 64
