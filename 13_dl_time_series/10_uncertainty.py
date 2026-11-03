@@ -77,6 +77,7 @@ from utils.reproducibility import set_global_seeds
 from utils.style import (  # COLORS activates the ml4t Plotly template on import
     COLORS,
     show_plotly_with_alt,
+    style_subplot_titles,
 )
 
 # %% tags=["parameters"]
@@ -583,6 +584,7 @@ fig.update_layout(
     title_text="MC Dropout: predicted spread against error, and against the return scale",
     showlegend=True,
 )
+style_subplot_titles(fig)
 show_plotly_with_alt(
     fig,
     "Two panels. The left scatters absolute prediction error against the predicted "
@@ -844,6 +846,7 @@ fig.update_layout(
     height=400,
     title_text="Individual ensemble members, and the distribution of their disagreement",
 )
+style_subplot_titles(fig)
 show_plotly_with_alt(
     fig,
     "Two panels. The left plots each ensemble member's predictions over a slice of "
@@ -919,6 +922,7 @@ fig.update_layout(
     height=400,
     title_text="Predicted uncertainty against absolute error, for both methods",
 )
+style_subplot_titles(fig)
 show_plotly_with_alt(
     fig,
     "Two scatter panels on matching axes, absolute error against predicted standard "
@@ -1217,8 +1221,8 @@ filter_df
 # survive reruns is the calibration story from the uncertainty-error
 # correlation: the ensemble's disagreement tracks error more reliably than MC
 # Dropout's dropout-spread. The ensemble result supports position sizing
-# (Chapter 19): scale exposure inversely with ensemble uncertainty, even when
-# simple quartile filtering moves IC only a few thousandths.
+# (Chapter 19): scale exposure inversely with ensemble uncertainty, which uses
+# the ordering the correlation establishes rather than the filtering table's.
 
 # %% [markdown]
 # ### Where this connects

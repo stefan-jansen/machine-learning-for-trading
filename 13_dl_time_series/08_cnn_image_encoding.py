@@ -681,7 +681,11 @@ for model_name, ic_value, mse_ratio in zip(model_names, ic_values, mse_ratios, s
             name=model_name,
             marker_color=bar_palette[model_name],
             text=[f"{mse_ratio:.2f}x"],
-            textposition="outside",
+            # Inside the bar, because the dotted reference line sits at 1 and an
+            # outside label on a bar near that level renders struck through by it.
+            textposition="inside",
+            insidetextanchor="end",
+            textfont=dict(color=COLORS["bg_light"]),
             showlegend=False,
         ),
         row=1,
