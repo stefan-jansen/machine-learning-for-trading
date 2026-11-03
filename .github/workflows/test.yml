@@ -549,6 +549,25 @@ jobs:
           source .venv/bin/activate
           python .github/scripts/check_notebook_prose.py --selftest
           python .github/scripts/check_notebook_prose.py
+      # A result number typed into prose does not move when the notebook is
+      # re-executed, so the sentence and the output beside it disagree and nothing
+      # here could see it: the value is markdown, so ruff, the formatter and the
+      # notebook tests all stay green. Where clause N1/N2 holds, re-rendering a
+      # notebook costs a look at its figures and no read of its prose at all;
+      # measured over PR #1168's seven re-rendered pages, zero numbers to check.
+      #
+      # Gated against NEW sites only. `.github/ci/prose-numerals.txt` lists the 280
+      # that exist today across 58 files, because the fix is a code-cell change that
+      # costs a re-execution, and because the 2026-09-11 ruling that introduced the
+      # clause says to apply it to what you are touching and sweep nothing. The list
+      # may only shrink: a site that is gone fails too. ~4 s, stdlib-only over the
+      # jupytext sources. `--selftest` first: four cases that must fire, ten that
+      # must not, and the tagging exemption in both directions.
+      - name: A result number is in a figure, a table or a results cell, not in prose
+        run: |
+          source .venv/bin/activate
+          python .github/scripts/check_prose_numerals.py --selftest
+          python .github/scripts/check_prose_numerals.py
       - name: Notebook output hygiene
         run: |
           source .venv/bin/activate
