@@ -17,8 +17,11 @@ The function expects the same canonical OHLCV schema produced by
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import polars as pl
+import yaml
 from ml4t.engineer.features.momentum import adx, aroon, cci, macd, rsi, stochastic
 from ml4t.engineer.features.regime import choppiness_index, hurst_exponent
 from ml4t.engineer.features.trend import ema, sma
@@ -28,7 +31,20 @@ from ml4t.engineer.features.volume import obv
 MOMENTUM_HORIZONS = [5, 10, 21, 42, 63, 126, 189, 252]
 VOLATILITY_HORIZONS = [21, 63, 126, 252]
 RANK_FEATURES = ["ret_126d", "sharpe_126d", "vol_63d"]
-REGIME_THRESHOLD = 0.005
+
+# The regime threshold, the macro availability lag and the z-score window are the case
+# study's, read from its own setup rather than retyped here: this module claims to mirror
+# `case_studies/etfs/03_financial_features.py`, and a second copy of a number is how the
+# two drift apart.
+_SETUP = yaml.safe_load(
+    (
+        Path(__file__).resolve().parents[1] / "case_studies" / "etfs" / "config" / "setup.yaml"
+    ).read_text()
+)
+REGIME_THRESHOLD = _SETUP["features"]["regime_threshold"]
+CURVE_ZSCORE_WINDOW = _SETUP["features"]["state"]["curve_zscore"]
+MACRO_LAG_DAYS = _SETUP["modeling"]["latent_factors"]["macro_context"]["availability_lag_days"]
+EPS = 1e-8
 
 EXCLUDE_COLS = {
     "timestamp",
@@ -254,23 +270,38 @@ def _add_cross_sectional_ranks(df: pl.DataFrame) -> pl.DataFrame:
 def _add_regime_indicators(
     df: pl.DataFrame, yield_curve: pl.DataFrame, threshold: float = REGIME_THRESHOLD
 ) -> pl.DataFrame:
-    # Sort BEFORE the rolling computation: rolling_mean / rolling_std use the
-    # incoming row order, and the trailing .sort() only orders the output —
-    # not the rolling-window inputs. A caller that hands us an unsorted frame
-    # would otherwise compute yield_curve_zscore on shuffled values.
+    """Attach the three curve indicators, on the session calendar and behind the lag.
+
+    Two steps have to happen in this order, both taken from the case study.
+
+    The Treasury spread describing a day is published after that day has ended, so each
+    value is re-stamped with the date it becomes readable before any session reads it.
+    Joining on the session's own date instead puts a value in the training panel that the
+    deployment loop cannot have at the close, and serves the model a different one.
+
+    The stamped series is then reduced to the trading calendar BEFORE the z-score window
+    runs. The Treasury frame carries a row for every calendar day, so a 252-row window
+    taken over it counts weekends and spans about 180 sessions.
+    """
+    available = yield_curve.select(
+        pl.col("timestamp").dt.offset_by(f"{MACRO_LAG_DAYS}d"), "slope"
+    ).sort("timestamp")
     regime_df = (
-        yield_curve.sort("timestamp")
-        .with_columns(
+        df.select("timestamp")
+        .unique()
+        .sort("timestamp")
+        .join_asof(available, on="timestamp", strategy="backward")
+        .select(
+            "timestamp",
             pl.when(pl.col("slope") > threshold).then(1).otherwise(0).alias("regime"),
             pl.col("slope").alias("yield_curve_slope"),
             (
-                (pl.col("slope") - pl.col("slope").rolling_mean(252))
-                / pl.col("slope").rolling_std(252)
+                (pl.col("slope") - pl.col("slope").rolling_mean(CURVE_ZSCORE_WINDOW))
+                / pl.col("slope").rolling_std(CURVE_ZSCORE_WINDOW).clip(lower_bound=EPS)
             ).alias("yield_curve_zscore"),
         )
-        .select(["timestamp", "regime", "yield_curve_slope", "yield_curve_zscore"])
     )
-    return df.sort("timestamp").join_asof(regime_df, on="timestamp", strategy="backward")
+    return df.join(regime_df, on="timestamp", how="left")
 
 
 def compute_financial_features(prices: pl.DataFrame, yield_curve: pl.DataFrame) -> pl.DataFrame:
