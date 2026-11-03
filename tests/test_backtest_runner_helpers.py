@@ -590,3 +590,73 @@ def test_a_zero_weight_needs_no_outcome() -> None:
     """A zero weight is not a position: its outcome cannot move any number here."""
     out = _vectorized_with_missing_outcome(0.0)
     assert out["daily_returns"].height == 3
+
+
+# The two label values below are read off
+# ~/Dropbox/ml4t/case-studies/us_firm_characteristics/labels/fwd_ret_1m.parquet, which is the
+# panel every us_firm_characteristics backtest takes its `y_true` from: +18.9975 is its largest
+# one-month forward return (stock_id 2001992, 1993-08-31) and -0.960633 is its smallest. The
+# panel holds 1,723 returns above +100% and 20 above +500%, so a top-5 short leg reaches the
+# first class of value whenever it picks one of those names.
+_PANEL_MAX_FWD_RET_1M = 18.9975
+_PANEL_MIN_FWD_RET_1M = -0.960633
+
+
+def _vectorized_long_short(short_weight: float, short_outcome: float) -> dict:
+    """One long and one short over three rebalance dates, with real panel outcomes."""
+    from case_studies.utils.backtest_runner import _run_vectorized
+
+    dates = [datetime(2024, 1, i) for i in (2, 3, 4)]
+    weights = pl.DataFrame(
+        {
+            "timestamp": dates * 2,
+            "symbol": ["AAA"] * 3 + ["BBB"] * 3,
+            "weight": [0.5, 0.5, 0.5] + [short_weight, short_weight, short_weight],
+        }
+    )
+    outcomes = pl.DataFrame(
+        {
+            "timestamp": dates * 2,
+            "symbol": ["AAA"] * 3 + ["BBB"] * 3,
+            "y_true": [0.01, 0.02, -0.01] + [short_outcome, 0.0, 0.0],
+        }
+    ).with_columns(y_pred=pl.col("y_true"))
+    return _run_vectorized(
+        weights=weights,
+        predictions=outcomes,
+        prices=pl.DataFrame(
+            {"timestamp": dates * 2, "symbol": ["AAA"] * 3 + ["BBB"] * 3, "close": 100.0}
+        ),
+        cost_spec={"model": "percentage", "commission_bps": 0.0, "slippage_bps": 0.0},
+        cadence="daily",
+        label="fwd_ret_1m",
+        case_study="us_firm_characteristics",
+        initial_cash=1e6,
+        prediction_hash=None,
+        rebalance_step=1,
+    )
+
+
+def test_a_short_whose_outcome_exceeds_its_own_notional_stops_the_run() -> None:
+    """A period return below -100% was registered as a result rather than refused.
+
+    ``gross_ret = sum(weight * y_true)`` has no broker behind it, so a short position's
+    loss is unbounded over the holding period: 46 of the 2,620 registered
+    us_firm_characteristics backtests carry a month worse than -100%, worst -168.9%,
+    while the account spec they ran under forbids leverage and sets a short maintenance
+    margin the position would have been closed against.
+    """
+    with pytest.raises(ValueError, match="lose more than the whole account"):
+        _vectorized_long_short(short_weight=-0.5, short_outcome=_PANEL_MAX_FWD_RET_1M)
+
+
+def test_a_long_book_at_the_panels_worst_outcome_is_bounded_and_runs() -> None:
+    """A fully invested long book cannot reach -100%, so the guard must not fire on one.
+
+    Both names held long at 0.5 against the panel's smallest forward return bound the
+    period at -96.1%, which is a loss a position can produce.
+    """
+    out = _vectorized_long_short(short_weight=0.5, short_outcome=_PANEL_MIN_FWD_RET_1M)
+    assert out["daily_returns"].height == 3
+    worst = out["daily_returns"]["daily_return"].min()
+    assert -1.0 < worst < -0.4, worst
