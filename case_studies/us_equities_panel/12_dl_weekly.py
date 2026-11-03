@@ -41,10 +41,12 @@
 #   week at a time and carries a hidden state forward; `nlinear` normalizes the window by its last
 #   value and applies a single linear map. Neither has any notion that its output is a future
 #   value of one of its inputs.
-# - **One-step forecasting** treats the window as the history of a time series and asks for its
-#   next value. `NBEATSModel`, from the Darts library, is built for that formulation: a stack of
-#   blocks that each fit a piece of the signal and pass the remainder to the next.
-#   `darts_output_chunk_length=1` is what makes it predict a single week rather than a sequence.
+# - **One-step forecasting** treats the label itself as a time series and asks for the next value
+#   of it that nobody has observed yet. `NBEATSModel`, from the Darts library, is built for that
+#   formulation: a stack of blocks that each fit a piece of the signal and pass the remainder to
+#   the next. The series it reads is each Friday's `fwd_ret_5d` carried two observations later,
+#   because a return dated one Friday is only resolved on the next, and the two-step block it is
+#   asked for brings the forecast back to the Friday being predicted.
 #
 # The comparison is therefore between two ways of writing down the same prediction, at a frequency
 # where the second is well posed. On a daily grid it would not be: N-BEATS asked for five days
@@ -106,6 +108,7 @@ from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.modeling import (
     RANDOM_SEED,
     build_modeling_input_lineage,
+    load_configs,
     reduce_to_top_entities,
     seed_everything,
 )
@@ -504,42 +507,67 @@ print(f"  mean validation IC: {pytorch_result['best_ic']:.4f}")
 # %% [markdown]
 # ## The forecasting arm
 #
-# `NBEATSModel` treats the window as the history of a series and predicts its next value. Its
-# blocks each fit part of the signal and hand the remainder to the next block, so the fit is built
-# up as a sum of pieces rather than as one map from window to output.
+# `NBEATSModel` treats its target as a time series and predicts the next values of it. Its blocks
+# each fit part of the signal and hand the remainder to the next block, so the fit is built up as
+# a sum of pieces rather than as one map from window to output.
 #
-# `darts_output_chunk_length=1` is the setting that makes this one-step. Asked for five steps on a
-# daily grid the same model would feed its own output back in four times, and each of those
-# passes carries the previous error forward - which is the compounding a weekly grid removes by
-# construction rather than by choosing a better model.
+# **The series is the label, carried two observations later than the Friday it belongs to.**
+# `fwd_ret_5d` dated a Friday is resolved on the next one, so a series that placed each return on
+# its own Friday would hold a value the decision date could not have seen. `darts_target:
+# lagged_label` defers it instead: the most recent value the series holds at a given Friday was
+# resolved the Friday before, and `darts_output_chunk_length: 2` asks for the two-step block whose
+# far end is the return that Friday earns. The features are a separate input - past covariates
+# read through the decision Friday itself - so what the lag defers is the target history, not the
+# window.
+#
+# **The two steps are one forward pass.** Asked for five daily steps with an output length of one,
+# the same model would feed its own output back in four times and carry each error forward; here
+# both steps come out of one pass, which is the compounding a weekly grid removes by construction
+# rather than by choosing a better model.
 #
 # Both arms read the same rows over the same horizon with the same lookback, so the difference
 # between them is the formulation and nothing else.
 
 # %%
+# The configuration is the case study's own, not a second copy of it written out here. The target
+# mode, the forecast length and the cadence are what make the series line up with the label, and
+# a notebook free to declare its own would be free to disagree with the declaration every other
+# reader of this case study sees.
+NBEATS_CONFIG_NAME = "nbeats_weekly"
+_declared = {
+    cfg["config_name"]: cfg for cfg in load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "deep_learning")
+}
+if NBEATS_CONFIG_NAME not in _declared:
+    raise ValueError(
+        f"{NBEATS_CONFIG_NAME!r} is not declared under deep_learning in "
+        f"config/training/{PRIMARY_LABEL}.yaml; declared: {sorted(_declared)}"
+    )
+_preset = _declared[NBEATS_CONFIG_NAME]
 darts_configs = [
     {
-        "config_name": "nbeats",
-        "family": "deep_learning",
-        "library": "darts",
+        **_preset,
+        # The run-level values this notebook's parameters govern. Everything that decides what
+        # the model is - architecture, target mode, forecast length, cadence, block shape - comes
+        # from the preset untouched.
         "n_epochs": N_EPOCHS,
         "batch_size": BATCH_SIZE,
         "checkpoint_interval": 5,
         "params": {
-            "architecture": "nbeats",
+            **_preset["params"],
             "lookback": LOOKBACK,
-            "hidden_size": 128,
-            "n_blocks": 3,
-            "n_layers": 4,
-            "dropout": 0.1,
-            # Weekly-specific: predict 1 step (1 week) instead of default 5 days
-            "darts_output_chunk_length": 1,
             "darts_input_chunk_length": LOOKBACK,
         },
     }
 ]
+print(
+    f"{NBEATS_CONFIG_NAME}: {darts_configs[0]['library']} "
+    f"{darts_configs[0]['params']['architecture']}, target "
+    f"{darts_configs[0]['params']['darts_target']}, forecast "
+    f"{darts_configs[0]['params']['darts_output_chunk_length']} steps on a "
+    f"{darts_configs[0]['params']['decision_cadence']} grid"
+)
 
-print(f"Running DARTS N-BEATS (1-step weekly forecasting) on {device}...")
+print(f"Running DARTS N-BEATS (weekly one-step forecasting) on {device}...")
 
 # %%
 darts_result = run_dl_cv(
@@ -704,7 +732,7 @@ for r in pytorch_result["grid_results"]:
     )
 all_results.append(
     {
-        "model": "nbeats (DARTS)",
+        "model": f"{NBEATS_CONFIG_NAME} (DARTS)",
         "approach": "1-step forecasting",
         "ic": darts_result["best_ic"],
         "epoch": darts_result["best_epoch"],
