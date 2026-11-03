@@ -301,9 +301,13 @@ RUIN_UNRANKABLE_METRICS: tuple[str, ...] = (
 def first_ruin_index(returns) -> int | None:
     """Index of the first period whose loss takes cumulative equity to zero.
 
-    ``None`` when the path stays solvent. A period return below -100% is not by
-    itself ruin - prior gains can absorb it - so the test is on the equity curve
-    rather than on any single return.
+    ``None`` when the path stays solvent. The test is on the equity curve rather
+    than on any single return, because a path can be taken out by an ordinary run
+    of losses and no one of them is the one that did it. Prior gains do not absorb
+    a period at or below -100%: ``1 + r <= 0`` multiplies a solvent equity to zero
+    or below whatever it had accumulated, so such a period always ruins the path
+    it appears in. ``_run_vectorized`` refuses that period rather than letting it
+    reach here, since no position produces it.
     """
     arr = np.asarray(returns, dtype=float)
     if arr.size == 0:
@@ -2612,6 +2616,52 @@ def _run_vectorized(
                         f"{port_ret['timestamp'].min()} → {port_ret['timestamp'].max()})."
                     )
                 port_ret = port_ret_filtered
+
+    # A single period cannot take more than the whole account, and this path can say it did.
+    #
+    # `gross_ret` above is `sum(weight * y_true)` and nothing else: there is no broker, no
+    # margin and no position state between two rebalance dates, so a short position's loss
+    # is unbounded in that product. A short at -1/5 against a one-month forward return of
+    # +8.44 contributes -1.69, and the period is registered as a 169% loss. Every spec that
+    # reaches here declares `account.allow_leverage: false` and a short maintenance margin
+    # (0.3 in us_firm_characteristics), against which the broker would have closed the
+    # position inside the month; `_run_vectorized` never reads `backtest_config.account`.
+    #
+    # Measured 2026-11-03 on us_firm_characteristics, the one case study that runs long/short
+    # on this path: 46 of its 2,620 registered backtests carry a month below -100%, worst
+    # -168.9%. Its `fwd_ret_1m` panel holds 1,723 returns above +100% and 20 above +500%, so
+    # a top-5 short leg reaches this whenever it picks one. The four other long/short case
+    # studies - cme_futures, crypto_perps_funding, nasdaq100_microstructure,
+    # us_equities_panel - are all `mode: engine` and none of them produces a period below
+    # -100%, because the engine closes the position.
+    #
+    # So the run stops. Capping the loss at -100% would be a liquidation model, and the price
+    # at which a liquidation fills is intra-period state this path does not have; recording it
+    # concedes a return no position can produce. A long-only book cannot reach here at all: a
+    # fully invested long book is bounded below by the worst outcome it holds.
+    broke_the_account = port_ret.filter(pl.col("gross_ret") < -1.0)
+    if not broke_the_account.is_empty():
+        worst = (
+            bt.join(broke_the_account.select("timestamp"), on="timestamp", how="semi")
+            .with_columns(contribution=pl.col("weight") * pl.col("y_true"))
+            .sort("contribution")
+            .head(3)
+        )
+        named = ", ".join(
+            f"{row['symbol']}@{row['timestamp']} weight={row['weight']:+.4f} "
+            f"y_true={row['y_true']:+.4f} -> {row['contribution']:+.4f}"
+            for row in worst.iter_rows(named=True)
+        )
+        worst_period = float(broke_the_account["gross_ret"].min())
+        raise ValueError(
+            f"{case_study}/{label}: {broke_the_account.height} of {port_ret.height} periods "
+            f"lose more than the whole account, worst {worst_period:.4f}. The largest "
+            f"contributions are {named}. This path computes sum(weight * y_true) with no "
+            "broker between rebalance dates, so a short position's loss is unbounded, while "
+            "the account spec forbids leverage and sets a short maintenance margin the "
+            "position would have been closed against. Bound the short leg, or run this "
+            "configuration on the engine path, which holds the positions it prices."
+        )
 
     # Apply portfolio-level risk overlays (post-hoc on return series)
     trigger_log = RiskTriggerLog()
