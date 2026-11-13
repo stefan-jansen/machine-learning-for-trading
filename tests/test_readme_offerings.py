@@ -352,3 +352,49 @@ def test_a_generated_free_lesson_has_its_native_campaign_and_stays_a_direct_sign
     assert target.path == "/p/166231"
     assert parse_qs(target.query)["utm_campaign"] == ["agent_ll_20261021"]
     assert parse_qs(target.query)["utm_content"] == ["readme_lesson_166231"]
+
+
+def test_research_series_links_to_the_series_while_members_are_upcoming():
+    props = _props([], [])
+    props["free_items"]["items"] = [
+        {
+            "slug": "4a6aef",
+            "title": "Build a Research Agent",
+            "start_datetime": "2026-11-12T16:00:00Z",
+        },
+        {"slug": "bb56cd", "title": "Open-Source Tools", "start_datetime": "2026-11-25T16:00:00Z"},
+    ]
+    now = datetime(2026, 11, 12, 20, tzinfo=UTC)
+    block = offerings.render_all(*offerings.collect(props, now))
+    target = urlsplit(re.search(r"https://maven.com/lls/4a6aef[^)]+", block).group())
+    assert parse_qs(target.query) == {
+        "utm_source": ["github"],
+        "utm_medium": ["readme"],
+        "utm_campaign": ["lesson_4a6aef"],
+        "utm_content": ["readme_lesson_4a6aef"],
+    }
+    assert "/p/4a6aef" not in block
+    assert "/p/bb56cd" in block
+    after = datetime(2026, 11, 25, 17, tzinfo=UTC)
+    assert "/lls/4a6aef" not in offerings.render_all(*offerings.collect(props, after))
+
+
+def test_december_trading_workshop_offer_keeps_tracking_and_expires_in_eastern_time():
+    props = _props(
+        [_course(1, "ml4t-ai-agents", "Trading workshop")],
+        [_cohort(1, "2026-12-12T15:00:00Z")],
+    )
+    before_cutoff = datetime(2026, 12, 1, 4, 59, tzinfo=UTC)
+    block = offerings.render_all(*offerings.collect(props, before_cutoff))
+    target = urlsplit(re.search(r"\[Trading workshop\]\(([^)]+)\)", block).group(1))
+    assert parse_qs(target.query) == {
+        "promoCode": ["ML4T-WS-50"],
+        "utm_source": ["github"],
+        "utm_medium": ["readme"],
+        "utm_campaign": ["trading_workshop_20261212"],
+        "utm_content": ["readme_offering_ml4t_ai_agents"],
+    }
+    cutoff = datetime(2026, 12, 1, 5, tzinfo=UTC)
+    assert "promoCode" not in offerings.render_all(*offerings.collect(props, cutoff))
+    props["course_cohorts"] = [_cohort(1, "2027-01-23T15:00:00Z")]
+    assert "promoCode" not in offerings.render_all(*offerings.collect(props, before_cutoff))

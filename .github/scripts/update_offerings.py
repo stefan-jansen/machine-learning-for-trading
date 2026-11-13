@@ -40,7 +40,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
@@ -54,6 +54,10 @@ _tag_spec = importlib.util.spec_from_file_location(
 marketing_links = importlib.util.module_from_spec(_tag_spec)
 _tag_spec.loader.exec_module(marketing_links)
 EASTERN = ZoneInfo("America/New_York")
+RESEARCH_SERIES_ID = "4a6aef"
+RESEARCH_SERIES_LESSONS = {"cf69b8", "b7d06f", "bb56cd"}
+TRADING_OFFER_START = datetime(2026, 11, 1, tzinfo=EASTERN)
+TRADING_OFFER_END = datetime(2026, 12, 1, tzinfo=EASTERN)
 USER_AGENT = "ml4t-readme-offerings"
 
 NEXT_DATA_RE = re.compile(
@@ -163,7 +167,7 @@ def collect(props: dict, now: datetime) -> tuple[list[dict], list[dict], list[di
     lessons = []
     for item in props.get("free_items", {}).get("items", []):
         start = parse_instant(item.get("start_datetime"))
-        if start is None or start <= now:
+        if item["slug"] == RESEARCH_SERIES_ID or start is None or start <= now:
             continue
         lessons.append(
             {
@@ -201,11 +205,19 @@ def collect(props: dict, now: datetime) -> tuple[list[dict], list[dict], list[di
         start = parse_instant(cohort.get("start_date"))
         if start is None or start <= now:
             continue
+        slug = course["course_slug"]
+        url = f"https://maven.com/stefan-jansen/{slug}"
+        if (
+            slug == "ml4t-ai-agents"
+            and start.astimezone(EASTERN).date() == date(2026, 12, 12)
+            and TRADING_OFFER_START <= now < TRADING_OFFER_END
+        ):
+            url += "?promoCode=ML4T-WS-50"
         cohorts.append(
             {
                 "title": course["course_name"],
-                "slug": course["course_slug"],
-                "url": f"https://maven.com/stefan-jansen/{course['course_slug']}",
+                "slug": slug,
+                "url": url,
                 "start": start,
                 "end": parse_instant(cohort.get("end_date")),
                 "format": course.get("course_format"),
@@ -343,6 +355,9 @@ def render_all(lessons: list[dict], cohorts: list[dict], standing: list[dict]) -
                 "url": item["url"],
                 "blurb": blurb_for(item),
             }
+        # A temporary cohort offer must survive the merge with other dates.
+        if "promoCode" in parse_qs(urlsplit(item["url"]).query):
+            row["url"] = item["url"]
         row["spans"].append(span(item["start"], item["end"]))
         row["starts"].append(item["start"])
     for row in merged.values():
@@ -358,6 +373,10 @@ def render_all(lessons: list[dict], cohorts: list[dict], standing: list[dict]) -
     for lesson in lessons:
         by_theme[theme_for_lesson(lesson["title"])]["lessons"].append(lesson)
 
+    has_upcoming_series_lesson = any(
+        urlsplit(lesson["url"]).path.rsplit("/", 1)[-1] in RESEARCH_SERIES_LESSONS
+        for lesson in lessons
+    )
     out: list[str] = []
     for theme in THEME_ORDER:
         group = by_theme[theme]
@@ -395,6 +414,19 @@ def render_all(lessons: list[dict], cohorts: list[dict], standing: list[dict]) -
                 f"**Free live sessions**, with the recording sent to everyone who registers: {sessions}",
                 "",
             ]
+
+    if has_upcoming_series_lesson:
+        series_url = marketing_links.build(
+            f"https://maven.com/lls/{RESEARCH_SERIES_ID}",
+            "github",
+            "readme",
+            f"lesson_{RESEARCH_SERIES_ID}",
+            f"readme_lesson_{RESEARCH_SERIES_ID}",
+        )
+        out += [
+            f"**Free lesson series:** [Build a Research Agent: Decisions, Workflows and Tools]({series_url})",
+            "",
+        ]
 
     if not out:
         out += [
