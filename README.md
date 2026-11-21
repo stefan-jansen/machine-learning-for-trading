@@ -111,10 +111,6 @@ The workflow this repository implements, taught end to end.
 
 Designing multi-agent systems whose reasoning can be audited.
 
-| When | Offering | What you leave with |
-|------|----------|---------------------|
-| Nov 21, 2026 | [Agent Engineering: Build, Evaluate, and Deploy AI Agents](https://maven.com/stefan-jansen/agent-engineering?utm_source=github&utm_medium=readme&utm_campaign=agent_workshop_20261121&utm_content=readme_offering_agent_engineering) | Go from agent fundamentals to a live multi-agent system, with an evaluation harness that says whether it works. |
-
 **Free live sessions**, with the recording sent to everyone who registers: [How to Evaluate AI Agents: From Traces to Release Decisions](https://maven.com/p/1829d6?utm_source=github&utm_medium=readme&utm_campaign=lesson_1829d6&utm_content=readme_lesson_1829d6) (Thu, Dec 10, 11:00 AM ET / 16:00 UTC) · [How to Build AI Agents with ReAct, Reflection and Planning](https://maven.com/p/c08373?utm_source=github&utm_medium=readme&utm_campaign=lesson_c08373&utm_content=readme_lesson_c08373) (Thu, Jan 7, 11:00 AM ET / 16:00 UTC)
 
 **Free lesson series:** [Build a Research Agent: Decisions, Workflows and Tools](https://maven.com/lls/4a6aef?utm_source=github&utm_medium=readme&utm_campaign=lesson_4a6aef&utm_content=readme_lesson_4a6aef)
