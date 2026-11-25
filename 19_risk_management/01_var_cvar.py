@@ -857,7 +857,7 @@ display(
 def drawdown_path(returns: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return cumulative wealth, running peak, and drawdown (negative %) series."""
     wealth = np.cumprod(1 + returns)
-    peak = np.maximum.accumulate(wealth)
+    peak = np.maximum.accumulate(np.r_[1.0, wealth])[1:]
     dd = wealth / peak - 1
     return wealth, peak, dd
 
@@ -865,7 +865,13 @@ def drawdown_path(returns: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarr
 wealth, peak, drawdown = drawdown_path(returns)
 max_dd = float(drawdown.min())
 max_dd_idx = int(drawdown.argmin())
-peak_idx = int(np.argmax(wealth[: max_dd_idx + 1]))
+# Index -1 denotes the price observation before the first return.
+peak_idx = int(np.argmax(np.r_[1.0, wealth[: max_dd_idx + 1]])) - 1
+peak_date = (
+    etf_panel.filter(pl.col("symbol") == SYMBOL)["timestamp"].min()
+    if peak_idx == -1
+    else dates[peak_idx]
+)
 recovery_offset = np.where(wealth[max_dd_idx:] >= peak[max_dd_idx])[0]
 recovery_idx = int(max_dd_idx + recovery_offset[0]) if recovery_offset.size else None
 
@@ -882,7 +888,7 @@ drawdown_summary = pl.DataFrame(
         "value": [
             f"{max_dd * 100:.2f}%",
             str(pd.Timestamp(dates[max_dd_idx]).date()),
-            str(pd.Timestamp(dates[peak_idx]).date()),
+            str(pd.Timestamp(peak_date).date()),
             str(pd.Timestamp(dates[recovery_idx]).date())
             if recovery_idx is not None
             else "not recovered in sample",
