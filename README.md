@@ -105,7 +105,7 @@ The workflow this repository implements, taught end to end.
 | Dec 3 – Feb 18, 2027 · Feb 11 – Apr 29, 2027 | [Research to Production](https://maven.com/stefan-jansen/research-to-production?utm_source=github&utm_medium=readme&utm_campaign=r2p&utm_content=readme_offering_research_to_production) | Take one research idea from a question to a costed, monitored strategy, with the evidence trail that makes the result checkable. |
 | Dec 12, 2026 · Jan 23, 2027 | [ML for Trading in the Age of AI Agents](https://maven.com/stefan-jansen/ml4t-ai-agents?promoCode=ML4T-WS-50&utm_source=github&utm_medium=readme&utm_campaign=trading_workshop&utm_content=readme_offering_ml4t_ai_agents) | Work through an ETF strategy from idea to a realistic trading simulation. |
 
-**Free live sessions**, with the recording sent to everyone who registers: [Open-Source Tools for ML Trading Research](https://maven.com/p/bb56cd?utm_source=github&utm_medium=readme&utm_campaign=trading_ll_20261125&utm_content=readme_lesson_bb56cd) (Wed, Nov 25, 11:00 AM ET / 16:00 UTC) · [ML for Trading, 3rd Edition: From Data to AI Agents](https://maven.com/p/71e502?utm_source=github&utm_medium=readme&utm_campaign=lesson_71e502&utm_content=readme_lesson_71e502) (Wed, Dec 23, 11:00 AM ET / 16:00 UTC) · [Build ML for Trading Strategies with AI Agents](https://maven.com/p/f4e7f5?utm_source=github&utm_medium=readme&utm_campaign=lesson_f4e7f5&utm_content=readme_lesson_f4e7f5) (Thu, Jan 21, 11:00 AM ET / 16:00 UTC)
+**Free live sessions**, with the recording sent to everyone who registers: [ML for Trading, 3rd Edition: From Data to AI Agents](https://maven.com/p/71e502?utm_source=github&utm_medium=readme&utm_campaign=lesson_71e502&utm_content=readme_lesson_71e502) (Wed, Dec 23, 11:00 AM ET / 16:00 UTC) · [Build ML for Trading Strategies with AI Agents](https://maven.com/p/f4e7f5?utm_source=github&utm_medium=readme&utm_campaign=lesson_f4e7f5&utm_content=readme_lesson_f4e7f5) (Thu, Jan 21, 11:00 AM ET / 16:00 UTC)
 
 ### Agentic systems
 
@@ -116,8 +116,6 @@ Designing multi-agent systems whose reasoning can be audited.
 | Feb 6, 2027 | [Agent Engineering: Build, Evaluate, and Deploy AI Agents](https://maven.com/stefan-jansen/agent-engineering?utm_source=github&utm_medium=readme&utm_campaign=agent_workshop_20270206&utm_content=readme_offering_agent_engineering) | Go from agent fundamentals to a live multi-agent system, with an evaluation harness that says whether it works. |
 
 **Free live sessions**, with the recording sent to everyone who registers: [How to Evaluate AI Agents: From Traces to Release Decisions](https://maven.com/p/1829d6?utm_source=github&utm_medium=readme&utm_campaign=lesson_1829d6&utm_content=readme_lesson_1829d6) (Thu, Dec 10, 11:00 AM ET / 16:00 UTC) · [How to Build AI Agents with ReAct, Reflection and Planning](https://maven.com/p/c08373?utm_source=github&utm_medium=readme&utm_campaign=lesson_c08373&utm_content=readme_lesson_c08373) (Thu, Jan 7, 11:00 AM ET / 16:00 UTC)
-
-**Free lesson series:** [Build a Research Agent: Decisions, Workflows and Tools](https://maven.com/lls/4a6aef?utm_source=github&utm_medium=readme&utm_campaign=lesson_4a6aef&utm_content=readme_lesson_4a6aef)
 
 *Between cohorts, the [**Insights** newsletter](https://insights.ml4trading.io/?utm_source=github&utm_medium=readme&utm_campaign=ml4t_resources&utm_content=readme_resources_home) covers the same ground weekly, source by source.*
 <!-- offerings:all end -->
