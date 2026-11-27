@@ -152,7 +152,13 @@ def main(argv: list[str]) -> int:
 
     print("notebook/py pairs disagree — JupyterLab will refuse to open these:")
     for nb in desynced:
-        print(f"  {nb.relative_to(REPO_ROOT)}")
+        # A path argument can sit outside the repo (e.g. a PR head extracted to a
+        # scratch dir to reproduce a CI failure). Reporting it must not raise.
+        try:
+            shown = nb.relative_to(REPO_ROOT)
+        except ValueError:
+            shown = nb
+        print(f"  {shown}")
     print(
         "\nReaders see a 'File Load Error' dialog, not a notebook (cf. public #372).\n"
         "Fix: `uv run python .github/scripts/strip_empty_cell_tags.py` if it is empty `tags: []`.\n"
