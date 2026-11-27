@@ -243,10 +243,10 @@ def cornish_fisher_var(returns: np.ndarray, confidence: float = 0.95) -> float:
 #
 # Monte Carlo VaR estimates the loss threshold by simulating future paths from a fitted
 # Student-t distribution. The returns are simple, so a path over `horizon` days compounds
-# multiplicatively and the fit has to respect the -100% floor on a simple return. The fitted
-# Student-t is unbounded below and so does not, which is why the sampler checks its own draws
+# multiplicatively, and a simple return cannot take wealth below zero. The fitted Student-t is
+# unbounded below and so admits draws that would, which is why the sampler checks its own draws
 # rather than compounding whatever it produced. `06_stress_testing` makes the same two
-# commitments for its 20-day horizon.
+# commitments over its multi-day horizon.
 
 
 # %%
