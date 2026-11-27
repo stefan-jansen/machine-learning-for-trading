@@ -242,7 +242,11 @@ def cornish_fisher_var(returns: np.ndarray, confidence: float = 0.95) -> float:
 # ### Monte Carlo VaR
 #
 # Monte Carlo VaR estimates the loss threshold by simulating future paths from a fitted
-# Student-t distribution.
+# Student-t distribution. The returns are simple, so a path over `horizon` days compounds
+# multiplicatively, and a simple return cannot take wealth below zero. The fitted Student-t is
+# unbounded below and so admits draws that would, which is why the sampler checks its own draws
+# rather than compounding whatever it produced. `06_stress_testing` makes the same two
+# commitments over its multi-day horizon.
 
 
 # %%
@@ -253,11 +257,23 @@ def monte_carlo_var(
     horizon: int = 1,
     seed: int = SEED,
 ) -> float:
-    """Monte Carlo VaR by sampling from a fitted Student-t."""
+    """Monte Carlo VaR by sampling from a fitted Student-t.
+
+    The returns are simple, so a path compounds as $\\prod_t (1 + r_t) - 1$ rather than summing.
+    The two agree to rounding at `horizon=1` and diverge as the horizon grows.
+    """
     df, loc, scale = stats.t.fit(returns)
     rng = np.random.default_rng(seed)
     simulated = rng.standard_t(df, size=(n_simulations, horizon)) * scale + loc
-    cumulative = simulated.sum(axis=1)
+    support_violations = int((simulated <= -1).sum())
+    if support_violations:
+        raise ValueError(
+            f"Student-t sampled {support_violations} simple returns at or below -100%: "
+            f"a t fitted with df={df:.2f} puts mass below the floor on a simple return, so "
+            f"{n_simulations:,} paths of {horizon} days cannot all be compounded. Fit the "
+            f"distribution to log returns, or shorten the horizon."
+        )
+    cumulative = np.prod(1 + simulated, axis=1) - 1
     alpha = 1 - confidence
     return -np.percentile(cumulative, alpha * 100)
 
